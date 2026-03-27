@@ -1,0 +1,16 @@
+[package]
+name = "lucy-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lucy-state = { path = "../lucy-state" }
+lucy-io = { path = "../lucy-io" }
+tokio = { workspace = true }
+rand = { workspace = true }
+smallvec = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }

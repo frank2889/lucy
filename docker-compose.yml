@@ -1,0 +1,20 @@
+services:
+  lucy:
+    build: .
+    container_name: lucy
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - lucy-data:/lucy/data
+      - lucy-modules:/lucy/modules
+    environment:
+      - RUST_LOG=info
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+volumes:
+  lucy-data:
+  lucy-modules:

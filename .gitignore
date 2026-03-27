@@ -1,0 +1,6 @@
+/target
+.env
+data/lucy.snapshot
+data/lucy_journal.log
+modules/*.dylib
+modules/*.so
