@@ -1,8 +1,11 @@
+mod claude;
 mod compute;
 mod field;
 mod growth;
 mod io_bridge;
 mod meta;
+mod proxy;
+mod qa_store;
 mod server;
 
 use lucy_io::config::Config;
@@ -14,6 +17,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 const SNAPSHOT_PATH: &str = "data/lucy.snapshot";
+const QA_STORE_PATH: &str = "data/qa_store.bincode";
 const SNAPSHOT_INTERVAL: u64 = 10_000;
 const LEARN_INTERVAL: u64 = 100;
 const GROWTH_INTERVAL: u64 = 10_000;
@@ -33,8 +37,9 @@ async fn main() {
     let root = PathBuf::from(".");
     let fs = FileSystem::new(root.clone());
     let snapshot_path = Path::new(SNAPSHOT_PATH);
+    let qa_path = Path::new(QA_STORE_PATH);
 
-    // Boot: laad snapshot of bootstrap vanuit source code
+    // Boot: laad snapshot of bootstrap
     let mut field = if snapshot_path.exists() {
         match Field::load(snapshot_path) {
             Ok(f) => {
@@ -51,11 +56,21 @@ async fn main() {
         bootstrap_fresh(&fs)
     };
 
-    // Configuratie
+    // Laad QA store
+    let qa_store = if qa_path.exists() {
+        qa_store::QaStore::load(qa_path).unwrap_or_else(|e| {
+            tracing::warn!(%e, "Failed to load QA store, starting fresh");
+            qa_store::QaStore::new()
+        })
+    } else {
+        qa_store::QaStore::new()
+    };
+
+    // Config
     let config = Config::from_env();
 
     // I/O Bridge
-    let mut io = io_bridge::IoBridge::new(FileSystem::new(root.clone()), config);
+    let mut io = io_bridge::IoBridge::new(FileSystem::new(root.clone()), config.clone());
 
     // Eerste zelf-lezing
     let self_data = io.read_self();
@@ -63,23 +78,26 @@ async fn main() {
     io.feed_sensory_input(&mut field, &self_data[..n_self]);
     tracing::info!(chunks = n_self, "Initial self-read complete");
 
-    // Gedeelde state voor API server
-    let shared_field: server::SharedField = Arc::new(RwLock::new(field));
+    // Gedeelde state
+    let shared_state = Arc::new(server::AppState {
+        field: Arc::new(RwLock::new(field)),
+        qa_store: Arc::new(RwLock::new(qa_store)),
+        config: Arc::new(config),
+    });
 
-    // Start API server op achtergrond
-    server::spawn_server(shared_field.clone());
+    // Start API server
+    server::spawn_server(shared_state.clone());
 
-    tracing::info!("Lucy is alive. Tick loop + API server starting.");
+    tracing::info!("Lucy is alive. Tick loop + API server running.");
 
-    // === DE TICK LOOP — Lucy's hartslag ===
+    // === TICK LOOP ===
     let mut tick_timer = Instant::now();
 
     loop {
-        // Lock het veld voor deze tick
-        let mut field = shared_field.write().await;
+        let mut field = shared_state.field.write().await;
         let tick = field.tick;
 
-        // 1. Actieve punten: bereken ε, update Φ, update M
+        // 1. Veldberekeningen
         let self_input = compute::self_state_input(&field);
         let active: Vec<u32> = field.active_set.clone();
 
@@ -110,7 +128,7 @@ async fn main() {
             }
         }
 
-        // 4. Energie management
+        // 4. Energie
         growth::manage_energy(&mut field);
 
         // 5. Leren
@@ -150,25 +168,19 @@ async fn main() {
                     / field.active_set.len() as f32
             } else { 0.0 };
 
-            let avg_energy: f32 = if !field.active_set.is_empty() {
-                field.active_set.iter().map(|&id| field.points[id as usize].energy).sum::<f32>()
-                    / field.active_set.len() as f32
-            } else { 0.0 };
-
+            let qa = shared_state.qa_store.read().await;
             tracing::info!(
                 tick,
-                points = field.points.len(),
                 active = field.active_set.len(),
-                avg_tension = format!("{:.4}", avg_tension),
-                avg_energy = format!("{:.4}", avg_energy),
-                ticks_per_sec = format!("{:.0}", ticks_per_sec),
-                balance_cents = field.economy.balance_cents,
-                profitable = field.economy.is_profitable(),
+                tension = format!("{:.4}", avg_tension),
+                tps = format!("{:.0}", ticks_per_sec),
+                balance = field.economy.balance_cents,
+                knowledge = qa.pairs.len(),
                 "heartbeat"
             );
         }
 
-        // 8. I/O: motor output
+        // 8. I/O
         if tick % IO_INTERVAL == 0 {
             let actions = io.check_motor_output(&field);
             if !actions.is_empty() {
@@ -183,19 +195,20 @@ async fn main() {
             io.feed_sensory_input(&mut field, &self_data[..n]);
         }
 
-        // 10. Snapshot
+        // 10. Snapshot + QA store save
         if tick % SNAPSHOT_INTERVAL == 0 && tick > 0 {
             if let Err(e) = field.save(snapshot_path) {
                 tracing::error!(%e, "Snapshot save failed");
             }
+            let qa = shared_state.qa_store.read().await;
+            if let Err(e) = qa.save(qa_path) {
+                tracing::error!(%e, "QA store save failed");
+            }
         }
 
         field.tick += 1;
-
-        // Drop de lock zodat API server ertussen kan
         drop(field);
 
-        // Yield naar tokio (API requests kunnen nu verwerkt worden)
         if tick % 10 == 0 {
             tokio::task::yield_now().await;
         }
@@ -222,8 +235,7 @@ fn bootstrap_fresh(fs: &FileSystem) -> Field {
 
         let n = field.points.len();
         for i in 0..n {
-            let n_connections = rng.gen_range(2..8);
-            for _ in 0..n_connections {
+            for _ in 0..rng.gen_range(2..8) {
                 let target = rng.gen_range(0..n);
                 if target != i {
                     field.points[i].couplings.push(Coupling {

@@ -160,6 +160,7 @@ pub const FLAG_INHIBITORY: u8 = 1 << 1;
 pub const FLAG_GROWING: u8 = 1 << 2;
 pub const FLAG_MOTOR: u8 = 1 << 3;
 pub const FLAG_SENSORY: u8 = 1 << 4;
+pub const FLAG_PROXY: u8 = 1 << 5;
 
 impl FieldPoint {
     pub fn new() -> Self {

@@ -12,5 +12,7 @@ smallvec = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
+bincode = { workspace = true }
