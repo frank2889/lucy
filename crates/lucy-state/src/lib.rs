@@ -1,20 +1,80 @@
+//! # lucy-state — Lucy's Gedeelde Velddatastructuren
+//!
+//! Dit is het hart van Lucy's geheugen en identiteit. Alle datastructuren die
+//! het samenveld (unified field) definiëren staan hier: veldpunten, koppelingen,
+//! energie-economie, en de volledige veldstaat.
+//!
+//! ## Architectuur
+//!
+//! Lucy's brein is een **samenveld** van ~2176 punten:
+//! - **64 input-punten** — ontvangen sensorische data (tekst-embeddings)
+//! - **2048 hidden-punten** — het denkvermogen (small-world netwerk)
+//! - **64 output-punten** — produceren antwoorden
+//!
+//! Elk punt bevat:
+//! - **Φ (phi)** — 64-dimensionale toestandsvector ("wat dit punt nu denkt")
+//! - **P (prediction)** — voorspelling van vorige tick (voor prediction error)
+//! - **M (memory)** — exponentieel gewogen gemiddelde van prediction errors
+//! - **W (couplings)** — gewogen verbindingen naar andere punten (sparse, signed)
+//! - **η (eta)** — lokale leersnelheid (past zichzelf aan via meta-leren)
+//! - **energie** — beperkte resource; op = inactief
+//! - **spanning** — maat van "onzekerheid" = prediction_error + kosten - empowerment
+//!
+//! ## Leeralgoritme
+//!
+//! Lucy leert via **Equilibrium Propagation** (Scellier & Bengio, 2017):
+//! - Geen backpropagation — alleen lokale informatie
+//! - Biologisch plausibel: elk punt ziet alleen zijn buren
+//! - Twee fasen: vrij (input geklemd) en geklemd (input + output)
+//! - Gewichtupdate = verschil in correlaties tussen fasen
+//!
+//! ## Serialisatie
+//!
+//! Alle structuren zijn serialiseerbaar via `bincode` voor snelle snapshots.
+//! `[f32; 64]` arrays gebruiken `serde-big-array` omdat serde standaard
+//! arrays tot max 32 elementen ondersteunt.
+//!
+//! ## Crate-scheiding
+//!
+//! `lucy-state` is bewust los van `lucy-core` zodat:
+//! - `lucy-io` de veldstaat kan refereren zonder circulaire dependencies
+//! - de veldstaat serialiseerbaar blijft zonder compile-time afhankelijkheid van de logica
+
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use smallvec::SmallVec;
+use std::collections::HashMap;
 use std::path::Path;
 
-/// Dimensionaliteit van het veld — Lucy kan dit later veranderen via code-modificatie
-pub const DIM: usize = 16;
+/// Dimensionaliteit van elke veldvector (Φ, P, M, embeddings).
+/// 64 is gekozen als balans: groot genoeg voor expressiviteit,
+/// klein genoeg voor snelheid op een $6/maand server.
+pub const DIM: usize = 64;
+
+/// Fase waarin het veld zich bevindt
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FieldPhase {
+    /// Achtergrond dynamica — veld draait vrij
+    Idle,
+    /// Verwerkt een query — input geklemd, veld settlet
+    Processing,
+    /// Leert van een voorbeeld — input+output geklemd (equilibrium propagation)
+    Learning,
+}
 
 /// Eén punt in het samenveld — bevat Φ (staat), W (koppelingen), M (geheugen)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldPoint {
     // Φ — veldtoestand (het "denken")
+    #[serde(with = "BigArray")]
     pub phi: [f32; DIM],
 
     // P — voorspelling van vorige tick (voor prediction error)
+    #[serde(with = "BigArray")]
     pub prediction: [f32; DIM],
 
     // M — geheugen (geaccumuleerde prediction errors)
+    #[serde(with = "BigArray")]
     pub memory: [f32; DIM],
 
     // W — koppelingen naar andere punten (sparse, signed)
@@ -108,7 +168,7 @@ impl Economy {
     }
 }
 
-/// Het volledige veld — Lucy's "brein"
+/// Het volledige veld — Lucy's brein
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Field {
     /// Alle veldpunten
@@ -126,33 +186,46 @@ pub struct Field {
     /// Lucy's economie
     pub economy: Economy,
 
-    /// κ — compute-kosten coëfficiënt (maakt inefficiëntie voelbaar)
+    /// Huidige fase
+    #[serde(default = "default_phase")]
+    pub phase: FieldPhase,
+
+    /// Actieve clamps: punt-ID → geforceerde phi waarde
+    /// Alleen gevuld tijdens Processing/Learning fase
+    #[serde(skip)]
+    pub clamps: HashMap<u32, Vec<f32>>,
+
+    /// Indices van input-regio punten (cache)
+    #[serde(default)]
+    pub input_ids: Vec<u32>,
+
+    /// Indices van output-regio punten (cache)
+    #[serde(default)]
+    pub output_ids: Vec<u32>,
+
+    // === Hyperparameters ===
+
+    /// κ — compute-kosten coëfficiënt
     pub kappa: f32,
-
-    /// ω — empowerment coëfficiënt (drijft agency)
+    /// ω — empowerment coëfficiënt
     pub omega: f32,
-
     /// λ — veld-update schaalfactor
     pub lambda: f32,
-
     /// β — input schaalfactor
     pub beta: f32,
-
     /// α — sparse penalty sterkte
     pub alpha: f32,
-
     /// ρ — geheugen vervalsnelheid
     pub rho: f32,
-
     /// μ — momentum coëfficiënt voor W-update
     pub mu: f32,
-
     /// Tension drempel voor groei
     pub growth_threshold: f32,
-
     /// EMA decay voor vastloop-detectie
     pub ema_decay: f32,
 }
+
+fn default_phase() -> FieldPhase { FieldPhase::Idle }
 
 // === Bitflag constanten ===
 pub const FLAG_ACTIVE: u8 = 1 << 0;
@@ -161,6 +234,8 @@ pub const FLAG_GROWING: u8 = 1 << 2;
 pub const FLAG_MOTOR: u8 = 1 << 3;
 pub const FLAG_SENSORY: u8 = 1 << 4;
 pub const FLAG_PROXY: u8 = 1 << 5;
+pub const FLAG_INPUT: u8 = 1 << 6;   // Input-poort voor veld-inferentie
+pub const FLAG_OUTPUT: u8 = 1 << 7;  // Output-poort voor veld-inferentie
 
 impl FieldPoint {
     pub fn new() -> Self {
@@ -196,10 +271,19 @@ impl FieldPoint {
     pub fn is_sensory(&self) -> bool {
         self.flags & FLAG_SENSORY != 0
     }
+
+    #[inline]
+    pub fn is_input(&self) -> bool {
+        self.flags & FLAG_INPUT != 0
+    }
+
+    #[inline]
+    pub fn is_output(&self) -> bool {
+        self.flags & FLAG_OUTPUT != 0
+    }
 }
 
 impl Field {
-    /// Maak een nieuw leeg veld met standaard hyperparameters
     pub fn new() -> Self {
         Self {
             points: Vec::new(),
@@ -207,16 +291,32 @@ impl Field {
             tick: 0,
             total_energy: 1000.0,
             economy: Economy::new(),
-            kappa: 0.001,    // compute-kosten voelbaar maar niet overweldigend
-            omega: 0.01,     // empowerment drive
-            lambda: 0.1,     // veld-update snelheid
-            beta: 0.5,       // input sterkte
-            alpha: 0.001,    // sparse penalty (licht)
-            rho: 0.95,       // geheugen verval (langzaam)
-            mu: 0.9,         // momentum (hoog)
+            phase: FieldPhase::Idle,
+            clamps: HashMap::new(),
+            input_ids: Vec::new(),
+            output_ids: Vec::new(),
+            kappa: 0.001,
+            omega: 0.01,
+            lambda: 0.1,
+            beta: 0.5,
+            alpha: 0.001,
+            rho: 0.95,
+            mu: 0.9,
             growth_threshold: 0.5,
             ema_decay: 0.99,
         }
+    }
+
+    /// Cache input/output punt IDs
+    pub fn cache_io_ids(&mut self) {
+        self.input_ids = self.points.iter().enumerate()
+            .filter(|(_, p)| p.is_input())
+            .map(|(i, _)| i as u32)
+            .collect();
+        self.output_ids = self.points.iter().enumerate()
+            .filter(|(_, p)| p.is_output())
+            .map(|(i, _)| i as u32)
+            .collect();
     }
 
     /// Rebuild de active_set op basis van flags

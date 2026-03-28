@@ -3,7 +3,8 @@ services:
     build: .
     container_name: lucy
     restart: unless-stopped
-    env_file: .env
+    ports:
+      - "3000:3000"
     volumes:
       - lucy-data:/lucy/data
       - lucy-modules:/lucy/modules

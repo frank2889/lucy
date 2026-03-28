@@ -1,6 +1,25 @@
+//! # fs — Lucy's Filesystem Interface
+//!
+//! Alle interactie met het lokale bestandssysteem gaat via dit module.
+//! Dit geeft Lucy de mogelijkheid om:
+//!
+//! - Haar eigen source code te lezen (bootstrap zelf-leren)
+//! - Data bestanden te lezen/schrijven (snapshots, vocabulaire)
+//! - Directory structuren te verkennen
+//!
+//! ## Zelf-Lezing
+//!
+//! `read_own_source()` verzamelt recursief alle `.rs` en `.toml` bestanden
+//! in Lucy's workspace. Dit is het eerste wat Lucy leest bij first boot:
+//! haar eigen code. Ze leert taalpatronen uit Rust syntax EN absorbeert
+//! woorden als interesses voor toekomstige web-exploratie.
+//!
+//! Directories `target/`, `.git/`, en `modules/` worden overgeslagen
+//! (build artifacts, git history, externe modules zijn geen zinvolle leerstof).
+
 use std::path::{Path, PathBuf};
 
-/// Lucy's filesystem interface — lezen/schrijven van eigen code, data, geheugen
+/// Lucy's filesystem interface — lezen/schrijven van eigen code, data, geheugen.
 pub struct FileSystem {
     /// Root directory van Lucy's workspace
     pub root: PathBuf,

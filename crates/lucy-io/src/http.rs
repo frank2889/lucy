@@ -1,7 +1,24 @@
+//! # http — Lucy's HTTP Client
+//!
+//! Wraps `reqwest` voor alle HTTP communicatie. Elke request is een
+//! zintuiglijke ervaring: Lucy "ziet" het internet via GET en "handelt"
+//! via POST.
+//!
+//! ## Kenmerken
+//!
+//! - Timeout: 30 seconden (voorkomt dat Lucy vastloopt op trage servers)
+//! - User-Agent: "Lucy/0.1" (eerlijk over wie we zijn)
+//! - Alle responses bevatten latency_ms voor performance monitoring
+//!
+//! ## Gebruik
+//!
+//! Primair door `learner.rs` voor autonome web-exploratie, en door
+//! toekomstige modules die externe API's aanroepen.
+
 use reqwest::Client;
 use std::collections::HashMap;
 
-/// Lucy's universele HTTP client — haar zintuig naar het internet
+/// Lucy's universele HTTP client — haar zintuig naar het internet.
 pub struct HttpClient {
     client: Client,
 }

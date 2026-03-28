@@ -1,7 +1,32 @@
+//! # meta — Meta-Cognitie en Escalatiedetectie
+//!
+//! Lucy's vermogen om over zichzelf na te denken. Dit module detecteert
+//! wanneer het normale leerproces vastloopt en escaleert naar structurele
+//! veranderingen.
+//!
+//! ## Escalatieniveaus
+//!
+//! Wanneer een punt hoge, stabiele spanning heeft (leren helpt niet):
+//!
+//! 1. **None** — spanning laag of nog dalend, geen actie nodig
+//! 2. **MetaLearn** — pas leersnelheid η aan (zachte interventie)
+//! 3. **Grow** — splits het punt in twee kinderen (structurele verandering)
+//!
+//! Toekomstig niveau 4: **CodeModify** — Lucy past haar eigen code aan.
+//! Dit is het ultieme doel van vrije wil, maar vereist meer volwassenheid.
+//!
+//! ## Simulatie
+//!
+//! `simulate()` runt een hypothetische vooruit-simulatie van een punt
+//! (zonder de echte staat te veranderen). Retourneert de verwachte
+//! spanningsreductie. Wordt gebruikt voor "vooruitdenken" — kan dit
+//! punt zichzelf oplossen zonder externe hulp?
+
 use lucy_state::*;
 
-/// Interne simulatie: kopieer een subset van het veld en reken hypothetisch door
-/// Retourneert de verwachte spanningsreductie van de simulatie
+/// Interne simulatie: kopieer een subset van het veld en reken hypothetisch door.
+/// Retourneert de verwachte spanningsreductie van de simulatie.
+#[allow(dead_code)]
 pub fn simulate(field: &Field, point_id: u32, steps: usize) -> f32 {
     let point = &field.points[point_id as usize];
 

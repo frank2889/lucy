@@ -1,10 +1,48 @@
+//! # growth — Veldgroei, Meta-Leren en Energie-Economie
+//!
+//! Lucy's brein groeit en past zich aan. Dit module beheert drie processen:
+//!
+//! ## 1. Groei (maybe_grow)
+//!
+//! Als een punt persistent hoge spanning heeft en leren niet helpt,
+//! wordt het gesplitst in twee kindpunten:
+//! - Φ wordt geperturbeerd (±0.1 per dimensie) voor diversiteit
+//! - Energie wordt gehalveerd (mitose-analogie)
+//! - Spanning-EMA wordt gereset (schone lei)
+//! - Kinderen worden onderling gekoppeld
+//!
+//! Hierna worden "dode" koppelingen (gewicht < 0.001) verwijderd (pruning).
+//!
+//! ## 2. Meta-Leren (maybe_meta_learn)
+//!
+//! Als spanning hoog maar stabiel is, past Lucy haar leersnelheid η aan:
+//! - Spanning stijgt → η omhoog (sneller leren)
+//! - Spanning stabiel → η omlaag (fijnere aanpassing)
+//! - Bereik: 0.0001 ≤ η ≤ 0.1
+//!
+//! Dit is "leren hoe te leren" — elk punt optimaliseert zijn eigen leersnelheid.
+//!
+//! ## 3. Energie Management (manage_energy)
+//!
+//! Elk punt heeft beperkte energie — een metabolisme-analogie:
+//! - **Kosten**: actief zijn kost 0.0001 per tick
+//! - **Beloning**: dalende spanning (goede voorspelling) geeft energie terug
+//! - **Sensorisch inkomen**: input-punten krijgen externe energie (0.005/tick)
+//! - **Energie-pool**: gedeelde reserve die langzaam verdeeld wordt
+//! - **Deactivatie**: punten op 0 energie worden inactief, geven energie terug aan pool
+//! - **Propagatie**: hoge spanning activeert inactieve buren (rekrutering)
+//! - **Spontane reactivatie**: als <10% actief, worden random punten gewekt
+//!
+//! Dit systeem voorkomt ongecontroleerde groei en dwingt efficiëntie af:
+//! punten die niet bijdragen sterven uit, punten die nodig zijn worden geactiveerd.
+
 use lucy_state::*;
 use rand::Rng;
 
-/// Groei: splits veldpunten waar spanning persistent hoog is en leren niet helpt
+/// Groei: splits veldpunten waar spanning persistent hoog is en leren niet helpt.
 pub fn maybe_grow(field: &mut Field) {
     let threshold = field.growth_threshold;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut new_points: Vec<(usize, FieldPoint, FieldPoint)> = Vec::new();
 
     for &id in &field.active_set {
@@ -22,7 +60,7 @@ pub fn maybe_grow(field: &mut Field) {
 
             // Perturbatie voor diversiteit
             for d in 0..DIM {
-                let delta = rng.gen_range(-0.1..0.1);
+                let delta = rng.random_range(-0.1..0.1);
                 child_a.phi[d] += delta;
                 child_b.phi[d] -= delta;
             }
@@ -51,12 +89,12 @@ pub fn maybe_grow(field: &mut Field) {
         // Koppel de twee kinderen aan elkaar
         field.points[original_id].couplings.push(Coupling {
             target: new_id,
-            weight: rng.gen_range(-0.3..0.3),
+            weight: rng.random_range(-0.3..0.3),
             momentum: 0.0,
         });
         field.points[new_id as usize].couplings.push(Coupling {
             target: original_id as u32,
-            weight: rng.gen_range(-0.3..0.3),
+            weight: rng.random_range(-0.3..0.3),
             momentum: 0.0,
         });
 
@@ -176,11 +214,11 @@ pub fn manage_energy(field: &mut Field) {
     let active_ratio = field.active_set.len() as f32 / field.points.len().max(1) as f32;
     if active_ratio < 0.1 {
         // Minder dan 10% actief → wakker punten met meeste restenergie
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         use rand::Rng;
         let n_wake = (field.points.len() / 20).max(5); // wakker ~5% of minstens 5
         for _ in 0..n_wake {
-            let idx = rng.gen_range(0..field.points.len());
+            let idx = rng.random_range(0..field.points.len());
             if !field.points[idx].is_active() {
                 field.points[idx].energy = 0.5;
                 field.points[idx].flags |= FLAG_ACTIVE;

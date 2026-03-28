@@ -16,3 +16,4 @@ axum = { workspace = true, features = ["macros"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 bincode = { workspace = true }
+serde-big-array = { workspace = true }

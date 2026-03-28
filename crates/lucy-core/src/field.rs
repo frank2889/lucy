@@ -1,68 +1,153 @@
+//! # field — Veld Bootstrap met Small-World Topologie
+//!
+//! Creëert Lucy's initiële breinstructuur: een Watts-Strogatz small-world
+//! netwerk van 2176 punten (64 input + 2048 hidden + 64 output).
+//!
+//! ## Small-World Netwerk (Watts & Strogatz, 1998)
+//!
+//! De hidden-regio is georganiseerd als een ring met twee soorten verbindingen:
+//!
+//! - **Lokaal**: elke node verbonden met K/2=8 buren links en rechts
+//!   → dichte lokale clusters voor gedetailleerde berekeningen
+//! - **Long-range**: 5% kans op willekeurige verre verbinding
+//!   → korte padlengtes voor snelle informatie-propagatie
+//!
+//! Dit geeft het beste van twee werelden: lokale specialisatie + globale integratie.
+//! Vergelijkbaar met de neocortex: kolommen (lokaal) + witte stof (long-range).
+//!
+//! ## Regio's en Connectiviteit
+//!
+//! ```text
+//! Input (0..63) →→ eerste kwart Hidden (64..575)
+//!                         ↕ (small-world ring)
+//!                   Hidden (64..2111)
+//!                         ↕ (small-world ring)
+//!                   laatste kwart Hidden (1600..2111) →→ Output (2112..2175)
+//!                                                    ←← (bidirectioneel)
+//! ```
+//!
+//! - Input → Hidden: 32 verbindingen per input-punt naar eerste kwart
+//! - Hidden ↔ Hidden: K=16 lokale buren + rare long-range shortcuts
+//! - Hidden → Output: 32 bidirectionele verbindingen vanuit laatste kwart
+//! - Recurrente loops: ~205 willekeurige bidirectionele feedback-paden
+//!
+//! ## Inhibitie
+//!
+//! 20% van hidden-punten is inhibitorisch (negatieve gewichten).
+//! Dit zorgt voor competitie en voorkomt dat alle punten hetzelfde berekenen.
+//! Vergelijkbaar met GABAergische interneuronen in de hersenen.
+//!
+//! ## Initialisatie
+//!
+//! - Φ: uniform random [-0.1, 0.1] (symmetrie-breking)
+//! - η: uniform random [0.005, 0.02] (diversiteit in leersnelheid)
+//! - Gewichten: uniform random, bereik hangt af van verbindingstype
+//! - Energie: input/output = 5.0 (hoog, altijd actief), hidden = 1.0
+
 use lucy_state::*;
 use rand::Rng;
 
-/// Initialiseer het veld intelligent vanuit Lucy's eigen source code
-pub fn bootstrap_from_source(sources: &[(std::path::PathBuf, String)]) -> Field {
+/// Aantal input-punten — gelijk aan DIM voor 1:1 mapping met embeddings
+const N_INPUT: usize = 64;
+/// Aantal hidden-punten — het denkvermogen. 2048 geeft ~70K koppelingen.
+const N_HIDDEN: usize = 2048;
+/// Aantal output-punten — gelijk aan DIM voor decodering via dot product
+const N_OUTPUT: usize = 64;
+/// Watts-Strogatz K parameter: elke node verbonden met K dichtstbijzijnde buren
+const LOCAL_K: usize = 16;
+/// Kans op long-range verbinding per slot (small-world shortcut)
+const LONG_RANGE_P: f32 = 0.05;
+/// Fractie inhibitorische punten (negatieve gewichten)
+const INHIBITORY_FRAC: f32 = 0.2;
+
+// Helper functies voor rand 0.9 API (edition 2024 reserveert `gen` keyword)
+fn rng_f32(rng: &mut impl Rng) -> f32 { rng.random::<f32>() }
+fn rng_range(rng: &mut impl Rng, lo: f32, hi: f32) -> f32 { rng.random_range(lo..hi) }
+fn rng_usize(rng: &mut impl Rng, lo: usize, hi: usize) -> usize { rng.random_range(lo..hi) }
+
+/// Creëer een vers veld met small-world topologie.
+/// Dit wordt aangeroepen bij eerste start of als snapshot corrupt is.
+pub fn bootstrap_field() -> Field {
     let mut field = Field::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
-    // Tel totale functies/structuren als basis voor topologie
-    let mut clusters: Vec<(String, usize)> = Vec::new(); // (naam, startindex)
+    let total = N_INPUT + N_HIDDEN + N_OUTPUT;
+    field.points.reserve(total);
 
-    for (path, content) in sources {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
+    // Input regio
+    for _ in 0..N_INPUT {
+        let mut p = FieldPoint::new();
+        p.flags = FLAG_ACTIVE | FLAG_INPUT | FLAG_SENSORY;
+        p.energy = 5.0;
+        field.points.push(p);
+    }
 
-        // Elke functie/struct = een cluster van veldpunten
-        let mut item_name;
+    // Hidden regio
+    for _ in 0..N_HIDDEN {
+        let mut p = FieldPoint::new();
+        p.flags = FLAG_ACTIVE;
+        for d in 0..DIM {
+            p.phi[d] = rng_range(&mut rng, -0.1, 0.1);
+        }
+        if rng_f32(&mut rng) < INHIBITORY_FRAC {
+            p.flags |= FLAG_INHIBITORY;
+        }
+        p.energy = 1.0;
+        p.eta = rng_range(&mut rng, 0.005, 0.02);
+        field.points.push(p);
+    }
 
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub struct ")
-                || trimmed.starts_with("struct ")
-                || trimmed.starts_with("impl ")
-            {
-                // Nieuwe functie/struct gevonden
-                item_name = format!("{}::{}", file_name, trimmed.split('(').next()
-                    .unwrap_or(trimmed).split('{').next().unwrap_or(trimmed).trim());
-                let start_idx = field.points.len();
-                clusters.push((item_name.clone(), start_idx));
+    // Output regio
+    for _ in 0..N_OUTPUT {
+        let mut p = FieldPoint::new();
+        p.flags = FLAG_ACTIVE | FLAG_OUTPUT | FLAG_MOTOR;
+        p.energy = 5.0;
+        field.points.push(p);
+    }
 
-                // Creëer ~10 veldpunten per functie
-                let cluster_size = 10;
-                for i in 0..cluster_size {
-                    let mut point = FieldPoint::new();
+    let hidden_start = N_INPUT;
+    let output_start = N_INPUT + N_HIDDEN;
 
-                    // Seed phi vanuit de source code bytes (niet random!)
-                    let bytes = item_name.as_bytes();
-                    for d in 0..DIM {
-                        let byte_idx = (i * DIM + d) % bytes.len().max(1);
-                        point.phi[d] = (bytes[byte_idx] as f32 / 255.0) * 2.0 - 1.0;
-                        // Voeg lichte perturbatie toe voor diversiteit
-                        point.phi[d] += rng.gen_range(-0.1..0.1);
-                    }
-
-                    point.energy = 1.0;
-                    field.points.push(point);
-                }
-            }
+    // Input → eerste kwart hidden
+    for i in 0..N_INPUT {
+        for _ in 0..32 {
+            let target = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN / 4);
+            field.points[i].couplings.push(Coupling {
+                target: target as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+            });
         }
     }
 
-    // Creëer koppelingen BINNEN clusters (dicht verbonden)
-    for (_, start_idx) in &clusters {
-        let cluster_end = (*start_idx + 10).min(field.points.len());
-        for i in *start_idx..cluster_end {
-            for j in *start_idx..cluster_end {
-                if i != j && rng.gen_bool(0.5) {
-                    let weight = rng.gen_range(-0.5..0.5); // signed!
-                    field.points[i].couplings.push(Coupling {
-                        target: j as u32,
-                        weight,
+    // Hidden: Watts-Strogatz small-world
+    for i in 0..N_HIDDEN {
+        let idx = hidden_start + i;
+        let is_inhib = field.points[idx].is_inhibitory();
+
+        for k in 1..=LOCAL_K / 2 {
+            let left = hidden_start + (i + N_HIDDEN - k) % N_HIDDEN;
+            let right = hidden_start + (i + k) % N_HIDDEN;
+            let w = if is_inhib {
+                rng_range(&mut rng, -0.5, -0.1)
+            } else {
+                rng_range(&mut rng, 0.1, 0.5)
+            };
+            field.points[idx].couplings.push(Coupling {
+                target: left as u32, weight: w, momentum: 0.0,
+            });
+            field.points[idx].couplings.push(Coupling {
+                target: right as u32, weight: w * 0.8, momentum: 0.0,
+            });
+        }
+
+        for _ in 0..4 {
+            if rng_f32(&mut rng) < LONG_RANGE_P {
+                let far = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
+                if far != idx {
+                    field.points[idx].couplings.push(Coupling {
+                        target: far as u32,
+                        weight: rng_range(&mut rng, -0.2, 0.2),
                         momentum: 0.0,
                     });
                 }
@@ -70,57 +155,52 @@ pub fn bootstrap_from_source(sources: &[(std::path::PathBuf, String)]) -> Field 
         }
     }
 
-    // Creëer koppelingen TUSSEN clusters (spaarzaam — zoals long-range verbindingen)
-    for i in 0..clusters.len() {
-        for j in 0..clusters.len() {
-            if i != j && rng.gen_bool(0.1) {
-                // Verbind een random punt uit cluster i met een random punt uit cluster j
-                let src_start = clusters[i].1;
-                let dst_start = clusters[j].1;
-                let src = src_start + rng.gen_range(0..10.min(field.points.len() - src_start));
-                let dst = dst_start + rng.gen_range(0..10.min(field.points.len() - dst_start));
-
-                let weight = rng.gen_range(-0.3..0.3);
-                field.points[src].couplings.push(Coupling {
-                    target: dst as u32,
-                    weight,
-                    momentum: 0.0,
-                });
-            }
+    // Laatste kwart hidden → Output
+    let last_q = hidden_start + N_HIDDEN * 3 / 4;
+    for i in 0..N_OUTPUT {
+        let oidx = output_start + i;
+        for _ in 0..32 {
+            let source = last_q + rng_usize(&mut rng, 0, N_HIDDEN / 4);
+            field.points[oidx].couplings.push(Coupling {
+                target: source as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+            });
+            field.points[source].couplings.push(Coupling {
+                target: oidx as u32,
+                weight: rng_range(&mut rng, -0.15, 0.15),
+                momentum: 0.0,
+            });
         }
     }
 
-    // Markeer eerste ~5% als sensorische punten, laatste ~5% als motor punten
-    let n = field.points.len();
-    let sensory_end = n / 20;
-    let motor_start = n - n / 20;
-
-    for i in 0..sensory_end {
-        field.points[i].flags |= FLAG_SENSORY;
-    }
-    for i in motor_start..n {
-        field.points[i].flags |= FLAG_MOTOR;
-    }
-
-    // ~20% inhibitory (zoals het echte brein)
-    for point in &mut field.points {
-        if rng.gen_bool(0.2) {
-            point.flags |= FLAG_INHIBITORY;
-            // Inhibitory punten hebben negatieve gewichten
-            for c in &mut point.couplings {
-                c.weight = -c.weight.abs();
-            }
+    // Recurrente feedback loops
+    for _ in 0..N_HIDDEN / 10 {
+        let a = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
+        let b = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
+        if a != b {
+            let w = rng_range(&mut rng, -0.1, 0.1);
+            field.points[a].couplings.push(Coupling {
+                target: b as u32, weight: w, momentum: 0.0,
+            });
+            field.points[b].couplings.push(Coupling {
+                target: a as u32, weight: w * 0.5, momentum: 0.0,
+            });
         }
     }
 
-    field.total_energy = n as f32;
+    field.total_energy = total as f32;
     field.rebuild_active_set();
+    field.cache_io_ids();
 
+    let n_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
     tracing::info!(
-        points = n,
-        clusters = clusters.len(),
-        active = field.active_set.len(),
-        "Field bootstrapped from source code"
+        points = total,
+        input = N_INPUT,
+        hidden = N_HIDDEN,
+        output = N_OUTPUT,
+        couplings = n_couplings,
+        "Field bootstrapped"
     );
 
     field
