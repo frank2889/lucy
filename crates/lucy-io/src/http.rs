@@ -60,6 +60,9 @@ impl HttpClient {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
         let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if body.len() > 5_000_000 {
+            return Err(format!("Response te groot: {} bytes (max 5MB)", body.len()));
+        }
         let latency_ms = start.elapsed().as_millis() as u64;
 
         Ok(HttpResponse {
@@ -89,6 +92,9 @@ impl HttpClient {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
         let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if body.len() > 5_000_000 {
+            return Err(format!("Response te groot: {} bytes (max 5MB)", body.len()));
+        }
         let latency_ms = start.elapsed().as_millis() as u64;
 
         Ok(HttpResponse {

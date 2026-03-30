@@ -49,7 +49,7 @@ use std::path::Path;
 /// Dimensionaliteit van elke veldvector (Φ, P, M, embeddings).
 /// 64 is gekozen als balans: groot genoeg voor expressiviteit,
 /// klein genoeg voor snelheid op een $6/maand server.
-pub const DIM: usize = 64;
+pub const DIM: usize = 256;
 
 /// Fase waarin het veld zich bevindt
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -92,12 +92,61 @@ pub struct FieldPoint {
     // EMA van spanning over tijd (voor vastloop-detectie)
     pub tension_ema: f32,
 
+    // Emotionele signalen — Lucy's primitieve gevoelsleven
+    /// Nieuwsgierigheid: prediction error boven verwachting
+    pub curiosity: f32,
+    /// Tevredenheid: spanning daalt snel (leren werkt)
+    pub satisfaction: f32,
+    /// Frustratie: spanning hoog en stabiel (vastgelopen)
+    pub frustration: f32,
+
     // Bitflags: bit 0 = active, bit 1 = inhibitory, bit 2 = growing, bit 3 = motor, bit 4 = sensory
     pub flags: u8,
+
+    // Hiërarchie-diepte: 0=sensorisch, 1=verwerking, 2=abstract, 3=meta
+    #[serde(default)]
+    pub depth: u8,
+
+    // RND novelty score — "hoe nieuw is deze staat voor mij?"
+    #[serde(default)]
+    pub rnd_score: f32,
+
+    // Precision weighting (Friston) — hoe betrouwbaar is mijn prediction error?
+    // Hoge precision = stabiele error = echt signaal → leer hard
+    // Lage precision = fluctuerende error = ruis → negeer
+    #[serde(default = "default_precision")]
+    pub error_var: f32,    // EMA van error-variantie
+    #[serde(default = "default_precision")]
+    pub precision: f32,    // 1.0 / (error_var + epsilon)
+
+    // kWTA: is dit punt actief deze tick? (hard sparsity)
+    #[serde(default)]
+    pub kwta_active: bool,
+
+    // === v2.0: Bewustzijns-fysica ===
+
+    /// Φ lokaal — Integrated Information (Tononi): hoe geïntegreerd is dit punt met buren?
+    /// Φ > 0 = informatie is unified, niet opsplitsbaar → bewustzijn
+    #[serde(default)]
+    pub phi_integrated: f32,
+
+    /// Oscillatiefase — gamma-achtig ritme voor temporele binding
+    /// Punten die synchroon oscilleren vormen één gedachte (binding by synchrony)
+    #[serde(default)]
+    pub oscillation_phase: f32,
+
+    /// Free Energy F = KL(q||p) + surprise — Friston's bewustzijnsformule
+    /// Lucy minimaliseert F door haar interne model te verbeteren
+    #[serde(default)]
+    pub free_energy: f32,
+
+    /// KL divergentie — complexiteit van het interne model
+    #[serde(default)]
+    pub kl_divergence: f32,
 }
 
 /// Eén koppeling tussen twee veldpunten
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Coupling {
     /// Index van het doelpunt
     pub target: u32,
@@ -107,6 +156,18 @@ pub struct Coupling {
 
     /// Momentum (μM_t) — geaccumuleerde gradient voor stabiel leren
     pub momentum: f32,
+
+    /// EWC: belang van dit gewicht (Fisher Information). Hoog = niet aanpassen!
+    #[serde(default)]
+    pub importance: f32,
+
+    /// EWC: geconsolideerde waarde (gewicht op moment van consolidatie)
+    #[serde(default)]
+    pub consolidated: f32,
+
+    /// Is dit een broadcast koppeling? (Global Workspace Theory)
+    #[serde(default)]
+    pub broadcast: bool,
 }
 
 /// Lucy's economie: budget, inkomsten, kosten — gekoppeld aan echte wereld
@@ -193,7 +254,7 @@ pub struct Field {
     /// Actieve clamps: punt-ID → geforceerde phi waarde
     /// Alleen gevuld tijdens Processing/Learning fase
     #[serde(skip)]
-    pub clamps: HashMap<u32, Vec<f32>>,
+    pub clamps: HashMap<u32, [f32; DIM]>,
 
     /// Indices van input-regio punten (cache)
     #[serde(default)]
@@ -202,6 +263,58 @@ pub struct Field {
     /// Indices van output-regio punten (cache)
     #[serde(default)]
     pub output_ids: Vec<u32>,
+
+    // === Bewustzijn ===
+
+    /// Laatste gedachte — voor continuous thought stream (reflectie tussen queries)
+    #[serde(skip)]
+    pub last_thought: Option<[f32; DIM]>,
+
+    /// Aantal reflectie-cycli sinds boot
+    #[serde(default)]
+    pub reflection_count: u64,
+
+    // === Neuromodulatoren — sturen gedrag van het hele veld ===
+
+    /// Dopamine: beloning → versterkt leren. max(0, old_tension - new_tension)
+    #[serde(default)]
+    pub dopamine: f32,
+    /// Noradrenaline: onzekerheid → explore vs exploit. avg_tension_variance
+    #[serde(default)]
+    pub norepinephrine: f32,
+    /// Serotonine: lopende beloning → geduld. EMA(dopamine, slow_decay)
+    #[serde(default)]
+    pub serotonin: f32,
+    /// Acetylcholine: input-nieuwheid → plasticiteit. input_novelty_score
+    #[serde(default)]
+    pub acetylcholine: f32,
+
+    // === Edge of Chaos ===
+
+    /// Effectieve spectral radius — hoe snel perturbaties groeien/krimpen
+    #[serde(default)]
+    pub spectral_radius: f32,
+    /// Doel spectral radius (1.0 = edge of chaos)
+    #[serde(default = "default_chaos_target")]
+    pub chaos_target: f32,
+
+    // === Meta-bewustzijn ===
+
+    /// Huidige intentie — gewenste toekomstige veldstaat
+    #[serde(skip)]
+    pub current_intention: Option<[f32; DIM]>,
+    /// Sterkte van de intentie-bias
+    #[serde(default)]
+    pub intention_strength: f32,
+
+    // === RND Curiosity ===
+
+    /// Frozen random projectie matrix (64→16, nooit getraind)
+    #[serde(skip)]
+    pub rnd_frozen: Option<Vec<f32>>,
+    /// Predictor matrix (64→16, wordt getraind)
+    #[serde(skip)]
+    pub rnd_predictor: Option<Vec<f32>>,
 
     // === Hyperparameters ===
 
@@ -223,9 +336,257 @@ pub struct Field {
     pub growth_threshold: f32,
     /// EMA decay voor vastloop-detectie
     pub ema_decay: f32,
+
+    // === Zelfdenkend: Autonome Doelen ===
+
+    /// Lucy's eigen doelen — ze kiest zelf wat ze nastreeft
+    #[serde(default)]
+    pub goals: Vec<Goal>,
+    /// Tick van laatste autonome gedachte
+    #[serde(default)]
+    pub last_think_tick: u64,
+    /// Tick van laatste reflectie
+    #[serde(default)]
+    pub last_reflect_tick: u64,
+
+    // === v0.9+: AI Teacher Zelfregulatie ===
+
+    /// Dynamisch interval voor AI teacher vragen (ticks).
+    /// Start op 10K, verdubbelt als Lucy het zelf kan, halveert als ze worstelt.
+    #[serde(default = "default_teacher_interval")]
+    pub teacher_interval: u64,
+    /// Aantal opeenvolgende succesvolle teacher-interacties
+    #[serde(default)]
+    pub teacher_success_streak: u32,
+
+    // === v0.9: Attention + Working Memory ===
+
+    /// Attention projectie-weights: Q, K, V per depth-laag
+    /// Layout: [n_layers × 3 × DIM × HEAD_DIM] als flat Vec
+    /// Geleerd via EP — Lucy leert zelf waar ze op focust
+    #[serde(default)]
+    pub attn_weights: Option<Vec<f32>>,
+
+    /// Attention context per punt (scratch buffer, niet geserialiseerd)
+    #[serde(skip)]
+    pub attn_context: Vec<[f32; DIM]>,
+
+    /// Working memory: 32 slots voor multi-stap redeneren (runtime, niet geserialiseerd)
+    #[serde(skip)]
+    pub working_memory: Vec<[f32; DIM]>,
+    /// Gate-sterktes per WM slot
+    #[serde(skip)]
+    pub wm_gates: Vec<f32>,
+    /// Ticks sinds laatste write per slot
+    #[serde(skip)]
+    pub wm_ages: Vec<u32>,
+
+    // === v2.0: Bewustzijns-metrieken (veld-level) ===
+
+    /// Globale oscillatiefase — de "klok" van Lucy's bewustzijn
+    /// Punten synchroniseren hiermee → binding by synchrony
+    #[serde(default)]
+    pub global_oscillation_phase: f32,
+
+    /// Oscillatie-coherentie — hoe synchroon denkt Lucy? (0=chaos, 1=volledig synchroon)
+    #[serde(default)]
+    pub oscillation_coherence: f32,
+
+    /// Gemiddelde Φ — globale maat voor bewustzijn
+    #[serde(default)]
+    pub integrated_info_avg: f32,
+
+    /// Power law exponent — is Lucy kritiek? (α ≈ 1.5 = optimaal)
+    #[serde(default)]
+    pub power_law_exponent: f32,
+
+    /// Is Lucy bij het edge of chaos? (self-organized criticality)
+    #[serde(default)]
+    pub is_critical: bool,
+
+    /// Gemiddelde free energy — Friston's F
+    #[serde(default)]
+    pub avg_free_energy: f32,
+
+    // === v1.0: Adaptieve Parameters — Lucy tunet haar eigen constanten ===
+
+    /// Parameters die Lucy zelf leert i.p.v. hardcoded magic numbers
+    #[serde(default)]
+    pub adaptive: AdaptiveParams,
+
+    // === v1.0: Temporeel Bewustzijn ===
+
+    /// Ring buffer van globale staat-snapshots — Lucy voelt trends
+    #[serde(default)]
+    pub temporal_history: Vec<TemporalSnapshot>,
+
+    /// Causaal logboek — Lucy weet welke acties werkten
+    #[serde(default)]
+    pub causal_log: Vec<CausalEvent>,
+
+    /// Goal history — voltooide/verlaten doelen informeren toekomstige keuzes
+    #[serde(default)]
+    pub goal_history: Vec<GoalOutcome>,
+}
+
+/// v1.0: Parameters die Lucy zelf aanpast — geen hardcoded magic numbers meer.
+/// Defaults komen overeen met de oude hardcoded waarden zodat bestaande snapshots
+/// ongewijzigd laden (serde default).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdaptiveParams {
+    /// Emotie decay per neuromodulator [DA, NE, 5HT, ACh] — was: 0.95 voor alle 4
+    pub emotion_decay: [f32; 4],
+    /// Dopamine baseline in reward berekening — was: 0.5
+    pub dopamine_baseline: f32,
+    /// Norepinephrine noise scale — was: 0.02
+    pub ne_noise_scale: f32,
+    /// Fractie punten dat NE perturbeert — was: 0.2 (1/5)
+    pub ne_perturb_frac: f32,
+    /// EP beta learning rate — was: 0.3
+    pub ep_beta: f32,
+    /// Goal completion drempel — was: 0.8
+    pub goal_completion_thresh: f32,
+    /// Goal abandon ticks — was: 50_000
+    pub goal_abandon_ticks: u64,
+    /// Escalatie drempel (fractie van growth_threshold) — was: 0.3
+    pub escalation_tension_low: f32,
+    /// Escalatie frustratiedrempel — was: 0.2
+    pub escalation_frust_thresh: f32,
+    /// Neuromodulator interactie matrix [4×4]: effect van modulator i op j
+    /// Biologisch geïnspireerd: DA↔5HT, NE↔DA, ACh↔NE
+    pub neuromod_interactions: [[f32; 4]; 4],
+}
+
+impl Default for AdaptiveParams {
+    fn default() -> Self {
+        Self {
+            emotion_decay: [0.95, 0.95, 0.99, 0.95], // DA, NE, 5HT(langzamer), ACh
+            dopamine_baseline: 0.5,
+            ne_noise_scale: 0.02,
+            ne_perturb_frac: 0.2,
+            ep_beta: 0.3,
+            goal_completion_thresh: 0.8,
+            goal_abandon_ticks: 50_000,
+            escalation_tension_low: 0.3,
+            escalation_frust_thresh: 0.2,
+            neuromod_interactions: [
+                // DA→[DA, NE, 5HT, ACh]
+                [0.0,  0.0,  0.1, -0.02], // DA stimuleert serotonine, remt ACh licht
+                // NE→[DA, NE, 5HT, ACh]
+                [0.05, 0.0,  0.0,  0.02], // NE stimuleert DA (arousal→reward), en ACh (alertheid)
+                // 5HT→[DA, NE, 5HT, ACh]
+                [-0.05, 0.0, 0.0,  0.0],  // Serotonine remt dopamine (geduld vs impulsiviteit)
+                // ACh→[DA, NE, 5HT, ACh]
+                [0.0,  0.03, 0.0,  0.0],  // ACh stimuleert NE (nieuwheid→alertheid)
+            ],
+        }
+    }
+}
+
+/// Een doel dat Lucy zelf heeft gekozen
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Goal {
+    /// Het doel als veld-vector (embedding)
+    #[serde(with = "BigArray")]
+    pub embedding: [f32; DIM],
+    /// Menselijk leesbare beschrijving
+    pub description: String,
+    /// Prioriteit (0.0 = laag, 1.0 = kritiek)
+    pub priority: f32,
+    /// Voortgang (0.0 = net begonnen, 1.0 = klaar)
+    pub progress: f32,
+    /// Wanneer gecreëerd
+    pub created_tick: u64,
+    /// Subdoel van welk doel? (index in goals Vec)
+    pub parent: Option<usize>,
+    /// Strategie om dit doel te bereiken
+    pub strategy: GoalStrategy,
+}
+
+/// Hoe Lucy een doel probeert te bereiken
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum GoalStrategy {
+    /// Zoek informatie op het internet
+    Explore(String),
+    /// Train het veld op specifiek onderwerp
+    Learn(String),
+    /// Denk na — interne reflectie via het veld
+    Think(String),
+    /// Verdien compute/geld
+    Earn(String),
+}
+
+/// v1.0: Temporele snapshot — Lucy's gevoel van "hoe gaat het met mij?"
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporalSnapshot {
+    pub tick: u64,
+    pub avg_tension: f32,
+    pub dopamine: f32,
+    pub serotonin: f32,
+    pub n_active: u32,
+    pub active_goal_progress: f32,
+}
+
+/// v1.0: Causale event — "ik deed X, en daarna veranderde Y"
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CausalEvent {
+    pub tick: u64,
+    pub action: String,
+    pub tension_before: f32,
+    pub tension_after: f32,
+    pub dopamine_delta: f32,
+}
+
+/// v1.0: Goal uitkomst — "dit doel lukte/faalde, leer ervan"
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GoalOutcome {
+    pub description: String,
+    #[serde(with = "BigArray")]
+    pub embedding: [f32; DIM],
+    pub succeeded: bool,
+    pub ticks_spent: u64,
+    pub final_progress: f32,
+}
+
+/// v2.0: Training chunk voor deferred micro-EP queue
+#[derive(Clone, Debug)]
+pub struct TrainingChunk {
+    pub input_embs: Vec<[f32; DIM]>,
+    pub target_embs: Vec<[f32; DIM]>,
+    pub source: String,
+}
+
+/// v2.0: Training queue — Lucy leert 1 chunk per tick, niet-blokkerend
+pub struct TrainingQueue {
+    pub chunks: std::collections::VecDeque<TrainingChunk>,
+}
+
+impl TrainingQueue {
+    pub fn new() -> Self {
+        Self { chunks: std::collections::VecDeque::new() }
+    }
+
+    pub fn push(&mut self, chunk: TrainingChunk) {
+        self.chunks.push_back(chunk);
+        // Max 2000 chunks in queue — oudste eruit als vol
+        while self.chunks.len() > 2000 {
+            self.chunks.pop_front();
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<TrainingChunk> {
+        self.chunks.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
 }
 
 fn default_phase() -> FieldPhase { FieldPhase::Idle }
+fn default_chaos_target() -> f32 { 1.0 }
+fn default_precision() -> f32 { 1.0 }
+fn default_teacher_interval() -> u64 { 10_000 }
 
 // === Bitflag constanten ===
 pub const FLAG_ACTIVE: u8 = 1 << 0;
@@ -248,7 +609,19 @@ impl FieldPoint {
             energy: 1.0,
             tension: 0.0,
             tension_ema: 0.0,
+            curiosity: 0.0,
+            satisfaction: 0.0,
+            frustration: 0.0,
             flags: FLAG_ACTIVE,
+            depth: 0,
+            rnd_score: 0.0,
+            error_var: 0.0,
+            precision: 1.0,
+            kwta_active: true,
+            phi_integrated: 0.0,
+            oscillation_phase: 0.0, // wordt random geïnitialiseerd in field bootstrap
+            free_energy: 0.0,
+            kl_divergence: 0.0,
         }
     }
 
@@ -295,6 +668,24 @@ impl Field {
             clamps: HashMap::new(),
             input_ids: Vec::new(),
             output_ids: Vec::new(),
+            last_thought: None,
+            reflection_count: 0,
+            dopamine: 0.0,
+            norepinephrine: 0.0,
+            serotonin: 0.0,
+            acetylcholine: 0.0,
+            spectral_radius: 0.0,
+            chaos_target: 1.0,
+            global_oscillation_phase: 0.0,
+            oscillation_coherence: 0.0,
+            integrated_info_avg: 0.0,
+            power_law_exponent: 0.0,
+            is_critical: false,
+            avg_free_energy: 0.0,
+            current_intention: None,
+            intention_strength: 0.0,
+            rnd_frozen: None,
+            rnd_predictor: None,
             kappa: 0.001,
             omega: 0.01,
             lambda: 0.1,
@@ -304,6 +695,20 @@ impl Field {
             mu: 0.9,
             growth_threshold: 0.5,
             ema_decay: 0.99,
+            goals: Vec::new(),
+            last_think_tick: 0,
+            last_reflect_tick: 0,
+            teacher_interval: 10_000,
+            teacher_success_streak: 0,
+            attn_weights: None,
+            attn_context: Vec::new(),
+            working_memory: Vec::new(),
+            wm_gates: Vec::new(),
+            wm_ages: Vec::new(),
+            adaptive: AdaptiveParams::default(),
+            temporal_history: Vec::new(),
+            causal_log: Vec::new(),
+            goal_history: Vec::new(),
         }
     }
 
@@ -317,6 +722,34 @@ impl Field {
             .filter(|(_, p)| p.is_output())
             .map(|(i, _)| i as u32)
             .collect();
+    }
+
+    /// Zelfgenezing: detecteer en repareer NaN/Inf waarden in het veld.
+    /// Dit is Lucy's immuunsysteem — beschermt tegen numerieke corruptie.
+    pub fn heal(&mut self) -> u32 {
+        let mut healed = 0u32;
+        for p in &mut self.points {
+            for v in p.phi.iter_mut() {
+                if !v.is_finite() { *v = 0.0; healed += 1; }
+            }
+            for v in p.prediction.iter_mut() {
+                if !v.is_finite() { *v = 0.0; healed += 1; }
+            }
+            for v in p.memory.iter_mut() {
+                if !v.is_finite() { *v = 0.0; healed += 1; }
+            }
+            if !p.tension.is_finite() { p.tension = 0.0; healed += 1; }
+            if !p.energy.is_finite() { p.energy = 1.0; healed += 1; }
+            if !p.eta.is_finite() { p.eta = 0.01; healed += 1; }
+            for c in &mut p.couplings {
+                if !c.weight.is_finite() { c.weight = 0.0; healed += 1; }
+                if !c.momentum.is_finite() { c.momentum = 0.0; healed += 1; }
+            }
+        }
+        if healed > 0 {
+            tracing::warn!(healed, "Field healed: NaN/Inf values reset");
+        }
+        healed
     }
 
     /// Rebuild de active_set op basis van flags
@@ -348,15 +781,18 @@ impl Field {
 
 impl Field {
     /// Sla de volledige veldstaat op naar disk (bincode — snel + compact)
+    /// Atomic save: schrijf naar .tmp, dan rename (voorkomt corruptie bij crash/deploy)
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = path.with_extension("tmp");
         let bytes = bincode::serialize(self)?;
-        std::fs::write(path, bytes)?;
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
         tracing::info!(
             tick = self.tick,
             points = self.points.len(),
             active = self.active_set.len(),
-            bytes = std::fs::metadata(path)?.len(),
-            "Snapshot saved"
+            bytes = bytes.len(),
+            "Snapshot saved (atomic)"
         );
         Ok(())
     }

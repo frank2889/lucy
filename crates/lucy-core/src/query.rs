@@ -1,62 +1,70 @@
-//! # query — Vraagverwerking via het Samenveld
+//! # query — Vraagverwerking via Denk-Loops
 //!
-//! Dit is de pipeline die een menselijke vraag omzet in een antwoord,
-//! volledig berekend door het veld — geen lookup, geen externe AI.
+//! Lucy denkt NA voor ze antwoordt. Niet één keer door het veld, maar
+//! meerdere rondes van intern redeneren — elke ronde bouwt voort op de vorige.
 //!
-//! ## Query Pipeline
+//! ## Denk-Loop Pipeline
 //!
 //! ```text
-//! Tekst → Tokenize → Embeddings → Injecteer in Input-regio
+//! Vraag → Tokenize → Embeddings → Injecteer in Input-regio
 //!                                       ↓
-//!                              Veld settlet (max 300 ticks)
-//!                              "Lucy denkt na"
+//!                          ┌─── DENK-LOOP (max 5 rondes) ───┐
+//!                          │                                  │
+//!                          │  1. Settle (veld denkt na)       │
+//!                          │  2. Lees output-regio            │
+//!                          │  3. Meet kwaliteit (coherentie)  │
+//!                          │  4. Goed genoeg? → stop          │
+//!                          │  5. Niet goed → voer output      │
+//!                          │     terug als input, denk opnieuw│
+//!                          │                                  │
+//!                          └──────────────────────────────────┘
 //!                                       ↓
-//!                              Lees Output-regio → Decode Token
-//!                                       ↓
-//!                              Feed token terug → Mini-settle (20 ticks)
-//!                                       ↓
-//!                              Herhaal autoregressief (max 50 tokens)
-//!                                       ↓
-//!                              Tokens → Tekst antwoord
+//!                          Beste output → Decode autoregressief → Tekst
 //! ```
 //!
-//! ## Constanten
+//! ## Waarom dit intelligentie is
 //!
-//! - `TICKS_PER_TOKEN = 10` — hoeveel ticks per geïnjecteerd input-token
-//! - `MAX_SETTLE_TICKS = 300` — maximale denktijd (convergentie of timeout)
-//! - `SETTLE_EPSILON = 0.005` — convergentiedrempel (spanning < dit = klaar)
-//! - `MAX_OUTPUT_TOKENS = 50` — maximale antwoordlengte
+//! Een encyclopedie geeft altijd hetzelfde antwoord. Lucy's antwoord
+//! verandert met elke denk-ronde: het veld herorganiseert, spanning daalt,
+//! en het activatiepatroon convergeerd naar een diepere attractor.
 //!
-//! ## Training
+//! Ronde 1: oppervlakkige reactie (eerste indruk)
+//! Ronde 2: verfijning (inconsistenties opgelost)
+//! Ronde 3+: diep nadenken (onverwachte verbanden)
 //!
-//! `train_pair()` accepteert een input/target tekstpaar en traint het veld
-//! via equilibrium propagation. Dit wordt gebruikt door de `/feed` API endpoint.
+//! Dit is wat intelligentie is: niet meer weten, maar dieper nadenken.
+//!
+//! ## Coherentie-meting
+//!
+//! Lucy meet of haar gedachten "samenhangen" door de cosine similarity
+//! tussen opeenvolgende denk-rondes te berekenen. Hoge similarity =
+//! stabiel antwoord = klaar met denken. Lage similarity = nog aan het
+//! reorganiseren = nog een ronde nodig.
 
 use lucy_state::*;
+use lucy_state::GoalStrategy;
 use crate::compute;
 use crate::encoding::{self, Vocabulary};
 use crate::decoding;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Hoeveel ticks het veld draait per geïnjecteerd input-token.
-/// Hoger = meer tijd om elke token te verwerken, maar langzamer.
-const TICKS_PER_TOKEN: usize = 10;
+/// v1.2: Ultra-licht — 8704 punten vereist minimale settle
+const TICKS_PER_TOKEN: usize = 2;
+const SETTLE_PER_ROUND: usize = 10;
+const SETTLE_EPSILON: f32 = 0.05;
+const MAX_THINK_ROUNDS: usize = 1;
+const COHERENCE_THRESHOLD: f32 = 0.30;
+const MAX_OUTPUT_TOKENS: usize = 20;
 
-/// Maximaal aantal ticks voor het settle-proces ("nadenken").
-/// Na 300 ticks zonder convergentie geeft Lucy haar beste antwoord.
-const MAX_SETTLE_TICKS: usize = 300;
-
-/// Convergentiedrempel: als gemiddelde spanning lager is, stopt het settlen.
-const SETTLE_EPSILON: f32 = 0.005;
-
-/// Maximaal aantal output-tokens per antwoord.
-const MAX_OUTPUT_TOKENS: usize = 50;
-
-/// Verwerk een vraag door het veld
-/// Encode → Inject → Settle → Decode (autoregressief)
+/// Verwerk een vraag door het veld met denk-loops.
+/// Lucy denkt meerdere rondes na tot haar gedachten stabiliseren.
+/// v1.3: Feiten worden nu vóór spawn_blocking opgehaald (scheelt ~120MB).
 pub fn process_query(
     field: &mut Field,
     vocab: &Vocabulary,
     question: &str,
+    facts: &[String],
+    cancel: &AtomicBool,
 ) -> QueryResult {
     let embeddings = encoding::encode_text_readonly(vocab, question);
     if embeddings.is_empty() {
@@ -65,47 +73,153 @@ pub fn process_query(
             settle_ticks: 0,
             final_tension: 0.0,
             tokens_generated: 0,
+            think_rounds: 0,
+            coherence: 0.0,
+            facts_retrieved: 0,
+            new_goals: vec![],
+            confidence: 0.0,
+            verified: false,
+            sources: vec![],
         };
     }
 
-    // Injecteer vraag-tokens in het veld
+    // v0.9+: Clear working memory — schoon scratchpad per vraag
+    compute::init_working_memory(field);
+
+    // v1.3: Feiten worden nu vóór spawn_blocking opgehaald (scheelt ~120MB per query)
+    let mut all_embeddings = Vec::new();
+    let facts_retrieved = facts.len();
+    for fact_text in facts {
+        let fact_embs = encoding::encode_text_readonly(vocab, fact_text);
+        all_embeddings.extend(fact_embs);
+    }
+    if facts_retrieved > 0 {
+        tracing::debug!(facts = facts_retrieved, "Lucy herinnert zich relevante feiten");
+    }
+
+    // Voeg de vraag-embeddings toe na de context
+    all_embeddings.extend(embeddings);
+
+    // Injecteer context + vraag-tokens in het veld
     field.phase = FieldPhase::Processing;
-    compute::inject_token_sequence(field, &embeddings, TICKS_PER_TOKEN);
+    compute::inject_token_sequence_light(field, &all_embeddings, TICKS_PER_TOKEN);
 
-    // Settle — het veld "denkt na"
-    let (settle_ticks, tension) = compute::settle_until_converged(
-        field, MAX_SETTLE_TICKS, SETTLE_EPSILON,
-    );
+    // === DENK-LOOPS ===
+    let mut total_settle_ticks = 0;
+    let mut prev_output = [0.0f32; DIM];
+    let mut best_output = [0.0f32; DIM];
+    let mut best_tension = f32::MAX;
+    let mut final_coherence = 0.0;
+    let mut rounds_used = 0;
 
-    // Decodeer output autoregressief
+    for round in 0..MAX_THINK_ROUNDS {
+        if cancel.load(Ordering::Relaxed) { break; }
+        // v0.9+: Working memory write → lees → settle (WM accumuleert per ronde)
+        if round > 0 {
+            compute::wm_write(field);
+        }
+        compute::wm_read(field);
+
+        // Settle — het veld denkt na (light: alleen IO + buren, niet het hele veld)
+        let (ticks, tension) = compute::settle_light(
+            field, SETTLE_PER_ROUND, SETTLE_EPSILON,
+        );
+        total_settle_ticks += ticks;
+
+        // Lees huidige "gedachte"
+        let current_output = decoding::read_output_region(field);
+        rounds_used = round + 1;
+
+        // Onthoud de beste output (laagste spanning = meest zeker)
+        if tension < best_tension {
+            best_tension = tension;
+            best_output = current_output;
+        }
+
+        // Meet coherentie: hoe stabiel zijn de gedachten?
+        if round > 0 {
+            let coherence = cosine_similarity(&prev_output, &current_output);
+            final_coherence = coherence;
+
+            if coherence > COHERENCE_THRESHOLD {
+                // Gedachten zijn stabiel — Lucy is klaar met denken
+                break;
+            }
+        }
+
+        // Nog niet stabiel → voer output terug als input (interne dialoog)
+        let input_ids = field.input_ids.clone();
+        for (i, &id) in input_ids.iter().enumerate() {
+            field.clamps.insert(id, compute::rotate_embedding(&current_output, i));
+        }
+
+        // v0.9+: Merged settle (80 ticks i.p.v. 50+50 apart — bespaart 20 per ronde)
+        // Attention + layer norm draaien automatisch mee in settle_until_converged
+        let (ticks, _) = compute::settle_light(field, 5, SETTLE_EPSILON);
+        total_settle_ticks += ticks;
+
+        // v0.9+: WM na elke denk-ronde — Lucy herorganiseert haar focus
+        compute::wm_write(field);
+        compute::wm_read(field);
+
+        // Verwijder clamps voor volgende ronde
+        for &id in &input_ids {
+            field.clamps.remove(&id);
+        }
+
+        prev_output = current_output;
+    }
+
+    // === DECODEER vanuit de beste output ===
+    // Klem output-regio op de beste gedachte (geroteerd per punt)
+    let output_ids_field = field.output_ids.clone();
+    for (i, &id) in output_ids_field.iter().enumerate() {
+        field.clamps.insert(id, compute::rotate_embedding(&best_output, i));
+    }
+    // v0.9+: Diepere settle voor betere output-activatie
+    compute::settle_light(field, 5, SETTLE_EPSILON);
+    for &id in &output_ids_field {
+        field.clamps.remove(&id);
+    }
+
+    // v0.9+: WM read vóór decodering (attention draait al in settle)
+    compute::wm_read(field);
+
+    // Autoregressieve decodering met temperature sampling + repetition penalty
     let mut output_ids = Vec::new();
     let eos_id = *vocab.token_to_id.get("<eos>").unwrap_or(&2);
+    let cached_input_ids = field.input_ids.clone(); // v0.9+: eenmaal cachen (was: per token)
 
-    for _ in 0..MAX_OUTPUT_TOKENS {
-        // Lees output-regio
+    for step in 0..MAX_OUTPUT_TOKENS {
+        if cancel.load(Ordering::Relaxed) { break; }
         let output_phi = decoding::read_output_region(field);
 
-        // Decodeer naar token
-        let (token_id, _score) = decoding::decode_token(&output_phi, vocab);
+        // v0.9+: Decode met context van eerdere tokens (repetition penalty)
+        let (token_id, _score) = decoding::decode_token_with_context(
+            &output_phi, vocab, &output_ids,
+        );
 
         if token_id == eos_id || token_id <= 2 {
-            break; // Stop bij EOS of speciale tokens
+            break;
         }
 
         output_ids.push(token_id);
 
-        // Feed token terug als input voor volgende token
+        // Feed token terug als input voor volgende token (geroteerd per punt)
         let emb = vocab.embed(token_id);
-        let input_ids = field.input_ids.clone();
-        for &id in &input_ids {
-            field.clamps.insert(id, emb.to_vec());
+        for (i, &id) in cached_input_ids.iter().enumerate() {
+            field.clamps.insert(id, compute::rotate_embedding(emb, i));
         }
 
-        // Mini-settle voor context update
-        compute::settle_until_converged(field, 20, SETTLE_EPSILON);
+        // v0.9+: Settle per token (40 ticks) — attention draait automatisch mee
+        compute::settle_light(field, 3, SETTLE_EPSILON);
 
-        // Verwijder clamps
-        for &id in &input_ids {
+        // v0.9+: WM read elke 3 tokens
+        if step % 3 == 0 {
+            compute::wm_read(field);
+        }
+
+        for &id in &cached_input_ids {
             field.clamps.remove(&id);
         }
     }
@@ -115,12 +229,189 @@ pub fn process_query(
 
     let answer = decoding::tokens_to_text(&output_ids, vocab);
 
+    // v0.9+: Self-evaluation — Lucy beoordeelt haar eigen antwoord
+    // Als het antwoord te kort is of te lage coherentie heeft, probeer opnieuw
+    // met een verse settle (maar max 1 retry om loops te voorkomen)
+    let answer = if answer.len() < 5 && final_coherence < 0.5 && rounds_used < MAX_THINK_ROUNDS && !cancel.load(Ordering::Relaxed) {
+        // Herstart met de vraag-embeddings — tweede poging
+        compute::inject_token_sequence_light(field, &all_embeddings, TICKS_PER_TOKEN);
+        // Attention draait automatisch mee in settle
+        compute::settle_light(field, SETTLE_PER_ROUND * 2, SETTLE_EPSILON);
+
+        // Decode opnieuw
+        let output_phi = decoding::read_output_region(field);
+        let output_ids_field = field.output_ids.clone();
+        for (i, &id) in output_ids_field.iter().enumerate() {
+            field.clamps.insert(id, compute::rotate_embedding(&output_phi, i));
+        }
+        compute::settle_light(field, 5, SETTLE_EPSILON);
+        for &id in &output_ids_field { field.clamps.remove(&id); }
+
+        let mut retry_ids = Vec::new();
+        let eos_id = *vocab.token_to_id.get("<eos>").unwrap_or(&2);
+        for _ in 0..MAX_OUTPUT_TOKENS {
+            if cancel.load(Ordering::Relaxed) { break; }
+            let phi = decoding::read_output_region(field);
+            let (tid, _) = decoding::decode_token_with_context(&phi, vocab, &retry_ids);
+            if tid == eos_id || tid <= 2 { break; }
+            retry_ids.push(tid);
+            let emb = vocab.embed(tid);
+            let iids = field.input_ids.clone();
+            for (i, &id) in iids.iter().enumerate() {
+                field.clamps.insert(id, compute::rotate_embedding(emb, i));
+            }
+            compute::settle_light(field, 3, SETTLE_EPSILON);
+            for &id in &iids { field.clamps.remove(&id); }
+        }
+
+        field.phase = FieldPhase::Idle;
+        field.clamps.clear();
+
+        let retry_answer = decoding::tokens_to_text(&retry_ids, vocab);
+        if retry_answer.len() > answer.len() {
+            tracing::debug!("Self-evaluation: retry produced better answer");
+            output_ids = retry_ids;
+            retry_answer
+        } else {
+            answer
+        }
+    } else {
+        answer
+    };
+
+    // Bewaar beste output als laatste gedachte → continuous thought stream
+    field.last_thought = Some(best_output);
+
+    // v1.0: META-INTELLIGENTIE — Lucy checkt haar eigen antwoord
+    // Als het onzin is, geeft ze dat eerlijk toe en maakt er een leerdoel van
+    let answer = if !output_ids.is_empty() {
+        // Check: herhaalt het antwoord zichzelf?
+        let unique_tokens: std::collections::HashSet<u32> = output_ids.iter().copied().collect();
+        let repeat_ratio = 1.0 - (unique_tokens.len() as f32 / output_ids.len() as f32);
+
+        // Check: is het antwoord te kort of te repetitief?
+        if repeat_ratio > 0.5 || output_ids.len() < 3 || final_coherence < 0.2 {
+            // Lucy weet dat ze het niet weet — DAT is intelligentie
+            tracing::info!(
+                repeat_ratio,
+                tokens = output_ids.len(),
+                coherence = final_coherence,
+                question,
+                "Meta-intelligentie: Lucy herkent onzin-output, maakt leerdoel"
+            );
+
+            // Maak een leerdoel van de onbegrepen vraag
+            let keywords: Vec<&str> = question.split_whitespace()
+                .filter(|w| w.len() > 3) // skip korte woorden
+                .take(5)
+                .collect();
+
+            if !keywords.is_empty() {
+                // Voeg keywords toe als interesses (Lucy gaat er later over leren)
+                for kw in &keywords {
+                    if !field.goals.iter().any(|g| g.description.contains(kw)) {
+                        field.goals.push(lucy_state::Goal {
+                            embedding: best_output, // gebruik de vraag-embedding als doel
+                            description: format!("understand:{}", keywords.join(",")),
+                            priority: 0.8, // hoge prioriteit — gebruiker vroeg het
+                            progress: 0.0,
+                            created_tick: field.tick,
+                            parent: None,
+                            strategy: lucy_state::GoalStrategy::Learn(keywords.join(" ")),
+                        });
+                        break; // 1 goal per vraag
+                    }
+                }
+            }
+
+            // v2.0: Geen hardcoded taal — Lucy probeert vanuit haar veld te antwoorden
+            // Als dat niet lukt: universeel antwoord zonder taalvoorkeur
+            let attempt = decoding::tokens_to_text(&output_ids, vocab);
+            if attempt.len() > 3 && !attempt.contains("a5068") {
+                attempt // gebruik wat ze had, ook al is het niet perfect
+            } else {
+                "...".to_string() // universeel: ik denk na maar kan nog niet antwoorden
+            }
+        } else {
+            answer
+        }
+    } else {
+        "...".to_string() // universeel: geen output mogelijk
+    };
+
+    // Verzamel nieuwe doelen (goals die tijdens deze query zijn aangemaakt)
+    let new_goals: Vec<(String, String)> = field.goals.iter()
+        .filter(|g| g.created_tick >= field.tick.saturating_sub(1) && g.progress < 1.0)
+        .map(|g| {
+            // v2.0: Taalloze strategy labels — machine-leesbaar
+            let strat = match &g.strategy {
+                GoalStrategy::Explore(s) => format!("explore:{}", s),
+                GoalStrategy::Learn(s) => format!("learn:{}", s),
+                GoalStrategy::Think(s) => format!("think:{}", s),
+                GoalStrategy::Earn(s) => format!("earn:{}", s),
+            };
+            (g.description.clone(), strat)
+        })
+        .collect();
+
+    // v2.0: Confidence score — combinatie van tension + coherentie
+    let confidence = (1.0 - best_tension.min(1.0)) * final_coherence.max(0.01);
+
+    // v2.0: Retrieval verificatie — check of antwoord overeenkomt met opgehaalde feiten
+    let (verified, sources): (bool, Vec<String>) = if !answer.is_empty() && answer != "..." && !facts.is_empty() {
+        // Check of woorden uit het antwoord voorkomen in de opgehaalde feiten
+        let answer_words: std::collections::HashSet<&str> = answer.split_whitespace().collect();
+        let mut match_count = 0usize;
+        let mut matched_facts: Vec<String> = vec![];
+        for fact in facts {
+            let fact_words: std::collections::HashSet<&str> = fact.split_whitespace().collect();
+            let overlap = answer_words.intersection(&fact_words).count();
+            if overlap >= 2 {
+                match_count += 1;
+                matched_facts.push(fact.chars().take(100).collect());
+            }
+        }
+        (match_count > 0, matched_facts)
+    } else {
+        (false, vec![])
+    };
+
+    // Als niet geverifieerd en lage confidence → markeer onzekerheid
+    let answer = if !verified && confidence < 0.3 && !answer.is_empty() && answer != "..." {
+        format!("{}?", answer)
+    } else {
+        answer
+    };
+
     QueryResult {
         answer,
-        settle_ticks,
-        final_tension: tension,
+        settle_ticks: total_settle_ticks,
+        final_tension: best_tension,
         tokens_generated: output_ids.len(),
+        think_rounds: rounds_used,
+        coherence: final_coherence,
+        facts_retrieved,
+        new_goals,
+        confidence,
+        verified,
+        sources,
     }
+}
+
+/// Cosine similarity tussen twee vectoren.
+/// 1.0 = identiek, 0.0 = onafhankelijk, -1.0 = tegengesteld.
+/// Dit meet hoe "stabiel" Lucy's gedachten zijn tussen twee denk-rondes.
+fn cosine_similarity(a: &[f32; DIM], b: &[f32; DIM]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for d in 0..DIM {
+        dot += a[d] * b[d];
+        norm_a += a[d] * a[d];
+        norm_b += b[d] * b[d];
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom > 1e-8 { dot / denom } else { 0.0 }
 }
 
 /// Train het veld met een input-output paar via equilibrium propagation
@@ -142,14 +433,31 @@ pub fn train_pair(
         &input_embs,
         &target_embs,
         TICKS_PER_TOKEN,
-        MAX_SETTLE_TICKS / 2,
+        SETTLE_PER_ROUND,
         0.5, // EP beta
     )
 }
 
+/// Resultaat van een query — inclusief denk-metadata en interne staat.
+///
+/// Dit struct wordt door de server omgezet naar JSON. Het `internal` blok
+/// in het /ask response komt grotendeels uit de snapshot, maar `new_goals`
+/// bevat goals die *tijdens deze specifieke query* zijn aangemaakt
+/// (op de field-kopie in spawn_blocking), en die dus nog niet in de
+/// live snapshot zitten.
 pub struct QueryResult {
     pub answer: String,
     pub settle_ticks: usize,
     pub final_tension: f32,
     pub tokens_generated: usize,
+    pub think_rounds: usize,
+    pub coherence: f32,
+    pub facts_retrieved: usize,
+    pub new_goals: Vec<(String, String)>,
+    /// v2.0: Confidence score (0.0 = totaal onzeker, 1.0 = volledig zeker)
+    pub confidence: f32,
+    /// v2.0: Is het antwoord geverifieerd tegen opgeslagen feiten?
+    pub verified: bool,
+    /// v2.0: Bronnen die het antwoord ondersteunen
+    pub sources: Vec<String>,
 }

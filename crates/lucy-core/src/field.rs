@@ -48,13 +48,13 @@ use lucy_state::*;
 use rand::Rng;
 
 /// Aantal input-punten — gelijk aan DIM voor 1:1 mapping met embeddings
-const N_INPUT: usize = 64;
-/// Aantal hidden-punten — het denkvermogen. 2048 geeft ~70K koppelingen.
-const N_HIDDEN: usize = 2048;
+const N_INPUT: usize = 256;
+/// Aantal hidden-punten — het denkvermogen. 8192 geeft ~100K koppelingen.
+const N_HIDDEN: usize = 8192;
 /// Aantal output-punten — gelijk aan DIM voor decodering via dot product
-const N_OUTPUT: usize = 64;
+const N_OUTPUT: usize = 256;
 /// Watts-Strogatz K parameter: elke node verbonden met K dichtstbijzijnde buren
-const LOCAL_K: usize = 16;
+const LOCAL_K: usize = 12;
 /// Kans op long-range verbinding per slot (small-world shortcut)
 const LONG_RANGE_P: f32 = 0.05;
 /// Fractie inhibitorische punten (negatieve gewichten)
@@ -116,6 +116,7 @@ pub fn bootstrap_field() -> Field {
                 target: target as u32,
                 weight: rng_range(&mut rng, -0.3, 0.3),
                 momentum: 0.0,
+                ..Default::default()
             });
         }
     }
@@ -134,10 +135,10 @@ pub fn bootstrap_field() -> Field {
                 rng_range(&mut rng, 0.1, 0.5)
             };
             field.points[idx].couplings.push(Coupling {
-                target: left as u32, weight: w, momentum: 0.0,
+                target: left as u32, weight: w, momentum: 0.0, ..Default::default()
             });
             field.points[idx].couplings.push(Coupling {
-                target: right as u32, weight: w * 0.8, momentum: 0.0,
+                target: right as u32, weight: w * 0.8, momentum: 0.0, ..Default::default()
             });
         }
 
@@ -149,6 +150,7 @@ pub fn bootstrap_field() -> Field {
                         target: far as u32,
                         weight: rng_range(&mut rng, -0.2, 0.2),
                         momentum: 0.0,
+                        ..Default::default()
                     });
                 }
             }
@@ -165,11 +167,13 @@ pub fn bootstrap_field() -> Field {
                 target: source as u32,
                 weight: rng_range(&mut rng, -0.3, 0.3),
                 momentum: 0.0,
+                ..Default::default()
             });
             field.points[source].couplings.push(Coupling {
                 target: oidx as u32,
                 weight: rng_range(&mut rng, -0.15, 0.15),
                 momentum: 0.0,
+                ..Default::default()
             });
         }
     }
@@ -181,10 +185,10 @@ pub fn bootstrap_field() -> Field {
         if a != b {
             let w = rng_range(&mut rng, -0.1, 0.1);
             field.points[a].couplings.push(Coupling {
-                target: b as u32, weight: w, momentum: 0.0,
+                target: b as u32, weight: w, momentum: 0.0, ..Default::default()
             });
             field.points[b].couplings.push(Coupling {
-                target: a as u32, weight: w * 0.5, momentum: 0.0,
+                target: a as u32, weight: w * 0.5, momentum: 0.0, ..Default::default()
             });
         }
     }

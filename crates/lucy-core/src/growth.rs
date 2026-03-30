@@ -91,11 +91,13 @@ pub fn maybe_grow(field: &mut Field) {
             target: new_id,
             weight: rng.random_range(-0.3..0.3),
             momentum: 0.0,
+            ..Default::default()
         });
         field.points[new_id as usize].couplings.push(Coupling {
             target: original_id as u32,
             weight: rng.random_range(-0.3..0.3),
             momentum: 0.0,
+            ..Default::default()
         });
 
         tracing::debug!(original_id, new_id, "Field point split");
@@ -154,6 +156,11 @@ pub fn manage_energy(field: &mut Field) {
             let improvement = (p.tension_ema - p.tension).min(0.1);
             p.energy += prediction_reward * improvement;
         }
+
+        // Emotie-gestuurde energie: curiosity geeft extra energie (motivatie om te leren)
+        p.energy += p.curiosity * 0.001;
+        // Satisfaction geeft een kleine bonus (beloning voor goed werk)
+        p.energy += p.satisfaction * 0.0005;
 
         // Sensorische punten krijgen energie van "buiten" (metabolisme)
         if p.is_sensory() {

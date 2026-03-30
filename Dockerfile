@@ -1,25 +1,33 @@
-FROM rust:latest AS builder
+FROM rust:bookworm AS builder
 
 WORKDIR /lucy
 COPY . .
-RUN cargo build --release --workspace
+RUN cargo build --release -p lucy-core
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
-    rustc \
     && rm -rf /var/lib/apt/lists/*
+
+# Installeer Rust toolchain — Lucy moet zichzelf kunnen hercompileren
+COPY --from=builder /usr/local/rustup /usr/local/rustup
+COPY --from=builder /usr/local/cargo /usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 WORKDIR /lucy
 
 # Binary
 COPY --from=builder /lucy/target/release/lucy-core /lucy/lucy-core
 
-# Source code — Lucy moet zichzelf kunnen lezen en aanpassen
+# Volledige source — Lucy kan zichzelf aanpassen en hercompileren
 COPY --from=builder /lucy/crates/ /lucy/crates/
 COPY --from=builder /lucy/Cargo.toml /lucy/Cargo.toml
+COPY --from=builder /lucy/Cargo.lock /lucy/Cargo.lock
 
 # Persistent directories
 RUN mkdir -p /lucy/data /lucy/modules

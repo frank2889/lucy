@@ -26,7 +26,7 @@ use lucy_state::*;
 
 /// Interne simulatie: kopieer een subset van het veld en reken hypothetisch door.
 /// Retourneert de verwachte spanningsreductie van de simulatie.
-#[allow(dead_code)]
+/// Gebruikt voor counterfactueel denken: "wat als ik niets doe?"
 pub fn simulate(field: &Field, point_id: u32, steps: usize) -> f32 {
     let point = &field.points[point_id as usize];
 
@@ -71,7 +71,8 @@ pub fn simulate(field: &Field, point_id: u32, steps: usize) -> f32 {
 pub fn check_escalation(field: &Field, id: u32) -> EscalationLevel {
     let p = &field.points[id as usize];
 
-    if p.tension <= field.growth_threshold * 0.3 {
+    // v1.0: drempels uit AdaptiveParams i.p.v. hardcoded
+    if p.tension <= field.growth_threshold * field.adaptive.escalation_tension_low {
         return EscalationLevel::None;
     }
 
@@ -86,7 +87,18 @@ pub fn check_escalation(field: &Field, id: u32) -> EscalationLevel {
     if p.eta > 0.05 {
         // η is al hoog aangestuurd → meta-leren heeft niet gewerkt
         if p.energy > 0.5 {
-            EscalationLevel::Grow // Niveau 3: splits
+            // Counterfactueel denken: "wat als ik niets doe?"
+            let expected_reduction = simulate(field, id, 20);
+            if expected_reduction > field.growth_threshold * 0.1 {
+                // Simulatie voorspelt dat spanning zelf zal dalen → patience
+                EscalationLevel::MetaLearn
+            } else if p.frustration > field.adaptive.escalation_frust_thresh {
+                // Persistente frustratie + groei helpt niet → pas jezelf aan
+                EscalationLevel::CodeModify
+            } else {
+                // Simulatie voorspelt dat spanning blijft → groei nodig
+                EscalationLevel::Grow
+            }
         } else {
             EscalationLevel::MetaLearn // Niveau 2: verander leerregel nog meer
         }
@@ -100,5 +112,6 @@ pub enum EscalationLevel {
     None,
     MetaLearn,
     Grow,
-    // CodeModify zou niveau 4 zijn — dat komt later wanneer Lucy er klaar voor is
+    /// Niveau 4: Lucy past haar eigen hyperparameters of code aan
+    CodeModify,
 }

@@ -17,3 +17,8 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 bincode = { workspace = true }
 serde-big-array = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+rayon = { workspace = true }
+arc-swap = "1"
