@@ -289,12 +289,14 @@ pub fn compute_tension(field: &mut Field, id: u32) {
 
     // Tevredenheid: spanning daalt → leren werkt
     let improvement = (old_tension_ema - point.tension).max(0.0);
-    point.satisfaction = emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement;
+    point.satisfaction = (emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement).clamp(0.0, 1.0);
+    if point.satisfaction.is_nan() || point.satisfaction.is_infinite() { point.satisfaction = 0.0; }
 
     // Frustratie: spanning hoog EN stabiel → vastgelopen
     let flatness = 1.0 / (1.0 + (point.tension - point.tension_ema).abs() * 10.0);
     let stuck = (point.tension - growth_threshold).max(0.0) * flatness;
-    point.frustration = emo_decay * point.frustration + (1.0 - emo_decay) * stuck;
+    point.frustration = (emo_decay * point.frustration + (1.0 - emo_decay) * stuck).clamp(0.0, 1.0);
+    if point.frustration.is_nan() || point.frustration.is_infinite() { point.frustration = 0.0; }
 }
 
 /// kWTA (k-Winner-Take-All): alleen top-K% punten blijven actief
@@ -463,10 +465,12 @@ fn tick_all_parallel(field: &mut Field) {
         let curiosity = emo_decay * point.curiosity + (1.0 - emo_decay) * surprise;
         let curiosity = if curiosity.is_nan() { 0.0 } else { curiosity };
         let improvement = (point.tension_ema - tension).max(0.0);
-        let satisfaction = emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement;
+        let satisfaction = (emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement).clamp(0.0, 1.0);
+        let satisfaction = if satisfaction.is_nan() || satisfaction.is_infinite() { 0.0 } else { satisfaction };
         let flatness = 1.0 / (1.0 + (tension - point.tension_ema).abs() * 10.0);
         let stuck = (tension - growth_threshold).max(0.0) * flatness;
-        let frustration = emo_decay * point.frustration + (1.0 - emo_decay) * stuck;
+        let frustration = (emo_decay * point.frustration + (1.0 - emo_decay) * stuck).clamp(0.0, 1.0);
+        let frustration = if frustration.is_nan() || frustration.is_infinite() { 0.0 } else { frustration };
 
         Some(PointUpdate {
             id: idx,
