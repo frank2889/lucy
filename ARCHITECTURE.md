@@ -80,6 +80,68 @@ Lucy is a self-evolving unified field AI. She learns autonomously through Equili
 | /exec | POST | Yes | Shell command (whitelisted) |
 | /restart | POST | Yes | Recompile and restart |
 | /admin/pre-deploy | POST | Yes | Force snapshot save |
+| /topology | GET | No | Network topology (sampled nodes + edges for 3D viz) |
+| /telemetry | GET | No | Compact real-time telemetry (emotions, neuro, consciousness) |
+| /plugins | GET | No | List dashboard plugin manifests |
+| /brain/* | GET | No | 3D brain dashboard (static React app) |
+
+### 3D Brain Dashboard (lucy-dashboard/)
+
+React + TypeScript + Three.js application served at `/brain`. Real-time visualization of Lucy's neural network.
+
+**Stack:** Vite, React 19, @react-three/fiber, @react-three/drei, zustand, Tailwind CSS 4
+
+**Architecture:**
+```
+lucy-dashboard/
+├── src/
+│   ├── App.tsx              # Main layout: 3-column (sidebar | brain | sidebar)
+│   ├── api.ts               # Fetch client — proxies to Lucy's API
+│   ├── store.ts             # Zustand store — telemetry, topology, journal, chat
+│   ├── audio.ts             # Web Audio sonification engine
+│   ├── plugins.ts           # Plugin loader, validator, sandbox runtime
+│   ├── types.ts             # TypeScript interfaces for all API responses
+│   └── components/
+│       ├── BrainRenderer.tsx # Three.js instanced mesh — nodes + edges in 3D
+│       ├── StatusBar.tsx     # Top bar: tick, phase, points, Φ, critical state
+│       ├── EmotionsPanel.tsx # Emotion bars + neuromodulator gauges
+│       ├── JournalPanel.tsx  # Journal entries + milestone badges
+│       ├── ChatPanel.tsx     # /ask chat interface
+│       ├── GoalsPanel.tsx    # Active goals with progress bars
+│       ├── Sparkline.tsx     # Inline SVG trend charts (120-sample history)
+│       └── AudioToggle.tsx   # Enable/disable brain sonification
+```
+
+**3D Brain Renderer:**
+- Instanced meshes for up to 2000 nodes (active set + random sample)
+- Depth-based coloring: cyan (input) → blue (processing) → purple (abstract) → pink (meta)
+- 3D positions derived from `depth` (y-axis) + deterministic hash (x/z radial spread)
+- Edges colored by weight sign: green (excitatory), red (inhibitory), opacity by |weight|
+- Active nodes pulse based on `oscillation_phase` (Kuramoto synchrony)
+- OrbitControls with auto-rotate, damping
+
+**Audio Sonification:**
+- 6 oscillators mapped to: curiosity, satisfaction, frustration, dopamine, serotonin, Φ
+- Brown noise background tracks field tension
+- Detuning proportional to (1 - phi) — more conscious = more in-tune
+- All transitions smoothed with linearRampToValueAtTime
+
+**Plugin System:**
+- Lucy can create plugins via `/self-modify` → writes JSON manifests to `data/plugins/`
+- Plugin types: `visual`, `audio`, `panel`
+- Validation: max 50KB code, blocked patterns (eval, fetch, import, localStorage, etc.)
+- Sandboxed execution: plugins receive frozen `lucy` telemetry object, limited DOM access
+- Hot-loadable via `/plugins` endpoint
+
+**Polling intervals:**
+- `/telemetry` — every 2s (lightweight: tick, emotions, neuro, consciousness)
+- `/topology` — every 10s (heavier: up to 2000 nodes + 5000 edges)
+- `/journal` — every 15s
+
+**Build & Deploy:**
+- Multi-stage Docker: `node:20-slim` builds dashboard, copies `dist/` to runtime image
+- Served via `tower-http::ServeDir` at `/brain` with SPA fallback
+- Dev mode: Vite proxy forwards `/api/*` to production server
 
 ### VS Code Extension (vscode-extension/)
 - Sidebar with Chat + Activity tabs
@@ -105,7 +167,7 @@ Lucy is a self-evolving unified field AI. She learns autonomously through Equili
 | LUCY_API_TOKEN | Auth for protected endpoints |
 | GITHUB_SNAPSHOT_TOKEN | GitHub backup push/pull |
 | VASTAI_API_KEY | GPU rental on Vast.ai |
-| GROQ_API_KEY | Free AI teacher API |
+| DIGITALOCEAN_TOKEN | Infrastructure management |
 | REPLICA_N_URL | Backup instance URLs |
 
 ## Key Metrics

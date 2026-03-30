@@ -26,6 +26,9 @@ Geen transformer, geen lookup cache — Lucy denkt écht na door haar veld te la
 │  lucy-state (lib)    — Field, FieldPoint, Goal, etc.     │
 │  lucy-io (lib)       — HTTP client, filesystem, config    │
 │  lucy-gpu (binary)   — GPU compute worker (optioneel)     │
+├──────────────────────────────────────────────────────────┤
+│  lucy-dashboard      — 3D brain viz (React + Three.js)   │
+│    /brain            — served via tower-http::ServeDir    │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -52,9 +55,13 @@ docker compose build && docker compose up -d
 | `/feed`         | POST    | Geef trainingsdata (JSON of tekst)                  |
 | `/feed-code`    | POST    | Voed Lucy broncode                                  |
 | `/activity`     | GET     | Stemming, emoties, interesses, leervoortgang        |
-| `/dashboard`    | GET     | HTML dashboard                                      |
+| `/dashboard`    | GET     | HTML dashboard (legacy)                             |
+| `/brain`        | GET     | **3D brain dashboard** (React + Three.js)           |
 | `/journal`      | GET     | Lucy's dagboek-entries                              |
 | `/sense`        | POST    | Sensorische input                                   |
+| `/telemetry`    | GET     | Compact real-time telemetry                         |
+| `/topology`     | GET     | Network topology voor 3D visualisatie               |
+| `/plugins`      | GET     | Dashboard plugin manifests                          |
 
 ### POST /ask — Vraagverwerking
 
@@ -148,6 +155,42 @@ Dit blok laat zien wat Lucy intern doet. Het wordt meegegeven bij élk /ask resp
 Geeft Lucy's huidige stemming, emoties, neuromodulatoren, exploratie-status,
 leervoortgang en recente observaties.
 
+## 3D Brain Dashboard
+
+Beschikbaar op `/brain` — een real-time visualisatie van Lucy's brein.
+
+```
+http://209.38.36.51:3000/brain
+```
+
+### Features
+
+- **3D Brein** — Interactieve Three.js visualisatie met tot 2000 nodes en 5000 synapsen
+  - Kleurcoding per diepte: cyan (input) → blauw (verwerking) → paars (abstract) → roze (meta)
+  - Actieve nodes pulseren op Lucy's oscillatiefase (gamma-ritme)
+  - Groene synapsen = excitatoir, rode = inhibitoir
+  - Auto-rotate met orbit controls
+
+- **Emotie-paneel** — Real-time bars voor curiosity, satisfaction, frustration + neurotransmitters
+- **Sparkline-trends** — 120-sample histories van alle brain metrics
+- **Journal** — Lucy's recente observaties en milestones
+- **Chat** — Stel Lucy direct vragen via `/ask`
+- **Doelen** — Actieve leerdoelen met voortgangsbars
+- **Audio** — Web Audio sonificatie van Lucy's breinactiviteit (oscillatoren per emotie, Φ-gebaseerde detuning)
+
+### Plugin Systeem
+
+Lucy kan zelf visuele, audio en panel-plugins schrijven:
+- Manifests in `data/plugins/*.json`
+- Sandboxed uitvoering (geen eval, fetch, localStorage, etc.)
+- Maximum 50KB per plugin
+- Automatisch geladen door het dashboard
+
+### Technologie
+
+React 19, TypeScript, Vite, Three.js (`@react-three/fiber`), zustand, Tailwind CSS 4.
+Multi-stage Docker build (Node + Rust). Geserveerd via `tower-http::ServeDir`.
+
 ## VSCode Extension
 
 De `vscode-extension/` map bevat een sidebar met twee tabs:
@@ -192,6 +235,10 @@ Shared I/O: HTTP client, filesystem helpers, configuratie.
 
 ### lucy-gpu
 Optionele GPU compute worker voor versnelde veld-berekeningen.
+
+### lucy-dashboard
+3D brain dashboard (React + Three.js). Gebouwd met Vite, geserveerd door lucy-core op `/brain`.
+Bevat: 3D renderer, emotie-panelen, journal, chat, audio sonificatie, plugin runtime.
 
 ## Docker
 
