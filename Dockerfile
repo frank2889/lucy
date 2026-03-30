@@ -4,6 +4,14 @@ WORKDIR /lucy
 COPY . .
 RUN cargo build --release -p lucy-core
 
+# Dashboard build
+FROM node:20-slim AS dashboard
+WORKDIR /dashboard
+COPY lucy-dashboard/package.json lucy-dashboard/package-lock.json ./
+RUN npm ci
+COPY lucy-dashboard/ ./
+RUN npm run build
+
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
@@ -30,7 +38,10 @@ COPY --from=builder /lucy/Cargo.toml /lucy/Cargo.toml
 COPY --from=builder /lucy/Cargo.lock /lucy/Cargo.lock
 
 # Persistent directories
-RUN mkdir -p /lucy/data /lucy/modules
+RUN mkdir -p /lucy/data /lucy/modules /lucy/dashboard
+
+# Dashboard static files
+COPY --from=dashboard /dashboard/dist/ /lucy/dashboard/
 
 VOLUME ["/lucy/data", "/lucy/modules"]
 

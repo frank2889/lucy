@@ -284,7 +284,7 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     // v1.3: NaN-safe — .max(0.0) voorkomt sqrt van negatief getal
     let surprise = (point.precision * pred_error.max(0.0).sqrt() - old_tension_ema.max(0.0).sqrt()).max(0.0);
     let surprise = if surprise.is_nan() || surprise.is_infinite() { 0.0 } else { surprise };
-    point.curiosity = emo_decay * point.curiosity + (1.0 - emo_decay) * surprise;
+    point.curiosity = (emo_decay * point.curiosity + (1.0 - emo_decay) * surprise).clamp(0.0, 1.0);
     if point.curiosity.is_nan() || point.curiosity.is_infinite() { point.curiosity = 0.0; }
 
     // Tevredenheid: spanning daalt → leren werkt
@@ -462,7 +462,7 @@ fn tick_all_parallel(field: &mut Field) {
         let emo_decay = 0.95;
         let surprise = (precision * pred_error.max(0.0).sqrt() - point.tension_ema.max(0.0).sqrt()).max(0.0);
         let surprise = if surprise.is_nan() || surprise.is_infinite() { 0.0 } else { surprise };
-        let curiosity = emo_decay * point.curiosity + (1.0 - emo_decay) * surprise;
+        let curiosity = (emo_decay * point.curiosity + (1.0 - emo_decay) * surprise).clamp(0.0, 1.0);
         let curiosity = if curiosity.is_nan() { 0.0 } else { curiosity };
         let improvement = (point.tension_ema - tension).max(0.0);
         let satisfaction = (emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement).clamp(0.0, 1.0);

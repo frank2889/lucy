@@ -27,23 +27,30 @@ echo "=== 2. Wachten op save ==="
 sleep 3
 
 echo ""
-echo "=== 3. Code synchen ==="
+echo "=== 3. Dashboard bouwen ==="
+if [ -d "lucy-dashboard" ]; then
+    (cd lucy-dashboard && npm run build 2>&1)
+    echo "   Dashboard gebouwd"
+fi
+
+echo ""
+echo "=== 4. Code synchen ==="
 rsync -avz --exclude='target' --exclude='.git' --exclude='data' --exclude='.env' --exclude='node_modules' --exclude='vscode-extension/out' ./ $SERVER:/lucy/
 
 if [ "$1" = "full" ]; then
     echo ""
-    echo "=== 4. VOLLEDIGE DEPLOY (Docker rebuild) ==="
+    echo "=== 5. VOLLEDIGE DEPLOY (Docker rebuild) ==="
     ssh $SERVER "cd /lucy && docker compose up -d --build"
     echo ""
-    echo "=== 5. Wachten op startup ==="
+    echo "=== 6. Wachten op startup ==="
     sleep 15
 else
     echo ""
-    echo "=== 4. SNELLE DEPLOY (code naar container + hercompileer) ==="
-    ssh $SERVER "docker cp /lucy/crates lucy:/lucy/crates && docker cp /lucy/Cargo.toml lucy:/lucy/Cargo.toml && docker cp /lucy/Cargo.lock lucy:/lucy/Cargo.lock"
+    echo "=== 5. SNELLE DEPLOY (code naar container + hercompileer) ==="
+    ssh $SERVER "docker cp /lucy/crates lucy:/lucy/crates && docker cp /lucy/Cargo.toml lucy:/lucy/Cargo.toml && docker cp /lucy/Cargo.lock lucy:/lucy/Cargo.lock && docker cp /lucy/lucy-dashboard/dist lucy:/lucy/dashboard"
 
     echo ""
-    echo "=== 5. Lucy hercompileert zichzelf ==="
+    echo "=== 6. Lucy hercompileert zichzelf ==="
     if [ -n "$TOKEN" ]; then
         curl -s -X POST http://209.38.36.51:3000/restart \
             -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
@@ -53,13 +60,16 @@ else
 fi
 
 echo ""
-echo "=== 6. Verify ==="
+echo "=== 7. Verify ==="
 sleep 3
 curl -s http://209.38.36.51:3000/status | python3 -m json.tool
 
 echo ""
 echo "Lucy draait op: http://209.38.36.51:3000"
+echo "  /brain        — 3D brain dashboard"
 echo "  /status       — live stats + emoties"
+echo "  /telemetry    — compact real-time data"
+echo "  /topology     — network topology"
 echo "  /ask          — stel een vraag"
 echo "  /feed         — trainingsdata"
 echo "  /self-modify  — zelf-aanpassing (auth vereist)"

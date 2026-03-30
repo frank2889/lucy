@@ -73,6 +73,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use lucy_state::*;
 use lucy_state::GoalStrategy;
 use serde_json::{json, Value};
@@ -151,8 +153,13 @@ pub fn spawn_server(state: SharedState) {
             .route("/dashboard", get(dashboard_handler))
             .route("/journal", get(journal_handler))
             .route("/sense", post(sense_handler))
+            .route("/topology", get(topology_handler))
+            .route("/telemetry", get(telemetry_handler))
+            .route("/plugins", get(plugins_list_handler))
+            .nest_service("/brain", ServeDir::new("dashboard").fallback(ServeFile::new("dashboard/index.html")))
             .merge(protected)
             .with_state(state)
+            .layer(CorsLayer::permissive())
             .layer(axum::extract::DefaultBodyLimit::max(10_000_000)); // 10MB max request body
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -167,15 +174,18 @@ pub fn spawn_server(state: SharedState) {
 async fn root() -> Json<Value> {
     Json(json!({
         "name": "Lucy",
-        "version": "0.9.0",
+        "version": "2.0.0",
         "what": "Zelflerend veld-systeem — echte AI, geen lookup cache",
         "how": "Equilibrium propagation op een small-world netwerk",
         "endpoints": {
             "/status": "GET — live status + emoties + zelf-aanpassingen",
             "/ask": "POST — stel een vraag (veld berekent het antwoord)",
             "/feed": "POST — geef Lucy trainingsdata",
+            "/brain": "GET — 3D brain dashboard",
+            "/telemetry": "GET — compact real-time telemetry",
+            "/topology": "GET — network topology for visualization",
+            "/journal": "GET — journal entries",
             "/self-modify": "POST — Lucy past haar eigen code/hyperparameters aan",
-            "/exec": "POST — shell commando uitvoeren op Lucy's server"
         }
     }))
 }
@@ -913,4 +923,155 @@ async fn dashboard_handler() -> Html<String> {
         Ok(html) => Html(html),
         Err(_) => Html("<h1>Dashboard niet gevonden</h1><p>Lucy heeft data/dashboard.html nog niet aangemaakt.</p>".to_string()),
     }
+}
+
+/// /topology — Network topology for 3D brain visualization
+/// Returns sampled nodes with 3D positions derived from depth + hash, and top couplings by |weight|
+async fn topology_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let n_points = f.points.len();
+
+    // Sample max 2000 nodes (all active + random sample of rest)
+    let mut node_ids: Vec<usize> = f.active_set.iter().map(|&id| id as usize).collect();
+    let max_nodes = 2000usize;
+    if node_ids.len() < max_nodes && n_points > node_ids.len() {
+        // Add random inactive nodes
+        let mut rng = rand::rng();
+        let remaining: Vec<usize> = (0..n_points)
+            .filter(|i| !f.active_set.contains(&(*i as u32)))
+            .collect();
+        use rand::seq::SliceRandom;
+        let mut sample = remaining;
+        sample.shuffle(&mut rng);
+        node_ids.extend(sample.into_iter().take(max_nodes - node_ids.len()));
+    }
+    node_ids.truncate(max_nodes);
+
+    // Build node set for fast lookup
+    let node_set: std::collections::HashSet<usize> = node_ids.iter().copied().collect();
+
+    // Build nodes with 3D positions
+    let nodes: Vec<Value> = node_ids.iter().map(|&id| {
+        let p = &f.points[id];
+        // Position from depth (y) + hash of id (x, z) — deterministic layout
+        let hash = ((id as u64).wrapping_mul(2654435761)) as f32;
+        let angle = (hash % 10000.0) / 10000.0 * std::f32::consts::TAU;
+        let radius = (p.depth as f32 + 1.0) * 2.0 + (hash % 1000.0) / 1000.0;
+        let x = angle.cos() * radius;
+        let y = p.depth as f32 * 3.0 - 4.5;
+        let z = angle.sin() * radius;
+
+        let is_active = f.active_set.contains(&(id as u32));
+        json!({
+            "id": id,
+            "pos": [x, y, z],
+            "depth": p.depth,
+            "active": is_active,
+            "energy": p.energy,
+            "tension": p.tension,
+            "curiosity": p.curiosity,
+            "satisfaction": p.satisfaction,
+            "frustration": p.frustration,
+            "phi_integrated": p.phi_integrated,
+            "oscillation_phase": p.oscillation_phase,
+        })
+    }).collect();
+
+    // Collect top couplings (only between sampled nodes)
+    let mut edges: Vec<(usize, u32, f32)> = Vec::new();
+    for &id in &node_ids {
+        for c in &f.points[id].couplings {
+            if node_set.contains(&(c.target as usize)) {
+                edges.push((id, c.target, c.weight));
+            }
+        }
+    }
+    // Sort by |weight| descending, take top 5000
+    edges.sort_by(|a, b| b.2.abs().partial_cmp(&a.2.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    edges.truncate(5000);
+
+    let links: Vec<Value> = edges.iter().map(|(src, tgt, w)| {
+        json!({"s": src, "t": tgt, "w": w})
+    }).collect();
+
+    Json(json!({
+        "tick": f.tick,
+        "total_points": n_points,
+        "sampled": nodes.len(),
+        "nodes": nodes,
+        "links": links,
+    }))
+}
+
+/// /telemetry — Compact real-time telemetry for dashboard polling (lightweight)
+async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let n = f.active_set.len() as f32;
+
+    let (avg_curiosity, avg_satisfaction, avg_frustration) = if n > 0.0 {
+        let c: f32 = f.active_set.iter().map(|&id| f.points[id as usize].curiosity).sum::<f32>() / n;
+        let s: f32 = f.active_set.iter().map(|&id| f.points[id as usize].satisfaction).sum::<f32>() / n;
+        let fr: f32 = f.active_set.iter().map(|&id| f.points[id as usize].frustration).sum::<f32>() / n;
+        (c, s, fr)
+    } else { (0.0, 0.0, 0.0) };
+
+    let avg_tension = if n > 0.0 {
+        f.active_set.iter().map(|&id| f.points[id as usize].tension).sum::<f32>() / n
+    } else { 0.0 };
+
+    Json(json!({
+        "tick": f.tick,
+        "phase": format!("{:?}", f.phase),
+        "points": f.points.len(),
+        "active": f.active_set.len(),
+        "tension": avg_tension,
+        "emotions": {
+            "curiosity": avg_curiosity,
+            "satisfaction": avg_satisfaction,
+            "frustration": avg_frustration,
+        },
+        "neuro": {
+            "dopamine": f.dopamine,
+            "norepinephrine": f.norepinephrine,
+            "serotonin": f.serotonin,
+            "acetylcholine": f.acetylcholine,
+        },
+        "consciousness": {
+            "spectral_radius": f.spectral_radius,
+            "phi": f.integrated_info_avg,
+            "coherence": f.oscillation_coherence,
+            "free_energy": f.avg_free_energy,
+            "is_critical": f.is_critical,
+        },
+        "goals": f.goals.iter().take(5).map(|g| {
+            json!({
+                "description": g.description,
+                "priority": g.priority,
+                "progress": g.progress,
+            })
+        }).collect::<Vec<_>>(),
+    }))
+}
+
+/// /plugins — List available dashboard plugins (from data/plugins/)
+async fn plugins_list_handler() -> Json<Value> {
+    let plugin_dir = std::path::Path::new("data/plugins");
+    let mut plugins = Vec::new();
+
+    if plugin_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(plugin_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(manifest) = serde_json::from_str::<Value>(&content) {
+                            plugins.push(manifest);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Json(json!({ "plugins": plugins }))
 }

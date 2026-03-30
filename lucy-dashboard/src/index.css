@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-panel: #1a1a2e;
+  --border: #2a2a4a;
+  --text-primary: #e0e0ff;
+  --text-secondary: #8888aa;
+  --accent-blue: #4466ff;
+  --accent-cyan: #00ddff;
+  --accent-green: #00ff88;
+  --accent-purple: #aa44ff;
+  --accent-red: #ff4466;
+  --accent-orange: #ff8844;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.glass {
+  background: rgba(26, 26, 46, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.glow-blue { box-shadow: 0 0 20px rgba(68, 102, 255, 0.3); }
+.glow-cyan { box-shadow: 0 0 20px rgba(0, 221, 255, 0.3); }
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.animate-pulse-slow { animation: pulse-slow 3s ease-in-out infinite; }
