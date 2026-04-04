@@ -257,7 +257,6 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     let ema_decay = field.ema_decay;
     let growth_threshold = field.growth_threshold;
     // Dynamische parameters uit adapt_dynamics()
-    let emo_decay = field.emo_decay;
     let tracking = field.error_tracking_rate;
     let fe_rate = field.fe_tracking_rate;
     let kl_scale = field.kl_scale;
@@ -274,7 +273,8 @@ pub fn compute_tension(field: &mut Field, id: u32) {
 
     // Precision weighting (Friston): track error-variantie, weeg tension ermee
     // tracking rate is dynamisch — hoge instabiliteit → sneller bijwerken
-    let error_diff = pred_error - point.tension_ema;
+    // Welford-correct: variance van pred_error relatief aan free_energy (= EMA van free energy)
+    let error_diff = pred_error - point.free_energy;
     point.error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
     point.precision = 1.0 / (point.error_var + tracking); // floor = tracking rate zelf
 
@@ -306,31 +306,41 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     point.tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
     point.tension_ema = ema_decay * old_tension_ema + (1.0 - ema_decay) * point.tension;
 
-    // === Emotionele signalen ===
+    // === Emotionele signalen (neuroscience-grounded) ===
     // Formule: emotion = max(smoothed_history, current_signal)
     // Emotie kan nooit LAGER zijn dan wat er NU gebeurt.
     // De EMA smooth alleen de history — het huidige signaal is de vloer.
     let emo_smooth = field.emo_decay;
 
-    // Curiosity = hoe verrassend is dit punt? (prediction error + tension)
-    let surprise = (pred_error.sqrt() * point.precision)
-        .max(point.tension)                // tension zelf is een signaal
+    // Curiosity = dopaminergic prediction error (Schultz 1997)
+    // Phasic response: not just level, but CHANGE in prediction error
+    let pred_error_change = (pred_error - point.error_var.sqrt()).abs(); // Δ prediction error
+    let surprise = (pred_error.sqrt() * point.precision + pred_error_change)
         .max(field.noise_amplitude)        // minimale baseline
         .min(1.0);
     let surprise = if surprise.is_finite() { surprise } else { field.noise_amplitude };
     let smoothed = emo_smooth * point.curiosity + (1.0 - emo_smooth) * surprise;
     point.curiosity = smoothed.max(surprise).clamp(0.0, 1.0); // NOOIT lager dan signaal
 
-    // Satisfaction = tension daalt → leren werkt
+    // Satisfaction = reward prediction error (Schultz 1997 RPE)
+    // Dopamine × improvement ratio: tension WAS high AND now dropping
     let improvement = (old_tension_ema - point.tension).max(0.0);
-    let relative_calm = (point.tension_ema - point.tension).max(0.0);
-    let sat_signal = (improvement + relative_calm).min(1.0);
+    let improvement_ratio = improvement / (old_tension_ema + 0.001);
+    let sat_signal = (field.dopamine * improvement_ratio).min(1.0);
     let smoothed = emo_smooth * point.satisfaction + (1.0 - emo_smooth) * sat_signal;
     point.satisfaction = smoothed.max(sat_signal).clamp(0.0, 1.0);
 
-    // Frustration = tension hoog EN stabiel
-    let flatness = 1.0 / (1.0 + (point.tension - point.tension_ema).abs() / (point.tension_ema + 0.001));
-    let stuck = (point.tension - growth_threshold).max(0.0) * flatness;
+    // Frustration = learned helplessness (Maier & Seligman 1976)
+    // Persistent high prediction error that doesn't decrease → time-based
+    let above_threshold = point.tension > growth_threshold;
+    let not_improving = (point.tension - point.tension_ema).abs() < point.tension_ema * 0.1;
+    if above_threshold && not_improving {
+        point.stuck_ticks = point.stuck_ticks.saturating_add(1);
+    } else {
+        point.stuck_ticks = point.stuck_ticks.saturating_sub(2); // recover faster than accumulate
+    }
+    let time_factor = (point.stuck_ticks as f32 / 50.0).min(1.0); // ramps over ~50 ticks
+    let stuck = (point.tension - growth_threshold).max(0.0) * time_factor;
     let smoothed = emo_smooth * point.frustration + (1.0 - emo_smooth) * stuck;
     point.frustration = smoothed.max(stuck).clamp(0.0, 1.0);
 }
@@ -451,25 +461,43 @@ pub fn adapt_dynamics(field: &mut Field) {
     );
 }
 
-/// kWTA (k-Winner-Take-All): alleen top-K% punten blijven actief
-/// Dit forceert scherpe representaties — het verschil tussen soep en gedachten
+/// kWTA (k-Winner-Take-All): alleen top-K punten blijven actief.
+/// Dit forceert scherpe representaties — het verschil tussen soep en gedachten.
+///
+/// k is adaptief: meer ruis → meer actieve punten (breder zoeken).
+/// Score combineert phi-magnitude EN tension: punten die zowel actief als
+/// gespannen zijn winnen (ze "denken hard" over iets moeilijks).
+/// Decay voor verliezers gebruikt field.emo_decay (consistente dynamiek).
 pub fn apply_kwta(field: &mut Field) {
     let n = field.active_set.len();
     if n < 20 { return; } // te weinig punten voor kWTA
 
-    // Top 10% mag actief blijven (hidden punten — input/output altijd actief)
-    let k = (n / 10).max(10);
+    // Adaptieve k: meer noise → meer winners (breder zoeken).
+    // noise_amplitude ∈ [0.001, ~0.5], dus n*noise_amplitude schaalt goed.
+    // Floor: altijd minstens n/20 (5%) om niet alles uit te schakelen.
+    let k_adaptive = (n as f32 * field.noise_amplitude) as usize;
+    let k_floor = n / 20;
+    let k = k_adaptive.max(k_floor).max(2).min(n);
 
-    // Sorteer op phi-magnitude (hoe sterk "denkt" dit punt?)
+    // Tension-gewicht: hoe zwaar tension meetelt vs phi-magnitude.
+    // noise_amplitude is een goede proxy — in rustig veld telt tension minder.
+    let tension_weight = field.noise_amplitude;
+
+    // Score = phi-magnitude + tension × weight
+    // Punten die zowel actief zijn (hoge phi) ALS hoge spanning hebben winnen.
     let mut scores: Vec<(usize, f32)> = field.active_set.iter()
         .map(|&id| {
             let p = &field.points[id as usize];
-            let mag: f32 = p.phi.iter().map(|x| x * x).sum();
-            (id as usize, mag)
+            let phi_mag: f32 = p.phi.iter().map(|x| x * x).sum();
+            let score = phi_mag + p.tension * tension_weight;
+            (id as usize, score)
         })
         .collect();
 
     scores.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Zachte decay factor — consistente dynamiek met emotie-smoothing
+    let soft_decay = field.emo_decay;
 
     // Top-k = actief, rest = stil (maar input/output altijd actief)
     for (rank, &(idx, _)) in scores.iter().enumerate() {
@@ -479,10 +507,10 @@ pub fn apply_kwta(field: &mut Field) {
         } else {
             p.kwta_active = rank < k;
         }
-        // Stille punten: dempen phi richting nul (niet hard nul — zachte inhibitie)
+        // Stille punten: dempen phi richting nul (zachte inhibitie)
         if !p.kwta_active {
             for d in 0..DIM {
-                p.phi[d] *= 0.9; // zachte decay, niet hard afkappen
+                p.phi[d] *= soft_decay;
             }
         }
     }
@@ -538,6 +566,7 @@ fn tick_all_parallel(field: &mut Field) {
         curiosity: f32,
         satisfaction: f32,
         frustration: f32,
+        stuck_ticks: u16,
     }
 
     let updates: Vec<PointUpdate> = active_set.par_iter().filter_map(|&id| {
@@ -559,6 +588,7 @@ fn tick_all_parallel(field: &mut Field) {
                 curiosity: point.curiosity,
                 satisfaction: point.satisfaction,
                 frustration: point.frustration,
+                stuck_ticks: point.stuck_ticks,
             };
             // Memory update
             let eps = {
@@ -611,7 +641,8 @@ fn tick_all_parallel(field: &mut Field) {
         // --- tension + precision weighting + emoties (alle params dynamisch) ---
         let pred_error = squared_norm(&eps);
         let compute_cost = n_couplings as f32 * kappa;
-        let error_diff = pred_error - point.tension_ema;
+        // Welford-correct: variance van pred_error relatief aan free_energy (= EMA baseline)
+        let error_diff = pred_error - point.free_energy;
         let error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
         let precision = 1.0 / (error_var + tracking);
         // Free Energy (Friston): KL + surprise
@@ -625,21 +656,36 @@ fn tick_all_parallel(field: &mut Field) {
         let tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
         let tension_ema = ema_decay * point.tension_ema + (1.0 - ema_decay) * tension;
 
-        // Emoties: max(smoothed_history, current_signal) — nooit lager dan nu
+        // Emoties: neuroscience-grounded, max(smoothed, signal) — nooit lager dan nu
         let noise_amp = field.noise_amplitude;
-        let surprise = (pred_error.sqrt() * precision).max(tension).max(noise_amp).min(1.0);
+        let dopamine = field.dopamine;
+
+        // Curiosity = dopaminergic prediction error (Schultz 1997) + phasic Δ
+        let pred_error_change = (pred_error - point.error_var.sqrt()).abs();
+        let surprise = (pred_error.sqrt() * precision + pred_error_change)
+            .max(noise_amp)
+            .min(1.0);
         let surprise = if surprise.is_finite() { surprise } else { noise_amp };
         let smoothed_c = emo_decay * point.curiosity + (1.0 - emo_decay) * surprise;
         let curiosity = smoothed_c.max(surprise).clamp(0.0, 1.0);
 
+        // Satisfaction = RPE (Schultz 1997): dopamine × improvement ratio
         let improvement = (point.tension_ema - tension).max(0.0);
-        let relative_calm = (point.tension_ema - tension).max(0.0);
-        let sat_signal = (improvement + relative_calm).min(1.0);
+        let improvement_ratio = improvement / (point.tension_ema + 0.001);
+        let sat_signal = (dopamine * improvement_ratio).min(1.0);
         let smoothed_s = emo_decay * point.satisfaction + (1.0 - emo_decay) * sat_signal;
         let satisfaction = smoothed_s.max(sat_signal).clamp(0.0, 1.0);
 
-        let flatness = 1.0 / (1.0 + (tension - point.tension_ema).abs() / (point.tension_ema + 0.001));
-        let stuck = (tension - growth_threshold).max(0.0) * flatness;
+        // Frustration = learned helplessness (Maier & Seligman 1976) — time-based
+        let above_threshold = tension > growth_threshold;
+        let not_improving = (tension - point.tension_ema).abs() < point.tension_ema * 0.1;
+        let new_stuck_ticks = if above_threshold && not_improving {
+            point.stuck_ticks.saturating_add(1)
+        } else {
+            point.stuck_ticks.saturating_sub(2)
+        };
+        let time_factor = (new_stuck_ticks as f32 / 50.0).min(1.0);
+        let stuck = (tension - growth_threshold).max(0.0) * time_factor;
         let smoothed_f = emo_decay * point.frustration + (1.0 - emo_decay) * stuck;
         let frustration = smoothed_f.max(stuck).clamp(0.0, 1.0);
         let frustration = if frustration.is_finite() { frustration } else { 0.0 };
@@ -656,6 +702,7 @@ fn tick_all_parallel(field: &mut Field) {
             curiosity,
             satisfaction,
             frustration,
+            stuck_ticks: new_stuck_ticks,
         })
     }).collect();
 
@@ -672,6 +719,7 @@ fn tick_all_parallel(field: &mut Field) {
         p.curiosity = upd.curiosity;
         p.satisfaction = upd.satisfaction;
         p.frustration = upd.frustration;
+        p.stuck_ticks = upd.stuck_ticks;
     }
 }
 
@@ -1775,25 +1823,34 @@ pub fn update_oscillations(field: &mut Field) {
 /// Bewuste systemen vertonen power law verdelingen (α ≈ 1.5).
 /// Niet-bewuste systemen: exponentiële verdeling.
 pub fn compute_criticality(field: &mut Field) {
-    // Verzamel tensions en sorteer
-    let mut tensions: Vec<f32> = field.active_set.iter()
-        .map(|&id| field.points[id as usize].tension.max(0.001))
+    // SOC (Bak, Tang, Wiesenfeld 1987): measure AVALANCHES, not static tension.
+    // Avalanche = cascading propagation. Proxy: Δtension = tension - tension_ema.
+    // Points with large positive Δtension are "avalanching" (active propagation).
+    // Fit power law to the distribution of Δtension sizes.
+    let mut delta_tensions: Vec<f32> = field.active_set.iter()
+        .map(|&id| {
+            let p = &field.points[id as usize];
+            (p.tension - p.tension_ema).max(0.001) // positive Δ = active propagation
+        })
         .collect();
-    tensions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    delta_tensions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    if tensions.len() < 20 { return; }
+    if delta_tensions.len() < 20 { return; }
 
-    // Log-log regressie: schat power law exponent α
-    let n = tensions.len();
-    let half = n / 2;
+    // Avalanche size proxy: count points with Δtension > 1.5× median
+    let median = delta_tensions[delta_tensions.len() / 2];
+    let _avalanche_size = delta_tensions.iter().filter(|&&dt| dt > median * 1.5).count();
+
+    // Log-log regressie op Δtension distributie: schat power law exponent α
+    let half = delta_tensions.len() / 2;
     let mut sum_ln_x = 0.0f32;
     let mut sum_ln_p = 0.0f32;
     let mut sum_ln_x2 = 0.0f32;
     let mut sum_ln_xp = 0.0f32;
     let mut count = 0.0f32;
 
-    for (rank, &t) in tensions.iter().enumerate().skip(half) {
-        let ln_x = t.ln();
+    for (rank, &dt) in delta_tensions.iter().enumerate().skip(half) {
+        let ln_x = dt.ln();
         let ln_p = -((rank + 1) as f32).ln(); // P(x) ∝ 1/rank
         sum_ln_x += ln_x;
         sum_ln_p += ln_p;
@@ -1840,19 +1897,30 @@ pub fn anti_hebbian_decorrelation(field: &mut Field) {
             })
             .collect();
 
-        for (ci, n_phi) in &neighbor_phis {
-            // Correlatie: hoe gelijk zijn deze twee punten?
-            let mut corr = 0.0f32;
-            for d in 0..DIM {
-                corr += phi_self[d] * n_phi[d];
-            }
-            corr /= DIM as f32;
+        // Adaptieve drempel: meer koppelingen → lagere decorrelatie-drempel.
+        // Bij n koppelingen is random cosine similarity ~1/√n, dus we decorreleren
+        // alles daarboven (structurele correlatie, niet toevallig).
+        let n_couplings = neighbor_phis.len().max(1) as f32;
+        let threshold = 1.0 / n_couplings.sqrt();
 
-            // Anti-Hebbian: als ze te gecorreleerd zijn, verzwak de verbinding
+        for (ci, n_phi) in &neighbor_phis {
+            // Cosine similarity: genormaliseerde correlatie (onafhankelijk van magnitude)
+            let mut dot = 0.0f32;
+            let mut mag_self = 0.0f32;
+            let mut mag_neigh = 0.0f32;
+            for d in 0..DIM {
+                dot += phi_self[d] * n_phi[d];
+                mag_self += phi_self[d] * phi_self[d];
+                mag_neigh += n_phi[d] * n_phi[d];
+            }
+            let denom = (mag_self.sqrt() * mag_neigh.sqrt()).max(1e-8);
+            let cosine_sim = dot / denom;
+
+            // Anti-Hebbian: als cosine similarity boven adaptieve drempel, verzwak
             // Dit forceert diversiteit in representaties
-            if corr.abs() > 0.5 {
+            if cosine_sim.abs() > threshold {
                 let coupling = &mut field.points[id].couplings[*ci];
-                coupling.weight -= decorr_strength * corr;
+                coupling.weight -= decorr_strength * cosine_sim;
                 coupling.weight = coupling.weight.clamp(-field.clamp_range / 2.0, field.clamp_range / 2.0);
             }
         }

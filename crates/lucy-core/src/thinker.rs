@@ -147,15 +147,39 @@ pub fn generate_goal(
     let (avg_tension, avg_curiosity, avg_frustration, _avg_satisfaction) = observe_state(field);
     let mut rng = rand::rng();
 
-    // v2.3: Alle scores afgeleid van veldstaat — geen vaste waarden
-    // Curiosity score: curiosity × interesse-diversiteit (genormaliseerd)
+    // === Intrinsic Curiosity Theory (Schmidhuber 2010, Oudeyer & Kaplan 2007) ===
+    //
+    // Curiosity = LEARNING PROGRESS: hoeveel daalde free energy recent?
+    // Exploration = INFORMATION GAIN: hoe nieuw is de frontier?
+    // Frustration en self-improve blijven veld-gedreven.
+
+    // Learning progress: verschil tussen tension_ema (oud) en tension (nu), gemiddeld over active set.
+    // Positieve learning progress = free energy daalt = we leren effectief.
+    let n_active = field.active_set.len().max(1) as f32;
+    let avg_learning_progress: f32 = field.active_set.iter()
+        .map(|&id| {
+            let p = &field.points[id as usize];
+            (p.tension_ema - p.free_energy).max(0.0) // hoeveel free energy daalde
+        })
+        .sum::<f32>() / n_active;
+
+    // Curiosity score = learning progress × interesse-diversiteit
+    // Hoge learning progress + breed interesseveld = sterke drive om verder te leren
     let interest_diversity = explorer.interests.len() as f32 / (explorer.interests.len() as f32 + 10.0);
-    let curiosity_score = avg_curiosity * interest_diversity;
-    // Frustration score: frustratie × tension product
+    let curiosity_score = avg_learning_progress * interest_diversity + avg_curiosity * 0.1;
+
+    // Frustration score: frustratie × tension product (onveranderd — werkt goed)
     let frustration_score = avg_frustration * avg_tension;
-    // Explore score: frontier vulratio — volle frontier = hoge drive om te verkennen
+
+    // Explore score: information gain van frontier.
+    // Hoge frontier ratio = veel onbekend, PLUS gemiddelde novelty (rnd_score) van actieve punten
+    // geeft een beeld van hoe "nieuw" de huidige representaties zijn.
     let frontier_ratio = explorer.frontier.len() as f32 / (explorer.frontier.len() as f32 + explorer.pages_read as f32 + 1.0);
-    let explore_score = frontier_ratio;
+    let avg_novelty: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].rnd_score)
+        .sum::<f32>() / n_active;
+    let explore_score = frontier_ratio * (1.0 + avg_novelty);
+
     // Self-improve score: hoge tension relatief aan eigen gemiddelde = tijd om te optimaliseren
     let self_improve_score = avg_tension / (avg_tension + avg_curiosity + 0.001);
 
@@ -352,26 +376,52 @@ pub fn reflect(
 
 /// Lucy scoort mogelijke acties en kiest de beste.
 /// Geen vaste volgorde — haar interne staat bepaalt alles.
+///
+/// Intrinsic motivation signals (Schmidhuber 2010, Oudeyer & Kaplan 2007):
+/// - Explore: novelty bonus — hoe anders is de frontier dan wat Lucy al kent?
+/// - Learn: prediction error — hoge error = veel te leren
+/// - Think: emotie-variantie — verwarring/conflict → tijd om te reflecteren
 pub fn decide_action(field: &Field, explorer: &Explorer) -> Action {
     let (avg_tension, avg_curiosity, avg_frustration, avg_satisfaction) = observe_state(field);
 
-    // v2.3: Alle scores afgeleid van veldstaat — geen vaste multipliers
     let frontier_factor = explorer.frontier.len() as f32 / (explorer.frontier.len() as f32 + 10.0);
     let time_since_think = field.tick.saturating_sub(field.last_think_tick) as f32;
     let think_urgency = (time_since_think / field.think_interval as f32).min(1.0);
     let has_goals = !field.goals.is_empty();
 
-    // Explore: curiosity × frontier beschikbaarheid + bonus als geen doelen
+    // === Novelty bonus voor Explore ===
+    // Hoe "nieuw" zijn de huidige actieve representaties? Gemiddelde rnd_score.
+    // Hoge novelty + grote frontier = sterke drive om te verkennen.
+    let n_active = field.active_set.len().max(1) as f32;
+    let avg_novelty: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].rnd_score)
+        .sum::<f32>() / n_active;
+    let novelty_bonus = avg_novelty * frontier_factor;
+
+    // Explore: curiosity × frontier + novelty bonus + bonus als geen doelen
     let score_explore = avg_curiosity * frontier_factor
+        + novelty_bonus
         + if !has_goals { avg_curiosity.max(frontier_factor) } else { 0.0 };
 
-    // Learn: tension drijft leren + bonus als satisfaction positief is
-    let score_learn = avg_tension
+    // === Learn: HIGH when prediction error is high (lots to learn) ===
+    // avg_tension bevat al free energy, maar we willen specifiek de prediction error component.
+    // avg_free_energy is een goede proxy; hoge free energy = veel prediction error = veel te leren.
+    let avg_free_energy: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].free_energy)
+        .sum::<f32>() / n_active;
+    let score_learn = avg_free_energy
+        + avg_tension
         + if avg_satisfaction > avg_tension { avg_satisfaction } else { 0.0 };
 
-    // Think: frustratie + tijd sinds laatste gedachte + bonus als geen doelen
+    // === Think: HIGH when emotion variance is high (confusion → need to reflect) ===
+    // Hoge variantie in emoties = intern conflict/verwarring → reflectie helpt.
+    let emo_mean = (avg_curiosity + avg_frustration + avg_satisfaction) / 3.0;
+    let emo_variance = ((avg_curiosity - emo_mean).powi(2)
+        + (avg_frustration - emo_mean).powi(2)
+        + (avg_satisfaction - emo_mean).powi(2)) / 3.0;
     let score_think = avg_frustration
         + think_urgency * avg_tension
+        + emo_variance
         + if !has_goals { think_urgency } else { 0.0 };
 
     // Consolidate: satisfaction × rust (lage tension)

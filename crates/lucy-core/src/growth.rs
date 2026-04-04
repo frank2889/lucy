@@ -160,23 +160,18 @@ pub fn maybe_meta_learn(field: &mut Field) {
 }
 
 /// Energie management: kosten, beloning, herverdeling, propagatie.
-/// Alle kostenparameters schalen met velddynamiek zodat ze meegroeien/krimpen
-/// met Lucy's activiteitsniveau.
+///
+/// Biofysisch model (Laughlin et al. 1998, Friston 2010):
+/// - **Activatiekosten** ∝ ||φ||² — quadratisch in activiteit (neurale metabolisme)
+/// - **Predictiebeloning** ∝ ΔF⁻ — reductie in free energy (succesvolle predictie bespaart)
+/// - **Sensorisch inkomen** ∝ pred_error × precision — nieuwe informatie voor input-poorten
+///
+/// Kernprincipe: energie stroomt naar punten die free energy REDUCEREN
+/// en weg van punten die compute verspillen (hoge activiteit, geen reductie).
 pub fn manage_energy(field: &mut Field) {
-    // Activatiekosten schalen met noise_amplitude:
-    // meer exploratie-ruis = actiever veld = hogere metabolische kosten.
-    // Factor 0.01 houdt het in dezelfde orde als de oude 0.0001 bij noise_amplitude=0.01.
-    let activation_cost = field.noise_amplitude * 0.01;
-
-    // Predictiebeloning schaalt met error_tracking_rate:
-    // veld dat errors sneller trackt, beloont verbetering proportioneel meer.
-    // Factor 0.1 houdt het in dezelfde orde als oude 0.001 bij etr=0.01.
-    let prediction_reward = field.error_tracking_rate * 0.1;
-
-    // Sensorisch inkomen schaalt met noise_amplitude:
-    // actief explorerend veld investeert meer in sensorische input.
-    // Factor 0.5 houdt het in orde van oude 0.005 bij noise_amplitude=0.01.
-    let sensory_income = field.noise_amplitude * 0.5;
+    // Basis metabole rate — schaalt met error_tracking_rate zodat een actiever
+    // lerend veld hogere baseline kosten heeft. Factor 0.001 houdt het bescheiden.
+    let base_rate = field.error_tracking_rate * 0.001;
 
     let n_active = field.active_set.len() as f32;
 
@@ -184,15 +179,20 @@ pub fn manage_energy(field: &mut Field) {
     for &id in &field.active_set {
         let p = &mut field.points[id as usize];
 
-        // Kosten: actief zijn kost energie — schaalt met velddynamiek
+        // Activatiekosten ∝ ||φ||² (Laughlin et al. 1998):
+        // Actieve neuronen kosten meer — kwadratisch in activiteit.
+        // Een punt dat hard "denkt" (hoge phi-magnitude) verbrandt meer energie.
+        let phi_sq: f32 = p.phi.iter().map(|x| x * x).sum();
+        let activation_cost = phi_sq * base_rate;
         p.energy -= activation_cost;
 
-        // Beloning: als spanning daalt (prediction verbetert), krijg energie terug
-        // tension_ema > tension betekent spanning was hoger → het gaat beter
-        if p.tension_ema > p.tension && p.tension_ema > 0.0 {
-            let improvement = (p.tension_ema - p.tension).min(0.1);
-            p.energy += prediction_reward * improvement;
-        }
+        // Predictiebeloning ∝ max(old_free_energy - current_free_energy, 0):
+        // Punten die free energy succesvol REDUCEREN worden beloond.
+        // free_energy is al een EMA, tension_ema trackt de vorige staat —
+        // we gebruiken tension_ema als proxy voor "old" free energy (ze bewegen mee).
+        let old_fe = p.tension_ema; // vorige smoothed free energy proxy
+        let reward = (old_fe - p.free_energy).max(0.0);
+        p.energy += reward;
 
         // Emotie-gestuurde energie: curiosity geeft extra energie (motivatie om te leren)
         // Schaalt met noise_amplitude zodat in actieve fase emoties meer impact hebben
@@ -200,9 +200,18 @@ pub fn manage_energy(field: &mut Field) {
         // Satisfaction geeft een kleine bonus (beloning voor goed werk)
         p.energy += p.satisfaction * field.noise_amplitude * 0.05;
 
-        // Sensorische punten krijgen energie van "buiten" (metabolisme)
-        if p.is_sensory() {
-            p.energy += sensory_income;
+        // Sensorisch inkomen ∝ pred_error × precision (voor input-poorten):
+        // Input-neuronen krijgen energie proportioneel aan hoeveel NIEUWE informatie
+        // ze ontvangen. Hoge prediction error + hoge precision = echt nieuw signaal.
+        if p.flags & FLAG_INPUT != 0 {
+            // Bereken prediction error magnitude ter plekke
+            let pred_error: f32 = p.phi.iter().zip(p.prediction.iter())
+                .map(|(a, b)| (a - b) * (a - b)).sum();
+            let income = pred_error.sqrt() * p.precision;
+            p.energy += income * 0.1; // geschaald om in balans te blijven
+        } else if p.is_sensory() {
+            // Niet-input sensorische punten: kleinere baseline
+            p.energy += field.noise_amplitude * 0.1;
         }
 
         // Clamp

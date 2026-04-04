@@ -99,6 +99,9 @@ pub struct FieldPoint {
     pub satisfaction: f32,
     /// Frustratie: spanning hoog en stabiel (vastgelopen)
     pub frustration: f32,
+    /// Aantal ticks dat tension boven threshold is (voor learned helplessness model)
+    #[serde(default)]
+    pub stuck_ticks: u16,
 
     // Bitflags: bit 0 = active, bit 1 = inhibitory, bit 2 = growing, bit 3 = motor, bit 4 = sensory
     pub flags: u8,
@@ -692,6 +695,7 @@ impl FieldPoint {
             curiosity: 0.0,
             satisfaction: 0.0,
             frustration: 0.0,
+            stuck_ticks: 0,
             flags: FLAG_ACTIVE,
             depth: 0,
             rnd_score: 0.0,
