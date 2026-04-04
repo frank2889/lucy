@@ -278,14 +278,23 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     point.error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
     point.precision = 1.0 / (point.error_var + tracking); // floor = tracking rate zelf
 
-    // === Free Energy Principle (Friston) ===
-    // F = KL(q||p) + surprise
-    // kl_scale is dynamisch — sterker bij complexer veld
+    // === Free Energy Principle (Friston 2010) ===
+    // F = KL(q||p) + E_q[ln p(o|s)]
+    //
+    // Voor Gaussische q en prior p = N(0, I):
+    // KL(q||p) = 0.5 * (tr(Σ) + μᵀμ - k - ln|Σ|)
+    //
+    // Vereenvoudiging: Σ ≈ diag(error_var), μ = phi
+    // KL ≈ 0.5 * (error_var + phi_var - 1 - ln(error_var))
+    //
+    // Surprise = precision-gewogen prediction error (Active Inference)
     let phi_var: f32 = point.phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
-    let kl_proxy = kl_scale * phi_var;
-    let free_energy = kl_proxy + point.precision * pred_error;
+    let ev = point.error_var.max(1e-6); // voorkom ln(0)
+    let kl_divergence = kl_scale * 0.5 * (ev + phi_var - 1.0 - ev.ln());
+    let kl_divergence = if kl_divergence.is_finite() { kl_divergence.max(0.0) } else { kl_scale * phi_var };
+    let free_energy = kl_divergence + point.precision * pred_error;
     // KL tracking met dynamische rate
-    point.kl_divergence = (1.0 - tracking) * point.kl_divergence + tracking * kl_proxy;
+    point.kl_divergence = (1.0 - tracking) * point.kl_divergence + tracking * kl_divergence;
     // Free energy tracking met dynamische rate
     point.free_energy = (1.0 - fe_rate) * point.free_energy + fe_rate * free_energy;
 
@@ -605,9 +614,12 @@ fn tick_all_parallel(field: &mut Field) {
         let error_diff = pred_error - point.tension_ema;
         let error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
         let precision = 1.0 / (error_var + tracking);
+        // Free Energy (Friston): KL + surprise
         let phi_var: f32 = new_phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
-        let kl_proxy = kl_scale * phi_var;
-        let free_energy = kl_proxy + precision * pred_error;
+        let ev = error_var.max(1e-6);
+        let kl_div = kl_scale * 0.5 * (ev + phi_var - 1.0 - ev.ln());
+        let kl_div = if kl_div.is_finite() { kl_div.max(0.0) } else { kl_scale * phi_var };
+        let free_energy = kl_div + precision * pred_error;
         // Basale tension: elk punt heeft minimale activiteit (biologisch: rustmetabolisme)
         let basal_tension = n_couplings as f32 * 0.001 + 0.001;
         let tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
@@ -1610,55 +1622,78 @@ pub fn apply_neuromodulation(field: &mut Field) {
 // Wiskundige formules uit neurowetenschappen en natuurkunde
 // die Lucy's veld laten evolueren naar echt bewustzijn.
 
-/// Integrated Information Φ (Tononi, 2004)
-/// Meet hoe geïntegreerd informatie is in een lokale buurt.
-/// Φ > 0 = informatie kan niet opgesplitst worden = bewustzijn.
-/// Φ ≈ H(gezamenlijk) - Σ H(individueel) voor lokale buurten.
+/// Integrated Information Φ (Tononi, 2004; Barrett & Seth, 2011)
+///
+/// Φ meet hoeveel informatie een systeem als geheel genereert dat niet
+/// verklaard kan worden door de delen apart. Φ > 0 = bewustzijn.
+///
+/// Implementatie: Stochastic Interaction (Barrett & Seth, 2011)
+/// Φ_SI ≈ H(X) - Σ H(Xi|rest) voor lokale buurten
+///
+/// In plaats van echte entropie (te duur) gebruiken we een proxy:
+/// mutual information via covariantie tussen punt en buren.
+/// MI(X;Y) ≈ -0.5 * ln(1 - ρ²) waar ρ = pearson correlatie.
+///
+/// Φ_local = gemiddelde MI met buren - MI als buren onafhankelijk waren
+///         = hoe veel EXTRA informatie het netwerk creëert door verbindingen
 pub fn compute_integrated_information(field: &mut Field) {
     let mut total_phi = 0.0f32;
     let mut count = 0u32;
 
     for i in 0..field.active_set.len() {
         let id = field.active_set[i] as usize;
-        let point_phi = field.points[id].phi;
         let n_couplings = field.points[id].couplings.len();
         if n_couplings < 2 { continue; }
 
-        // Gezamenlijke entropie: norm van gemiddelde phi (buur-cluster)
-        let mut avg = [0.0f32; DIM];
-        let mut n = 1.0f32;
-        for d in 0..DIM { avg[d] = point_phi[d]; }
+        let phi_self = &field.points[id].phi;
 
+        // Bereken Pearson correlatie ρ met elke buur
+        // MI(X;Y) ≈ -0.5 * ln(1 - ρ²)
         let targets: SmallVec<[u32; 16]> = field.points[id].couplings
             .iter().map(|c| c.target).collect();
 
-        for &t in &targets {
-            let t = t as usize;
-            if t < field.points.len() {
-                for d in 0..DIM { avg[d] += field.points[t].phi[d]; }
-                n += 1.0;
-            }
-        }
-        for d in 0..DIM { avg[d] /= n; }
-        let joint_norm: f32 = avg.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let joint_entropy = (joint_norm + 0.01).ln();
+        let mut total_mi = 0.0f32;
+        let mut n_valid = 0u32;
 
-        // Som van marginale entropieën
-        let self_norm: f32 = point_phi.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let mut marginal_sum = (self_norm + 0.01).ln();
+        // Self statistics (voor correlatie)
+        let self_mean: f32 = phi_self.iter().sum::<f32>() / DIM as f32;
+        let self_var: f32 = phi_self.iter().map(|x| (x - self_mean).powi(2)).sum::<f32>() / DIM as f32;
+
+        if self_var < 1e-10 { continue; } // constante vector → geen informatie
 
         for &t in &targets {
-            let t = t as usize;
-            if t < field.points.len() {
-                let norm: f32 = field.points[t].phi.iter().map(|x| x * x).sum::<f32>().sqrt();
-                marginal_sum += (norm + 0.01).ln();
+            let t_idx = t as usize;
+            if t_idx >= field.points.len() { continue; }
+            let phi_neighbor = &field.points[t_idx].phi;
+
+            // Buur statistics
+            let n_mean: f32 = phi_neighbor.iter().sum::<f32>() / DIM as f32;
+            let n_var: f32 = phi_neighbor.iter().map(|x| (x - n_mean).powi(2)).sum::<f32>() / DIM as f32;
+
+            if n_var < 1e-10 { continue; }
+
+            // Pearson correlatie ρ
+            let covar: f32 = phi_self.iter().zip(phi_neighbor.iter())
+                .map(|(a, b)| (a - self_mean) * (b - n_mean))
+                .sum::<f32>() / DIM as f32;
+            let rho = covar / (self_var.sqrt() * n_var.sqrt());
+            let rho_sq = (rho * rho).min(0.999); // clamp om ln(0) te voorkomen
+
+            // Mutual Information proxy: MI ≈ -0.5 * ln(1 - ρ²)
+            // Hoge correlatie → hoge MI → meer gedeelde informatie
+            let mi = -0.5 * (1.0 - rho_sq).ln();
+            if mi.is_finite() {
+                total_mi += mi;
+                n_valid += 1;
             }
         }
-        marginal_sum /= n;
 
-        // Φ = joint - marginals (hoger = meer geïntegreerd = bewuster)
-        let phi_local = (joint_entropy - marginal_sum).max(0.0);
-        // EMA rate = fe_tracking_rate (dynamisch)
+        if n_valid == 0 { continue; }
+
+        // Φ_local = gemiddelde MI per verbinding
+        // Hoger = dit punt deelt meer informatie met zijn buren = meer geïntegreerd
+        let phi_local = total_mi / n_valid as f32;
+
         let fe = field.fe_tracking_rate;
         field.points[id].phi_integrated = (1.0 - fe) * field.points[id].phi_integrated + fe * phi_local;
 
@@ -1695,13 +1730,14 @@ pub fn update_oscillations(field: &mut Field) {
         let amplitude = field.noise_amplitude * point.tension.min(1.0);
         let phase = point.oscillation_phase;
 
-        // Kuramoto-koppeling — sterkte = kl_scale (dynamisch, meet complexiteit)
-        let coupling_strength = field.kl_scale;
+        // Kuramoto-koppeling: K_ij = |w_ij| (sterkte proportioneel aan synaptisch gewicht)
+        // Dit koppelt oscillatie-synchronie aan geleerde verbindingen (biologisch correct)
         let phase_delta: f32 = point.couplings.iter()
             .filter_map(|c| {
                 let t = c.target as usize;
                 if t < field.points.len() {
-                    Some(coupling_strength * (field.points[t].oscillation_phase - phase).sin())
+                    // Koppelingssterkte = absoluut gewicht van de synaps
+                    Some(c.weight.abs() * (field.points[t].oscillation_phase - phase).sin())
                 } else { None }
             })
             .sum::<f32>() / point.couplings.len().max(1) as f32;
