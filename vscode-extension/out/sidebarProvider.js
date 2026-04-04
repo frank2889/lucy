@@ -2,6 +2,21 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LucySidebarProvider = void 0;
 const vscode = require("vscode");
+/**
+ * Sidebar provider voor het Lucy chatvenster in VS Code.
+ *
+ * Twee tabs:
+ * - **Chat** — Stel vragen, zie antwoorden met meta-badges en uitklapbaar intern-status paneel
+ * - **Activity** — Live overzicht van stemming, emoties, leren, interesses
+ *
+ * Communicatie: webview ↔ extension ↔ Lucy API (HTTP op configurable host:port)
+ *
+ * Het interne-status paneel toont bij elk antwoord:
+ * - Actieve doelen (nieuwe goals groen gemarkeerd)
+ * - Emoties en neuromodulatoren
+ * - Leervoortgang (vocab, pagina's, tokens, tick)
+ * - Interesses als tags
+ */
 class LucySidebarProvider {
     _extensionUri;
     _view;
@@ -10,9 +25,7 @@ class LucySidebarProvider {
     }
     getBaseUrl() {
         const config = vscode.workspace.getConfiguration('lucy');
-        const host = config.get('host', '209.38.36.51');
-        const port = config.get('port', 3000);
-        return `http://${host}:${port}`;
+        return config.get('url', 'https://lucy.world').replace(/\/+$/, '');
     }
     resolveWebviewView(webviewView) {
         this._view = webviewView;
@@ -82,6 +95,7 @@ class LucySidebarProvider {
                     ticks: data.settle_ticks,
                     facts: data.facts_retrieved,
                 },
+                internal: data.internal,
             });
         }
         catch {
@@ -156,6 +170,36 @@ class LucySidebarProvider {
     .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
     .badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--vscode-badge-background, #333); color: var(--vscode-badge-foreground, #aaa); }
     .thinking { align-self: flex-start; color: #a78bfa; font-style: italic; font-size: 12px; padding: 6px 12px; }
+
+    /* Internal state panel */
+    .internal-toggle {
+        font-size: 11px; color: #7c3aed; cursor: pointer; margin-top: 6px;
+        display: flex; align-items: center; gap: 4px; user-select: none;
+    }
+    .internal-toggle:hover { color: #a78bfa; }
+    .internal-panel {
+        display: none; margin-top: 8px; padding: 8px; border-radius: 6px;
+        background: var(--vscode-editor-background, #111); border: 1px solid #2d1b69;
+        font-size: 11px; line-height: 1.6;
+    }
+    .internal-panel.open { display: block; }
+    .internal-section { margin-bottom: 8px; }
+    .internal-section:last-child { margin-bottom: 0; }
+    .internal-label { color: #a78bfa; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+    .goal-item { padding: 3px 0; border-bottom: 1px solid #1a1a2a; }
+    .goal-item:last-child { border: none; }
+    .goal-desc { color: var(--vscode-foreground); }
+    .goal-strategy { color: #888; font-size: 10px; }
+    .goal-progress { color: #a78bfa; font-size: 10px; float: right; }
+    .emotion-row { display: flex; justify-content: space-between; padding: 1px 0; }
+    .emotion-name { color: #888; }
+    .emotion-val { font-weight: 500; }
+    .interest-chip {
+        display: inline-block; font-size: 10px; padding: 1px 5px; margin: 1px;
+        border-radius: 3px; background: #2d1b69; color: #c4b5fd;
+    }
+    .learn-row { display: flex; justify-content: space-between; padding: 1px 0; color: #888; }
+    .learn-val { color: var(--vscode-foreground); font-weight: 500; }
 
     /* Input */
     .input-area { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--vscode-panel-border, #333); }
@@ -354,6 +398,64 @@ class LucySidebarProvider {
                     html += '<span class="badge">' + msg.meta.think_rounds + ' rondes</span>';
                     html += '<span class="badge">' + (msg.meta.coherence * 100).toFixed(0) + '% coherent</span>';
                     if (msg.meta.facts > 0) html += '<span class="badge">' + msg.meta.facts + ' feiten</span>';
+                    html += '</div>';
+                }
+                if (msg.internal) {
+                    const uid = 'int-' + Date.now();
+                    html += '<div class="internal-toggle" onclick="document.getElementById(\'' + uid + '\').classList.toggle(\'open\')">';
+                    html += '<span>&#9662;</span> Waar Lucy mee bezig is';
+                    html += '</div>';
+                    html += '<div class="internal-panel" id="' + uid + '">';
+
+                    // Doelen
+                    const goals = msg.internal.goals || [];
+                    if (goals.length > 0) {
+                        html += '<div class="internal-section"><div class="internal-label">Doelen</div>';
+                        for (const g of goals) {
+                            html += '<div class="goal-item">';
+                            if (g.new) html += '<span style="color:#22c55e;font-size:10px">NIEUW </span>';
+                            html += '<span class="goal-desc">' + esc(g.description) + '</span>';
+                            html += '<span class="goal-progress">' + esc(g.progress) + '</span>';
+                            html += '<br><span class="goal-strategy">' + esc(g.strategy) + '</span>';
+                            html += '</div>';
+                        }
+                        html += '</div>';
+                    } else {
+                        html += '<div class="internal-section"><div class="internal-label">Doelen</div><span style="color:#666">Nog geen actieve doelen</span></div>';
+                    }
+
+                    // Emoties
+                    const emo = msg.internal.emotions || {};
+                    html += '<div class="internal-section"><div class="internal-label">Emoties</div>';
+                    const emoNames = { curiosity: 'Nieuwsgierigheid', satisfaction: 'Tevredenheid', frustration: 'Frustratie' };
+                    for (const [k, label] of Object.entries(emoNames)) {
+                        const v = emo[k] || '0';
+                        html += '<div class="emotion-row"><span class="emotion-name">' + label + '</span><span class="emotion-val">' + v + '</span></div>';
+                    }
+                    const neuro = msg.internal.neuromodulators || {};
+                    html += '<div class="emotion-row" style="margin-top:4px;border-top:1px solid #1a1a2a;padding-top:4px"><span class="emotion-name">Dopamine</span><span class="emotion-val">' + (neuro.dopamine || '0') + '</span></div>';
+                    html += '<div class="emotion-row"><span class="emotion-name">Serotonine</span><span class="emotion-val">' + (neuro.serotonin || '0') + '</span></div>';
+                    html += '</div>';
+
+                    // Leervoortgang
+                    const learn = msg.internal.learning || {};
+                    html += '<div class="internal-section"><div class="internal-label">Leervoortgang</div>';
+                    html += '<div class="learn-row"><span>Vocabulaire</span><span class="learn-val">' + (learn.vocab_size || 0).toLocaleString() + ' woorden</span></div>';
+                    html += '<div class="learn-row"><span>Paginas gelezen</span><span class="learn-val">' + (learn.pages_read || 0) + '</span></div>';
+                    html += '<div class="learn-row"><span>Tokens verwerkt</span><span class="learn-val">' + (learn.tokens_processed || 0).toLocaleString() + '</span></div>';
+                    html += '<div class="learn-row"><span>Huidige tick</span><span class="learn-val">' + (learn.tick || 0).toLocaleString() + '</span></div>';
+                    html += '</div>';
+
+                    // Interesses
+                    const interests = msg.internal.interests || [];
+                    if (interests.length > 0) {
+                        html += '<div class="internal-section"><div class="internal-label">Interesses</div>';
+                        for (const i of interests) {
+                            html += '<span class="interest-chip">' + esc(i) + '</span>';
+                        }
+                        html += '</div>';
+                    }
+
                     html += '</div>';
                 }
                 addMessage(html, 'lucy');

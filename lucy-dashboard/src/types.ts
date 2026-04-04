@@ -79,6 +79,29 @@ export interface JournalData {
   total_entries: number;
 }
 
+export interface LucyStatus {
+  alive: boolean;
+  tick: number;
+  phase: string;
+  field: { points: number; active: number; couplings: number; avg_tension: string; input_ports: number; output_ports: number };
+  vocabulary: { size: number };
+  explorer: { frontier_size: number; pages_read: number; tokens_processed: number };
+  replay_buffer: number;
+  retrieval_store: number;
+  self_modification: { recent: string[]; reflection_count: number; total_modifications: number };
+  consciousness: Record<string, unknown>;
+}
+
+export interface LucyActivity {
+  mood: string;
+  emotions: Record<string, string>;
+  neuromodulators: Record<string, string>;
+  exploring: { current_interests: string[]; frontier_size: number; pages_read: number; tokens_processed: number };
+  learning: { avg_tension: string; phase: string; teacher_interval: number; tick: number; vocabulary_size: number };
+  recent_observations: Array<{ kind: string; message: string; tick: number }>;
+  self_modifications: { reflection_count: number; total_modifications: number };
+}
+
 export interface AskResponse {
   answer: string;
   source: string;

@@ -41,15 +41,10 @@
     "configuration": {
       "title": "Lucy AI",
       "properties": {
-        "lucy.host": {
+        "lucy.url": {
           "type": "string",
-          "default": "209.38.36.51",
-          "description": "Lucy server host"
-        },
-        "lucy.port": {
-          "type": "number",
-          "default": 3000,
-          "description": "Lucy server port"
+          "default": "https://lucy.world",
+          "description": "Lucy server URL (bijv. https://lucy.world)"
         },
         "lucy.token": {
           "type": "string",

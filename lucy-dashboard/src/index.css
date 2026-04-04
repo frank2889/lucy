@@ -1,51 +1,53 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 :root {
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #12121a;
-  --bg-panel: #1a1a2e;
-  --border: #2a2a4a;
-  --text-primary: #e0e0ff;
-  --text-secondary: #8888aa;
-  --accent-blue: #4466ff;
-  --accent-cyan: #00ddff;
-  --accent-green: #00ff88;
-  --accent-purple: #aa44ff;
-  --accent-red: #ff4466;
-  --accent-orange: #ff8844;
+  --page-bg: #f6f6f7;
+  --card-bg: #ffffff;
+  --card-border: #e1e3e5;
+  --card-shadow: 0 1px 2px rgba(26,26,26,0.07), 0 2px 8px rgba(26,26,26,0.04);
+  --card-radius: 12px;
+  --text-primary: #202223;
+  --text-secondary: #6d7175;
+  --text-disabled: #8c9196;
+  --green: #008060;
+  --green-bg: #f1f8f5;
+  --red: #d72c0d;
+  --red-bg: #fff4f4;
+  --blue: #2c6ecb;
+  --blue-bg: #f2f7fe;
+  --orange: #b98900;
+  --orange-bg: #fef8ee;
+  --purple: #7c3aed;
+  --purple-bg: #f5f3ff;
+  --cyan: #00838f;
+  --cyan-bg: #f0fafb;
+  --interactive: #2c6ecb;
+  --border: #e1e3e5;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body, #root {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: var(--bg-primary);
+html { font-size: 14px; }
+
+body, #root {
+  min-height: 100vh;
+  background: var(--page-bg);
   color: var(--text-primary);
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: -apple-system, BlinkMacSystemFont, 'San Francisco', 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
 }
 
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: var(--bg-secondary); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-.glass {
-  background: rgba(26, 26, 46, 0.8);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
 }
 
-.glow-blue { box-shadow: 0 0 20px rgba(68, 102, 255, 0.3); }
-.glow-cyan { box-shadow: 0 0 20px rgba(0, 221, 255, 0.3); }
+.mono { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; }
 
-@keyframes pulse-slow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-.animate-pulse-slow { animation: pulse-slow 3s ease-in-out infinite; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c9cccf; border-radius: 3px; }

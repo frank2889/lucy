@@ -11,15 +11,21 @@
 use lucy_state::*;
 use crate::compute;
 
-/// Maximaal aantal opgeslagen replay-voorbeelden.
-const MAX_REPLAY_BUFFER: usize = 2000;
+// Dynamic: buffer size is now derived from vocab size (was: hardcoded 2000).
+// Default fallback when no vocab context available.
+const DEFAULT_REPLAY_BUFFER: usize = 2000;
 
 /// Replay buffer — Lucy herhaalt eerder geleerde patronen.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReplayBuffer {
     /// Opgeslagen (input, target) embedding sequenties
     pub examples: Vec<ReplayExample>,
+    /// Dynamic buffer capacity — derived from vocab size or field params
+    #[serde(default = "default_buffer_cap")]
+    pub buffer_capacity: usize,
 }
+
+fn default_buffer_cap() -> usize { DEFAULT_REPLAY_BUFFER }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReplayExample {
@@ -32,12 +38,25 @@ pub struct ReplayExample {
 
 impl ReplayBuffer {
     pub fn new() -> Self {
-        Self { examples: Vec::new() }
+        Self {
+            examples: Vec::new(),
+            buffer_capacity: DEFAULT_REPLAY_BUFFER,
+        }
+    }
+
+    /// Create with dynamic capacity derived from vocab size.
+    /// Rule: buffer_capacity = vocab_size.clamp(500, 10_000)
+    pub fn with_capacity(vocab_size: usize) -> Self {
+        Self {
+            examples: Vec::new(),
+            // Dynamic: scale replay buffer with vocabulary richness
+            buffer_capacity: vocab_size.clamp(500, 10_000),
+        }
     }
 
     /// Sla een training voorbeeld op voor replay
     pub fn store(&mut self, input: Vec<[f32; DIM]>, target: Vec<[f32; DIM]>) {
-        if self.examples.len() >= MAX_REPLAY_BUFFER {
+        if self.examples.len() >= self.buffer_capacity {
             // Verwijder het voorbeeld met de laagste prioriteit
             if let Some(min_idx) = self.examples.iter().enumerate()
                 .min_by(|a, b| a.1.priority.partial_cmp(&b.1.priority).unwrap_or(std::cmp::Ordering::Equal))
@@ -60,12 +79,15 @@ impl ReplayBuffer {
         use rand::Rng;
         let mut rng = rand::rng();
 
+        // Dynamic: priority floor uses field.error_tracking_rate (was: hardcoded 0.1)
+        let priority_floor = field.error_tracking_rate;
+
         // Prioritized sampling: kies proportioneel aan prioriteit
-        let total_priority: f32 = self.examples.iter().map(|e| e.priority.max(0.1)).sum();
+        let total_priority: f32 = self.examples.iter().map(|e| e.priority.max(priority_floor)).sum();
         let mut threshold = rng.random_range(0.0..total_priority);
         let mut idx = 0;
         for (i, ex) in self.examples.iter().enumerate() {
-            threshold -= ex.priority.max(0.1);
+            threshold -= ex.priority.max(priority_floor);
             if threshold <= 0.0 {
                 idx = i;
                 break;
@@ -92,20 +114,23 @@ impl ReplayBuffer {
         }).collect();
 
         // v0.9: contrastief EP voor replay (sterker leersignaal)
+        // Dynamic: settle convergence uses field.settle_epsilon (was: hardcoded params 5, 50, 0.2)
         let delta = compute::contrastive_ep(
             field,
             &input,
             &target,
-            5,   // ticks per token
-            50,  // settle ticks
+            5,   // ticks per token (structural)
+            50,  // settle ticks (structural)
             0.2, // mild EP beta voor consolidatie
         );
 
-        // Update prioriteit: hoge delta = moeilijk = hogere prioriteit
-        self.examples[idx].priority = delta.min(10.0);
-        // Decay alle prioriteiten langzaam (voorkomt dat oude items altijd hoog blijven)
+        // Dynamic: priority clamp uses field.clamp_range (was: hardcoded 10.0)
+        self.examples[idx].priority = delta.min(field.clamp_range);
+        // Dynamic: priority decay = 1.0 - 1.0/buffer_size (was: hardcoded 0.999)
+        // Larger buffers decay slower, smaller buffers forget faster
+        let priority_decay = 1.0 - 1.0 / self.buffer_capacity as f32;
         for ex in &mut self.examples {
-            ex.priority *= 0.999;
+            ex.priority *= priority_decay;
         }
 
         Some(delta)

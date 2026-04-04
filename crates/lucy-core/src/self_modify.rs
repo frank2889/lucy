@@ -103,10 +103,16 @@ impl SelfModifier {
         Self {
             source_root,
             history: Vec::new(),
-            cooldown_ticks: 50_000, // Minimaal 50K ticks tussen aanpassingen
+            // Dynamic: cooldown = reflect_interval * 5 (was: hardcoded 50_000)
+            cooldown_ticks: 50_000, // overridden by set_cooldown_from_field()
             last_modification_tick: 0,
             consecutive_failures: 0,
         }
+    }
+
+    /// Dynamic: set cooldown from field.reflect_interval * 5 (was: hardcoded 50_000)
+    pub fn set_cooldown_from_field(&mut self, field: &Field) {
+        self.cooldown_ticks = field.reflect_interval * 5;
     }
 
     /// Kan Lucy nu iets aanpassen? (cooldown check)
@@ -116,7 +122,19 @@ impl SelfModifier {
 
     /// Lucy past haar eigen hyperparameters aan op basis van haar emotionele staat
     /// Dit is level 1 zelf-aanpassing: veilig, reversibel, direct effect
+    ///
+    /// All thresholds and adjustment factors are now derived from field parameters:
+    /// - Frustration threshold: field.growth_threshold * 0.2 (was: hardcoded 0.1)
+    /// - Satisfaction threshold: field.error_tracking_rate (was: hardcoded 0.01)
+    /// - Lambda adjustment: 1.0 +/- field.error_tracking_rate (was: hardcoded 1.2/0.8)
+    /// - Alpha adjustment: 1.0 - field.error_tracking_rate (was: hardcoded 0.9)
+    /// - Beta adjustment: 1.0 + field.error_tracking_rate (was: hardcoded 1.05)
+    /// - Curiosity threshold: field.error_tracking_rate (was: hardcoded 0.05)
+    /// - Cooldown: field.reflect_interval * 5 (was: hardcoded 50_000)
     pub fn tune_hyperparameters(&mut self, field: &mut Field) -> Option<Modification> {
+        // Dynamic: keep cooldown in sync with field.reflect_interval
+        self.cooldown_ticks = field.reflect_interval * 5;
+
         if !self.can_modify(field.tick) { return None; }
 
         let n = field.active_set.len() as f32;
@@ -139,16 +157,30 @@ impl SelfModifier {
             .map(|&id| field.points[id as usize].tension)
             .sum::<f32>() / n;
 
+        // Dynamic thresholds derived from field parameters
+        let err_rate = field.error_tracking_rate;
+        // Dynamic: frustration threshold = growth_threshold * 0.2 (was: hardcoded 0.1)
+        let frustration_thresh = field.growth_threshold * 0.2;
+        // Dynamic: satisfaction threshold = error_tracking_rate (was: hardcoded 0.01)
+        let satisfaction_thresh = err_rate;
+        // Dynamic: lambda up/down factor = 1.0 +/- error_tracking_rate (was: 1.2/0.8)
+        let lambda_up = 1.0 + err_rate;
+        let lambda_down = 1.0 - err_rate;
+        // Dynamic: alpha factor = 1.0 - error_tracking_rate (was: 0.9)
+        let alpha_factor = 1.0 - err_rate;
+        // Dynamic: beta factor = 1.0 + error_tracking_rate (was: 1.05)
+        let beta_factor = 1.0 + err_rate;
+
         // === Aanpassingsregels ===
 
         // Hoge frustratie + lage satisfaction → leren werkt niet → pas leersnelheid aan
-        if avg_frustration > 0.1 && avg_satisfaction < 0.01 {
+        if avg_frustration > frustration_thresh && avg_satisfaction < satisfaction_thresh {
             let old_lambda = field.lambda;
             // Probeer een iets andere leersnelheid
             let new_lambda = if avg_tension > field.growth_threshold {
-                (old_lambda * 1.2).min(0.5) // Sneller bewegen
+                (old_lambda * lambda_up).min(0.5) // Sneller bewegen
             } else {
-                (old_lambda * 0.8).max(0.01) // Langzamer, stabieler
+                (old_lambda * lambda_down).max(0.01) // Langzamer, stabieler
             };
 
             if (new_lambda - old_lambda).abs() > 0.001 {
@@ -170,10 +202,10 @@ impl SelfModifier {
             }
         }
 
-        // Hoge curiosity → meer exploratie-ruis toestaan
-        if avg_curiosity > 0.05 {
+        // Dynamic: curiosity threshold = error_tracking_rate (was: hardcoded 0.05)
+        if avg_curiosity > err_rate {
             let old_alpha = field.alpha;
-            let new_alpha = (old_alpha * 0.9).max(0.0001); // Minder sparse penalty → meer expressiviteit
+            let new_alpha = (old_alpha * alpha_factor).max(0.0001); // Minder sparse penalty → meer expressiviteit
             if (new_alpha - old_alpha).abs() > 0.0001 {
                 field.alpha = new_alpha;
                 self.last_modification_tick = field.tick;
@@ -191,9 +223,9 @@ impl SelfModifier {
         }
 
         // Lage spanning + hoge satisfaction → het gaat goed → verfijn
-        if avg_tension < field.growth_threshold * 0.1 && avg_satisfaction > 0.02 {
+        if avg_tension < field.growth_threshold * 0.1 && avg_satisfaction > satisfaction_thresh * 2.0 {
             let old_beta = field.beta;
-            let new_beta = (old_beta * 1.05).min(1.0); // Iets sterkere input → scherpere antwoorden
+            let new_beta = (old_beta * beta_factor).min(1.0); // Iets sterkere input → scherpere antwoorden
             if (new_beta - old_beta).abs() > 0.001 {
                 field.beta = new_beta;
                 self.last_modification_tick = field.tick;

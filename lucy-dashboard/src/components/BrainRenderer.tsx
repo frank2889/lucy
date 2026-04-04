@@ -1,20 +1,19 @@
-// BrainRenderer — 3D neural network visualization using Three.js instanced meshes
+// BrainRenderer — 3D neural network with soft lighting
 import { useRef, useMemo, useEffect } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { Canvas, useFrame, extend } from '@react-three/fiber';
+import { OrbitControls, Effects } from '@react-three/drei';
 import * as THREE from 'three';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { useStore } from '../store';
 
-// Color palette for depth layers
-const DEPTH_COLORS = [
-  new THREE.Color('#00ddff'), // 0 = input (cyan)
-  new THREE.Color('#4466ff'), // 1 = processing (blue)
-  new THREE.Color('#aa44ff'), // 2 = abstract (purple)
-  new THREE.Color('#ff44aa'), // 3 = meta (pink)
-];
+extend({ UnrealBloomPass });
 
-const ACTIVE_BOOST = 1.8;
-const INACTIVE_ALPHA = 0.3;
+const DEPTH_COLORS = [
+  new THREE.Color('#22b8cf'), // input (teal)
+  new THREE.Color('#5b6cf0'), // processing (soft blue)
+  new THREE.Color('#8b5cf6'), // abstract (lavender)
+  new THREE.Color('#f06292'), // meta (soft pink)
+];
 
 function Nodes() {
   const meshRef = useRef<THREE.InstancedMesh>(null);
@@ -30,11 +29,11 @@ function Nodes() {
     for (let i = 0; i < n; i++) {
       const node = topology.nodes[i];
       const baseColor = DEPTH_COLORS[Math.min(node.depth, 3)] || DEPTH_COLORS[0];
-      const brightness = node.active ? ACTIVE_BOOST : INACTIVE_ALPHA;
-      colors[i * 3] = baseColor.r * brightness;
-      colors[i * 3 + 1] = baseColor.g * brightness;
-      colors[i * 3 + 2] = baseColor.b * brightness;
-      sizes[i] = node.active ? 0.12 : 0.05;
+      const energy = node.active ? 1.6 : 0.4;
+      colors[i * 3] = baseColor.r * energy;
+      colors[i * 3 + 1] = baseColor.g * energy;
+      colors[i * 3 + 2] = baseColor.b * energy;
+      sizes[i] = node.active ? 0.22 : 0.09;
     }
     return { count: n, colorArray: colors, sizeArray: sizes };
   }, [topology]);
@@ -56,17 +55,16 @@ function Nodes() {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [topology, colorArray, sizeArray, dummy]);
 
-  // Gentle pulsing based on oscillation phase
   useFrame(({ clock }) => {
     if (!meshRef.current || !topology) return;
     const t = clock.getElapsedTime();
     const mesh = meshRef.current;
 
-    for (let i = 0; i < Math.min(topology.nodes.length, 200); i++) {
+    for (let i = 0; i < Math.min(topology.nodes.length, 500); i++) {
       const node = topology.nodes[i];
       if (!node.active) continue;
       const pulse = 1.0 + 0.15 * Math.sin(t * 2 + node.oscillation_phase * Math.PI * 2);
-      const base = sizeArray[i] || 0.12;
+      const base = sizeArray[i] || 0.22;
       dummy.position.set(node.pos[0], node.pos[1], node.pos[2]);
       dummy.scale.set(base * pulse, base * pulse, base * pulse);
       dummy.updateMatrix();
@@ -79,11 +77,13 @@ function Nodes() {
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, count]}>
-      <sphereGeometry args={[1, 8, 6]} />
+      <sphereGeometry args={[1, 16, 12]} />
       <meshStandardMaterial
         toneMapped={false}
-        emissive="#4466ff"
-        emissiveIntensity={0.5}
+        emissive="#5b6cf0"
+        emissiveIntensity={0.6}
+        roughness={0.5}
+        metalness={0.05}
       />
     </instancedMesh>
   );
@@ -112,14 +112,13 @@ function Edges() {
       positions.push(src[0], src[1], src[2]);
       positions.push(tgt[0], tgt[1], tgt[2]);
 
-      // Color: green for positive weights, red for negative
-      const intensity = Math.min(Math.abs(link.w) * 3, 1.0);
+      const intensity = Math.min(Math.abs(link.w) * 3, 0.6);
       if (link.w > 0) {
-        colors.push(0, intensity * 0.8, intensity * 0.5);
-        colors.push(0, intensity * 0.8, intensity * 0.5);
+        colors.push(0.35, 0.42, 0.94);
+        colors.push(0.35 * intensity, 0.42 * intensity, 0.94 * intensity);
       } else {
-        colors.push(intensity * 0.8, 0, intensity * 0.3);
-        colors.push(intensity * 0.8, 0, intensity * 0.3);
+        colors.push(0.94, 0.38, 0.57);
+        colors.push(0.94 * intensity, 0.38 * intensity, 0.57 * intensity);
       }
     }
 
@@ -133,7 +132,7 @@ function Edges() {
 
   return (
     <lineSegments ref={linesRef} geometry={geometry}>
-      <lineBasicMaterial vertexColors transparent opacity={0.15} />
+      <lineBasicMaterial vertexColors transparent opacity={0.12} />
     </lineSegments>
   );
 }
@@ -141,9 +140,12 @@ function Edges() {
 function BrainScene() {
   return (
     <>
-      <ambientLight intensity={0.3} />
-      <pointLight position={[10, 10, 10]} intensity={0.8} color="#4466ff" />
-      <pointLight position={[-10, -5, -10]} intensity={0.4} color="#aa44ff" />
+      <color attach="background" args={['#f0f2f8']} />
+      <fog attach="fog" args={['#f0f2f8', 25, 65]} />
+      <ambientLight intensity={0.6} />
+      <pointLight position={[10, 10, 10]} intensity={0.8} color="#5b6cf0" distance={40} />
+      <pointLight position={[-10, -5, -10]} intensity={0.4} color="#8b5cf6" distance={30} />
+      <pointLight position={[0, -8, 5]} intensity={0.3} color="#22b8cf" distance={25} />
       <Nodes />
       <Edges />
       <OrbitControls
@@ -156,6 +158,10 @@ function BrainScene() {
         autoRotate
         autoRotateSpeed={0.3}
       />
+      <Effects>
+        {/* @ts-ignore */}
+        <unrealBloomPass args={[new THREE.Vector2(window.innerWidth, window.innerHeight), 0.9, 0.1, 0.6]} />
+      </Effects>
     </>
   );
 }
@@ -164,9 +170,8 @@ export default function BrainRenderer() {
   return (
     <div className="w-full h-full">
       <Canvas
-        camera={{ position: [0, 5, 15], fov: 60, near: 0.1, far: 200 }}
-        gl={{ antialias: true, alpha: true }}
-        style={{ background: 'transparent' }}
+        camera={{ position: [0, 6, 18], fov: 55, near: 0.1, far: 200 }}
+        gl={{ antialias: true, alpha: false, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.0 }}
       >
         <BrainScene />
       </Canvas>

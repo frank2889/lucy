@@ -7,54 +7,36 @@ const sidebarProvider_1 = require("./sidebarProvider");
 const path = require("path");
 let statusBarItem;
 let statusInterval;
-function getConfig() {
-    const config = vscode.workspace.getConfiguration('lucy');
-    return {
-        host: config.get('host', '209.38.36.51'),
-        port: config.get('port', 3000),
-        token: config.get('token', ''),
-    };
-}
 function getBaseUrl() {
-    const { host, port } = getConfig();
-    return `http://${host}:${port}`;
+    const config = vscode.workspace.getConfiguration('lucy');
+    return config.get('url', 'https://lucy.world').replace(/\/+$/, '');
 }
 function authHeaders() {
-    const { token } = getConfig();
+    const config = vscode.workspace.getConfiguration('lucy');
+    const token = config.get('token', '');
     const headers = { 'Content-Type': 'application/json' };
     if (token) {
         headers['Authorization'] = `Bearer ${token}`;
     }
     return headers;
 }
-async function checkConnection() {
-    try {
-        const res = await fetch(`${getBaseUrl()}/status`, { signal: AbortSignal.timeout(3000) });
-        return res.ok;
-    }
-    catch {
-        return false;
-    }
-}
+let offlineStreak = 0;
 async function updateStatusBar() {
-    const connected = await checkConnection();
-    if (connected) {
-        // Fetch mood
-        try {
-            const res = await fetch(`${getBaseUrl()}/activity`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) {
-                const data = await res.json();
-                statusBarItem.text = `$(brain) Lucy: ${data.mood}`;
-                statusBarItem.color = '#a78bfa';
-                statusBarItem.tooltip = `Tick ${data.learning?.tick} | Vocab ${data.learning?.vocabulary_size}`;
-                return;
-            }
+    try {
+        const res = await fetch(`${getBaseUrl()}/activity`, { signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+            const data = await res.json();
+            offlineStreak = 0;
+            statusBarItem.text = `$(brain) Lucy: ${data.mood}`;
+            statusBarItem.color = '#a78bfa';
+            statusBarItem.tooltip = `Tick ${data.learning?.tick} | Vocab ${data.learning?.vocabulary_size}`;
+            return;
         }
-        catch { /* fallback */ }
-        statusBarItem.text = '$(brain) Lucy';
-        statusBarItem.color = '#a78bfa';
     }
-    else {
+    catch { /* network hiccup */ }
+    // Pas na 3 mislukte polls tonen we "offline" — voorkomt flicker
+    offlineStreak++;
+    if (offlineStreak >= 3) {
         statusBarItem.text = '$(brain) Lucy (offline)';
         statusBarItem.color = '#ef4444';
     }

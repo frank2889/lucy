@@ -25,12 +25,9 @@ use crate::journal::{Journal, EmotionSnapshot};
 use crate::learner::Explorer;
 use rand::Rng;
 
-/// Hoe vaak Lucy nadenkt (in ticks)
-const THINK_INTERVAL: u64 = 500;
-/// Hoe vaak Lucy reflecteert (in ticks)
-const REFLECT_INTERVAL: u64 = 10_000;
-/// Maximaal aantal actieve doelen
-const MAX_GOALS: usize = 10;
+// v2.3: Geen hardcoded constanten meer.
+// THINK_INTERVAL, REFLECT_INTERVAL, MAX_GOALS → field.think_interval, field.reflect_interval, field.max_goals
+// Worden dynamisch aangepast door adapt_dynamics() in compute.rs.
 
 /// Resultaat van een denkstap
 #[derive(Debug)]
@@ -75,14 +72,15 @@ pub fn think(
 
     let result = if let Some(goal) = active_goal {
         // Er is een actief doel — hoe gaat het?
-        if avg_frustration > 0.3 && avg_satisfaction < 0.01 {
-            // Vastgelopen: hoge frustratie, geen progressie
-            // v2.0: taalloos — raw data, geen menselijke interpretatie
+        // v2.3: Relatieve drempels — geen vaste waarden
+        // Frustrated = frustratie overheerst satisfaction (3× ratio)
+        // Eureka = satisfaction hoog t.o.v. tension
+        if avg_frustration > avg_tension * 3.0 && avg_satisfaction < avg_tension {
             journal_thought(journal, field.tick,
                 &format!("stuck:goal={},tension={:.3},frustration={:.3}",
                     goal.description, avg_tension, avg_frustration));
             ThoughtResult::Frustrated
-        } else if avg_satisfaction > 0.1 && avg_tension < 0.05 {
+        } else if avg_satisfaction > avg_tension * 2.0 && avg_tension < field.settle_epsilon * 50.0 {
             // Doorbraak!
             let msg = format!("eureka:goal={},tension={:.3},satisfaction={:.3}",
                 goal.description, avg_tension, avg_satisfaction);
@@ -112,6 +110,29 @@ pub fn think(
 //  GENERATE GOAL — Lucy kiest zelf
 // ─────────────────────────────────────────────
 
+/// Update exploration goal progress op basis van echte activiteit.
+/// Wordt aangeroepen vanuit de tick loop na exploration.
+/// Update exploration goal progress op basis van echte activiteit.
+/// v2.3: Progress schaalt relatief — meer frontier = meer nodig voor 100%.
+pub fn update_exploration_progress(field: &mut Field, pages_read_delta: u64, tokens_delta: u64, frontier_size: usize) {
+    // Progress per pagina schaalt invers met frontier grootte
+    let pages_needed = (frontier_size as f32).max(10.0);
+    // Progress per tokens schaalt met vocab grootte (hoe meer Lucy weet, hoe meer nodig)
+    let token_scale = (field.active_set.len() as f32 * 10.0).max(1000.0);
+
+    for goal in field.goals.iter_mut() {
+        match &goal.strategy {
+            GoalStrategy::Explore(_) => {
+                let page_progress = pages_read_delta as f32 / pages_needed;
+                let token_progress = tokens_delta as f32 / token_scale;
+                let delta = (page_progress + token_progress).min(0.5);
+                goal.progress = (goal.progress + delta).min(1.0);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Genereert een nieuw doel op basis van Lucy's interne staat.
 /// Bronnen: curiosity, frustration, interesses, zelf-verbetering.
 /// Nooit hardcoded — alles komt uit het veld en de explorer.
@@ -120,16 +141,23 @@ pub fn generate_goal(
     explorer: &Explorer,
     vocab: &Vocabulary,
 ) -> Option<String> {
-    if field.goals.len() >= MAX_GOALS { return None; }
+    // v2.3: max_goals is dynamisch
+    if field.goals.len() >= field.max_goals { return None; }
 
     let (avg_tension, avg_curiosity, avg_frustration, _avg_satisfaction) = observe_state(field);
     let mut rng = rand::rng();
 
-    // Score elke strategie op basis van interne staat
-    let curiosity_score = avg_curiosity * explorer.interests.len().min(100) as f32 / 100.0;
+    // v2.3: Alle scores afgeleid van veldstaat — geen vaste waarden
+    // Curiosity score: curiosity × interesse-diversiteit (genormaliseerd)
+    let interest_diversity = explorer.interests.len() as f32 / (explorer.interests.len() as f32 + 10.0);
+    let curiosity_score = avg_curiosity * interest_diversity;
+    // Frustration score: frustratie × tension product
     let frustration_score = avg_frustration * avg_tension;
-    let explore_score = if explorer.frontier.is_empty() { 0.1 } else { 0.3 };
-    let self_improve_score = if field.tick > 10_000 && avg_tension > 0.2 { 0.2 } else { 0.0 };
+    // Explore score: frontier vulratio — volle frontier = hoge drive om te verkennen
+    let frontier_ratio = explorer.frontier.len() as f32 / (explorer.frontier.len() as f32 + explorer.pages_read as f32 + 1.0);
+    let explore_score = frontier_ratio;
+    // Self-improve score: hoge tension relatief aan eigen gemiddelde = tijd om te optimaliseren
+    let self_improve_score = avg_tension / (avg_tension + avg_curiosity + 0.001);
 
     // Kies de hoogste score
     let scores = [
@@ -198,7 +226,8 @@ pub fn generate_goal(
 
     // Zet als actieve intentie
     field.current_intention = Some(goal_embedding);
-    field.intention_strength = 0.05;
+    // Intentie sterkte schaalt met noise_amplitude — zelfde schaal als veldactiviteit
+    field.intention_strength = field.noise_amplitude;
 
     Some(description)
 }
@@ -234,13 +263,15 @@ pub fn reflect(
 
         let age = tick.saturating_sub(goal.created_tick);
 
-        // Update progressie op basis van velddynamica
-        let avg_alignment = alignments[i];
-
-        // Progressie = combinatie van alignment en satisfaction
-        let new_progress = (avg_alignment * 0.7 + avg_satisfaction * 0.3).min(1.0);
-        if new_progress > goal.progress {
-            goal.progress = goal.progress * 0.9 + new_progress * 0.1; // smooth update
+        // Exploration goals: progress wordt extern bijgewerkt via update_exploration_progress()
+        // Andere goals: progress op basis van velddynamica
+        let is_explore = matches!(&goal.strategy, GoalStrategy::Explore(_));
+        if !is_explore {
+            let avg_alignment = alignments[i];
+            let new_progress = (avg_alignment * 0.7 + avg_satisfaction * 0.3).min(1.0);
+            if new_progress > goal.progress {
+                goal.progress = goal.progress * 0.9 + new_progress * 0.1;
+            }
         }
 
         // Compleet als progressie hoog genoeg
@@ -249,13 +280,16 @@ pub fn reflect(
             completed_indices.push(i);
         }
 
-        // Abandoneer als te lang vastzit zonder progressie
-        if age > 50_000 && goal.progress < 0.1 {
+        // v2.3: Abandon drempels relatief — geen vaste tick-aantallen
+        // Age drempel = 5× reflect_interval (dynamisch)
+        let max_age = field.reflect_interval * 5;
+        if age > max_age && goal.progress < 0.1 {
             abandoned_indices.push(i);
         }
 
-        // Abandoneer bij extreme frustratie
-        if avg_frustration > 0.5 && goal.progress < 0.2 && age > 10_000 {
+        // Frustratie-abandon: frustratie dominant, weinig progressie, oud genoeg
+        // (niet voor explore — die heeft eigen progress tracking)
+        if !is_explore && avg_frustration > avg_satisfaction * 5.0 && goal.progress < 0.2 && age > field.reflect_interval {
             abandoned_indices.push(i);
         }
     }
@@ -294,7 +328,7 @@ pub fn reflect(
             a.priority.partial_cmp(&b.priority).unwrap_or(std::cmp::Ordering::Equal))
         {
             field.current_intention = Some(top.embedding);
-            field.intention_strength = 0.05 * top.priority;
+            field.intention_strength = field.noise_amplitude * top.priority;
         }
     }
 
@@ -321,25 +355,31 @@ pub fn reflect(
 pub fn decide_action(field: &Field, explorer: &Explorer) -> Action {
     let (avg_tension, avg_curiosity, avg_frustration, avg_satisfaction) = observe_state(field);
 
-    let frontier_factor = if explorer.frontier.is_empty() { 0.5 } else { 1.0 };
+    // v2.3: Alle scores afgeleid van veldstaat — geen vaste multipliers
+    let frontier_factor = explorer.frontier.len() as f32 / (explorer.frontier.len() as f32 + 10.0);
     let time_since_think = field.tick.saturating_sub(field.last_think_tick) as f32;
+    let think_urgency = (time_since_think / field.think_interval as f32).min(1.0);
     let has_goals = !field.goals.is_empty();
 
-    // Score elke actie
-    let score_explore = avg_curiosity * frontier_factor * 1.5
-        + if !has_goals { 0.3 } else { 0.0 };
+    // Explore: curiosity × frontier beschikbaarheid + bonus als geen doelen
+    let score_explore = avg_curiosity * frontier_factor
+        + if !has_goals { avg_curiosity.max(frontier_factor) } else { 0.0 };
 
-    let score_learn = avg_tension * 1.2
-        + if avg_satisfaction > 0.05 { 0.2 } else { 0.0 }; // leren werkt → meer leren
+    // Learn: tension drijft leren + bonus als satisfaction positief is
+    let score_learn = avg_tension
+        + if avg_satisfaction > avg_tension { avg_satisfaction } else { 0.0 };
 
-    let score_think = avg_frustration * 0.8
-        + (time_since_think / THINK_INTERVAL as f32).min(1.0) * 0.5
-        + if !has_goals { 0.4 } else { 0.0 }; // geen doelen → nadenken
+    // Think: frustratie + tijd sinds laatste gedachte + bonus als geen doelen
+    let score_think = avg_frustration
+        + think_urgency * avg_tension
+        + if !has_goals { think_urgency } else { 0.0 };
 
-    let score_consolidate = avg_satisfaction * 0.5
-        + if avg_tension < 0.05 { 0.3 } else { 0.0 }; // rustig → consolideer
+    // Consolidate: satisfaction × rust (lage tension)
+    let calm = (1.0 - avg_tension.min(1.0)).max(0.0);
+    let score_consolidate = avg_satisfaction * calm;
 
-    let score_earn = 0.1; // baseline — Lucy kan dit later zelf verhogen
+    // Earn: baseline = laagste emotie × noise_amplitude (altijd > 0)
+    let score_earn = field.noise_amplitude;
 
     let scores = [
         (score_explore, Action::Explore),
@@ -355,14 +395,14 @@ pub fn decide_action(field: &Field, explorer: &Explorer) -> Action {
         .unwrap_or(Action::Think) // default: denk na
 }
 
-/// Moet Lucy nu nadenken? (gebaseerd op interval)
+/// Moet Lucy nu nadenken? (dynamisch interval uit field)
 pub fn should_think(field: &Field) -> bool {
-    field.tick.saturating_sub(field.last_think_tick) >= THINK_INTERVAL
+    field.tick.saturating_sub(field.last_think_tick) >= field.think_interval
 }
 
-/// Moet Lucy nu reflecteren? (gebaseerd op interval)
+/// Moet Lucy nu reflecteren? (dynamisch interval uit field)
 pub fn should_reflect(field: &Field) -> bool {
-    field.tick.saturating_sub(field.last_reflect_tick) >= REFLECT_INTERVAL
+    field.tick.saturating_sub(field.last_reflect_tick) >= field.reflect_interval
 }
 
 // ─────────────────────────────────────────────

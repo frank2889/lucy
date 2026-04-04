@@ -11,7 +11,7 @@
 //! - **Grotere candidate pool**: 256 i.p.v. 64 → betere token selectie
 //! - **Hogere COARSE_DIMS**: 128 i.p.v. 64 → nauwkeuriger pre-filtering
 
-use lucy_state::DIM;
+use lucy_state::{DIM, Field};
 use crate::encoding::Vocabulary;
 use rand::Rng;
 use std::collections::HashSet;
@@ -22,19 +22,10 @@ const COARSE_DIMS: usize = 128;
 /// Aantal candidates voor fine pass
 const TOP_K_CANDIDATES: usize = 256;
 
-/// Temperature: controleert diversiteit. Lager = veiliger, hoger = creatiever.
-const TEMPERATURE: f32 = 0.7;
-
-/// Nucleus sampling drempel: alleen tokens in de top-p van de kansverdeling
-const TOP_P: f32 = 0.9;
-
-/// Repetition penalty: factor waarmee herhaalde tokens worden afgestraft
-const REPETITION_PENALTY: f32 = 1.3;
-
 /// Decodeer output-regio phi naar een token ID.
 /// v0.9+: Temperature sampling + nucleus filtering + repetition penalty.
-pub fn decode_token(output_phi: &[f32; DIM], vocab: &Vocabulary) -> (u32, f32) {
-    decode_token_with_context(output_phi, vocab, &[])
+pub fn decode_token(output_phi: &[f32; DIM], vocab: &Vocabulary, field: &Field) -> (u32, f32) {
+    decode_token_with_context(output_phi, vocab, &[], field)
 }
 
 /// Decodeer met context van eerder gegenereerde tokens (voor repetition penalty)
@@ -42,6 +33,7 @@ pub fn decode_token_with_context(
     output_phi: &[f32; DIM],
     vocab: &Vocabulary,
     previous_tokens: &[u32],
+    field: &Field,
 ) -> (u32, f32) {
     let vocab_size = vocab.vocab_size();
     if vocab_size == 0 { return (0, 0.0); }
@@ -77,16 +69,16 @@ pub fn decode_token_with_context(
         for (id, score) in &mut candidates {
             if prev_set.contains(id) {
                 if *score > 0.0 {
-                    *score /= REPETITION_PENALTY;
+                    *score /= field.repetition_penalty;
                 } else {
-                    *score *= REPETITION_PENALTY;
+                    *score *= field.repetition_penalty;
                 }
             }
         }
     }
 
     // v0.9+: In-place temperature scaling + softmax (was: 3 aparte Vec allocaties)
-    let temp = TEMPERATURE.max(0.01);
+    let temp = field.sampling_temperature.max(0.01);
     let max_score = candidates.iter().map(|(_, s)| *s).fold(f32::MIN, f32::max);
 
     // Transformeer candidates in-place naar probabilities
@@ -107,7 +99,7 @@ pub fn decode_token_with_context(
     let mut nucleus_len = candidates.len();
     for (i, &(_, prob)) in candidates.iter().enumerate() {
         cumulative += prob;
-        if cumulative >= TOP_P {
+        if cumulative >= field.sampling_top_p {
             nucleus_len = i + 1;
             break;
         }

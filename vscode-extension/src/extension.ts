@@ -5,51 +5,37 @@ import * as path from 'path';
 let statusBarItem: vscode.StatusBarItem;
 let statusInterval: ReturnType<typeof setInterval>;
 
-function getConfig() {
-    const config = vscode.workspace.getConfiguration('lucy');
-    return {
-        host: config.get<string>('host', '209.38.36.51'),
-        port: config.get<number>('port', 3000),
-        token: config.get<string>('token', ''),
-    };
-}
-
 function getBaseUrl(): string {
-    const { host, port } = getConfig();
-    return `http://${host}:${port}`;
+    const config = vscode.workspace.getConfiguration('lucy');
+    return config.get<string>('url', 'https://lucy.world').replace(/\/+$/, '');
 }
 
 function authHeaders(): Record<string, string> {
-    const { token } = getConfig();
+    const config = vscode.workspace.getConfiguration('lucy');
+    const token = config.get<string>('token', '');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) { headers['Authorization'] = `Bearer ${token}`; }
     return headers;
 }
 
-async function checkConnection(): Promise<boolean> {
-    try {
-        const res = await fetch(`${getBaseUrl()}/status`, { signal: AbortSignal.timeout(3000) });
-        return res.ok;
-    } catch { return false; }
-}
+let offlineStreak = 0;
 
 async function updateStatusBar() {
-    const connected = await checkConnection();
-    if (connected) {
-        // Fetch mood
-        try {
-            const res = await fetch(`${getBaseUrl()}/activity`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) {
-                const data = await res.json() as Record<string, unknown>;
-                statusBarItem.text = `$(brain) Lucy: ${data.mood}`;
-                statusBarItem.color = '#a78bfa';
-                statusBarItem.tooltip = `Tick ${(data as any).learning?.tick} | Vocab ${(data as any).learning?.vocabulary_size}`;
-                return;
-            }
-        } catch { /* fallback */ }
-        statusBarItem.text = '$(brain) Lucy';
-        statusBarItem.color = '#a78bfa';
-    } else {
+    try {
+        const res = await fetch(`${getBaseUrl()}/activity`, { signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+            const data = await res.json() as Record<string, unknown>;
+            offlineStreak = 0;
+            statusBarItem.text = `$(brain) Lucy: ${data.mood}`;
+            statusBarItem.color = '#a78bfa';
+            statusBarItem.tooltip = `Tick ${(data as any).learning?.tick} | Vocab ${(data as any).learning?.vocabulary_size}`;
+            return;
+        }
+    } catch { /* network hiccup */ }
+
+    // Pas na 3 mislukte polls tonen we "offline" — voorkomt flicker
+    offlineStreak++;
+    if (offlineStreak >= 3) {
         statusBarItem.text = '$(brain) Lucy (offline)';
         statusBarItem.color = '#ef4444';
     }

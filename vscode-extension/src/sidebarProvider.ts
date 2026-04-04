@@ -49,9 +49,7 @@ export class LucySidebarProvider implements vscode.WebviewViewProvider {
 
     private getBaseUrl(): string {
         const config = vscode.workspace.getConfiguration('lucy');
-        const host = config.get<string>('host', '209.38.36.51');
-        const port = config.get<number>('port', 3000);
-        return `http://${host}:${port}`;
+        return config.get<string>('url', 'https://lucy.world').replace(/\/+$/, '');
     }
 
     public resolveWebviewView(webviewView: vscode.WebviewView) {

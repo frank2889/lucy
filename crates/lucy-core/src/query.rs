@@ -49,12 +49,11 @@ use crate::decoding;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// v1.2: Ultra-licht — 8704 punten vereist minimale settle
-const TICKS_PER_TOKEN: usize = 2;
-const SETTLE_PER_ROUND: usize = 10;
-const SETTLE_EPSILON: f32 = 0.05;
+const TICKS_PER_TOKEN: usize = 1;       // v2.1: Snellere token injection
+const SETTLE_PER_ROUND: usize = 5;      // v2.1: Halveer settle — snellere response
 const MAX_THINK_ROUNDS: usize = 1;
 const COHERENCE_THRESHOLD: f32 = 0.30;
-const MAX_OUTPUT_TOKENS: usize = 20;
+const MAX_OUTPUT_TOKENS: usize = 30;    // v2.1: Meer tokens voor langere antwoorden
 
 /// Verwerk een vraag door het veld met denk-loops.
 /// Lucy denkt meerdere rondes na tot haar gedachten stabiliseren.
@@ -122,7 +121,7 @@ pub fn process_query(
 
         // Settle — het veld denkt na (light: alleen IO + buren, niet het hele veld)
         let (ticks, tension) = compute::settle_light(
-            field, SETTLE_PER_ROUND, SETTLE_EPSILON,
+            field, SETTLE_PER_ROUND, field.settle_epsilon * 50.0,
         );
         total_settle_ticks += ticks;
 
@@ -155,7 +154,7 @@ pub fn process_query(
 
         // v0.9+: Merged settle (80 ticks i.p.v. 50+50 apart — bespaart 20 per ronde)
         // Attention + layer norm draaien automatisch mee in settle_until_converged
-        let (ticks, _) = compute::settle_light(field, 5, SETTLE_EPSILON);
+        let (ticks, _) = compute::settle_light(field, 5, field.settle_epsilon * 50.0);
         total_settle_ticks += ticks;
 
         // v0.9+: WM na elke denk-ronde — Lucy herorganiseert haar focus
@@ -177,7 +176,7 @@ pub fn process_query(
         field.clamps.insert(id, compute::rotate_embedding(&best_output, i));
     }
     // v0.9+: Diepere settle voor betere output-activatie
-    compute::settle_light(field, 5, SETTLE_EPSILON);
+    compute::settle_light(field, 5, field.settle_epsilon * 50.0);
     for &id in &output_ids_field {
         field.clamps.remove(&id);
     }
@@ -196,7 +195,7 @@ pub fn process_query(
 
         // v0.9+: Decode met context van eerdere tokens (repetition penalty)
         let (token_id, _score) = decoding::decode_token_with_context(
-            &output_phi, vocab, &output_ids,
+            &output_phi, vocab, &output_ids, field,
         );
 
         if token_id == eos_id || token_id <= 2 {
@@ -212,7 +211,7 @@ pub fn process_query(
         }
 
         // v0.9+: Settle per token (40 ticks) — attention draait automatisch mee
-        compute::settle_light(field, 3, SETTLE_EPSILON);
+        compute::settle_light(field, 3, field.settle_epsilon * 50.0);
 
         // v0.9+: WM read elke 3 tokens
         if step % 3 == 0 {
@@ -236,7 +235,7 @@ pub fn process_query(
         // Herstart met de vraag-embeddings — tweede poging
         compute::inject_token_sequence_light(field, &all_embeddings, TICKS_PER_TOKEN);
         // Attention draait automatisch mee in settle
-        compute::settle_light(field, SETTLE_PER_ROUND * 2, SETTLE_EPSILON);
+        compute::settle_light(field, SETTLE_PER_ROUND * 2, field.settle_epsilon * 50.0);
 
         // Decode opnieuw
         let output_phi = decoding::read_output_region(field);
@@ -244,7 +243,7 @@ pub fn process_query(
         for (i, &id) in output_ids_field.iter().enumerate() {
             field.clamps.insert(id, compute::rotate_embedding(&output_phi, i));
         }
-        compute::settle_light(field, 5, SETTLE_EPSILON);
+        compute::settle_light(field, 5, field.settle_epsilon * 50.0);
         for &id in &output_ids_field { field.clamps.remove(&id); }
 
         let mut retry_ids = Vec::new();
@@ -252,7 +251,7 @@ pub fn process_query(
         for _ in 0..MAX_OUTPUT_TOKENS {
             if cancel.load(Ordering::Relaxed) { break; }
             let phi = decoding::read_output_region(field);
-            let (tid, _) = decoding::decode_token_with_context(&phi, vocab, &retry_ids);
+            let (tid, _) = decoding::decode_token_with_context(&phi, vocab, &retry_ids, field);
             if tid == eos_id || tid <= 2 { break; }
             retry_ids.push(tid);
             let emb = vocab.embed(tid);
@@ -260,7 +259,7 @@ pub fn process_query(
             for (i, &id) in iids.iter().enumerate() {
                 field.clamps.insert(id, compute::rotate_embedding(emb, i));
             }
-            compute::settle_light(field, 3, SETTLE_EPSILON);
+            compute::settle_light(field, 3, field.settle_epsilon * 50.0);
             for &id in &iids { field.clamps.remove(&id); }
         }
 

@@ -109,18 +109,15 @@ const REPLAY_PATH: &str = "data/replay.bincode";
 const RETRIEVAL_PATH: &str = "data/retrieval.bincode";
 
 // === Tick intervals ===
-// Elke constante bepaalt hoe vaak een bepaald proces draait.
-// Lagere waarde = vaker = meer CPU maar snellere adaptatie.
-const LOG_INTERVAL: u64 = 1_000;          // Heartbeat logging
-const LEARN_INTERVAL: u64 = 100;          // Gewicht updates (Hebbian)
-const GROWTH_INTERVAL: u64 = 10_000;      // Punt-splitsing bij vastloop
-const SELF_READ_INTERVAL: u64 = 10_000;   // Herlees eigen source code
-const SNAPSHOT_INTERVAL: u64 = 10_000;    // Sla alles op naar disk
-const EXPLORE_INTERVAL: u64 = 500;        // v1.3: Elke 500 ticks een URL — maximale leersnelheid
-const CONSOLIDATION_INTERVAL: u64 = 1000; // v1.3: Replay minder vaak zodat exploration meer CPU krijgt
-const CURRICULUM_INTERVAL: u64 = 50_000;  // HTML/CSS curriculum training
-const GPU_BALANCE_CHECK: u64 = 50_000;   // Check Vast.ai balance
-// AI_TEACHER_INTERVAL is nu dynamisch: field.teacher_interval (start 10K, exponential backoff)
+// v2.3: De meeste intervallen zijn nu dynamisch in field.* (bijgewerkt door adapt_dynamics).
+// Alleen LOG_INTERVAL, CURRICULUM_INTERVAL, GPU_BALANCE_CHECK blijven const
+// (infra-gerelateerd, niet veld-afhankelijk).
+const LOG_INTERVAL: u64 = 1_000;          // Heartbeat logging (infra)
+const SELF_READ_INTERVAL: u64 = 10_000;   // Herlees eigen source code (structureel)
+const CURRICULUM_INTERVAL: u64 = 50_000;  // HTML/CSS curriculum training (structureel)
+const GPU_BALANCE_CHECK: u64 = 50_000;   // Check Vast.ai balance (infra)
+// Dynamische intervallen: field.learn_interval, field.growth_interval, field.snapshot_interval,
+// field.explore_interval, field.consolidation_interval — aangepast door adapt_dynamics()
 
 #[tokio::main]
 async fn main() {
@@ -185,10 +182,10 @@ async fn main() {
     let replay = if replay_path.exists() {
         consolidation::ReplayBuffer::load(replay_path).unwrap_or_else(|e| {
             tracing::warn!(%e, "Failed to load replay buffer, starting fresh");
-            consolidation::ReplayBuffer::new()
+            consolidation::ReplayBuffer::with_capacity(vocab.vocab_size())
         })
     } else {
-        consolidation::ReplayBuffer::new()
+        consolidation::ReplayBuffer::with_capacity(vocab.vocab_size())
     };
 
     // === Laad retrieval store ===
@@ -293,11 +290,18 @@ async fn main() {
         None
     };
 
-    // Upload veldstaat naar remote GPU als beschikbaar
+    // Upload veldstaat naar remote GPU als beschikbaar (max 15s)
     if let Some(ref mut rg) = remote_gpu {
-        if let Err(e) = rg.upload(&field).await {
-            tracing::warn!(%e, "Remote GPU upload failed — fallback naar CPU");
-            remote_gpu = None;
+        match tokio::time::timeout(std::time::Duration::from_secs(15), rg.upload(&field)).await {
+            Ok(Ok(())) => tracing::info!("Remote GPU upload gelukt"),
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "Remote GPU upload failed — fallback naar CPU");
+                remote_gpu = None;
+            }
+            Err(_) => {
+                tracing::warn!("Remote GPU upload timeout (15s) — fallback naar CPU");
+                remote_gpu = None;
+            }
         }
     }
 
@@ -454,6 +458,12 @@ async fn main() {
     };
 
     let tick_loop = async {
+    // v2.3: Track last execution ticks — voorkomt skips bij dynamische intervallen
+    let mut last_learn_tick: u64 = 0;
+    let mut last_growth_tick: u64 = 0;
+    let mut last_consolidation_tick: u64 = 0;
+    let mut last_explore_tick: u64 = 0;
+    let mut last_snapshot_tick: u64 = 0;
     loop {
         // v1.0: Verwerk commands — LOCKVRIJ (field + vocab zijn lokaal)
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -507,13 +517,44 @@ async fn main() {
 
         let tick = field.tick;
 
-        // v1.0: Debug — log eerste paar ticks zodat we weten of de loop draait
-        if tick < 5 || tick % 1000 == 0 {
-            tracing::info!(tick, "Tick loop iteration");
+        // v2.1: Debug — log elke 100 ticks
+        if tick % 100 == 0 {
+            tracing::info!(tick, phase = ?field.phase, "tick_alive");
         }
 
-        // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
+        // v2.3: Reanimatie — detecteer dood veld en schud het wakker
+        // Checkt elke 50 ticks of het veld dood is (tension ≈ 0) en injecteert sterke ruis
+        if tick % 50 == 0 {
+            let avg_t: f32 = field.active_set.iter()
+                .map(|&id| field.points[id as usize].tension).sum::<f32>()
+                / field.active_set.len().max(1) as f32;
+            // Drempel: tension onder settle_epsilon = effectief dood
+            if avg_t < field.settle_epsilon {
+                use rand::Rng;
+                let mut rng = rand::rng();
+                // Re-initialiseer phi naar random [-0.1, 0.1] (zelfde als bootstrap_field)
+                // maar LAAT prediction op 0 → maximale prediction error
+                for &id in &field.active_set {
+                    let p = &mut field.points[id as usize];
+                    for d in 0..lucy_state::DIM {
+                        p.phi[d] = rng.random_range(-0.1f32..0.1f32);
+                        p.prediction[d] = 0.0; // prediction = 0 → error = phi
+                    }
+                    // Reset ook de tension tracking zodat het niet gedempd wordt
+                    p.tension_ema = 0.0;
+                    p.error_var = 0.0;
+                }
+                // Forceer lambda en alpha zodat het veld niet meteen teruggetrokken wordt
+                field.alpha = field.alpha.min(0.0001); // minimale sparse penalty tijdens reanimatie
+                tracing::warn!(tick, avg_tension = %format!("{:.6}", avg_t),
+                    "REANIMATIE: dood veld — phi gereset, prediction op nul, sparse penalty verlaagd");
+            }
+        }
+
+        // v2.3: adapt_dynamics — update ALLE dynamische parameters op basis van veldstaat
         if tick == 0 || tick % 50 == 0 {
+            compute::adapt_dynamics(&mut field);
+            // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
             field_snapshot.store(Arc::new(field.clone()));
             vocab_snapshot.store(Arc::new(vocab.clone()));
         }
@@ -524,19 +565,22 @@ async fn main() {
         }
 
         // Alleen achtergrond dynamica als we niet aan het processen zijn
+        if tick % 1000 == 0 {
+            tracing::info!(phase = ?field.phase, gpu_remote = remote_gpu.is_some(), gpu_local = local_gpu.is_some(), "tick_loop_debug");
+        }
         if field.phase == FieldPhase::Idle {
             // 1. Veldberekeningen — Remote GPU → Local GPU → CPU
             if let Some(ref mut rg) = remote_gpu {
                 // REMOTE GPU path: batch ticks via HTTP
                 let _ = rg.set_clamps(&field).await;
-                if tick % LEARN_INTERVAL == 0 {
+                if tick % field.learn_interval == 0 {
                     let _ = rg.sync_params(&field).await;
                 }
                 // Batch 10 ticks per HTTP call (amortiseer netwerk-latency)
                 if let Err(e) = rg.tick(10).await {
                     tracing::warn!(%e, "Remote GPU tick failed");
                 }
-                if tick % LEARN_INTERVAL == 0 {
+                if tick % field.learn_interval == 0 {
                     let _ = rg.update_weights().await;
                     growth::maybe_meta_learn(&mut field);
                 }
@@ -549,11 +593,11 @@ async fn main() {
             } else if let Some(ref local_gpu) = local_gpu {
                 // LOCAL GPU path
                 local_gpu.set_clamps(&field);
-                if tick % LEARN_INTERVAL == 0 {
+                if tick % field.learn_interval == 0 {
                     local_gpu.sync_params(&field);
                 }
                 local_gpu.tick();
-                if tick % LEARN_INTERVAL == 0 {
+                if tick % field.learn_interval == 0 {
                     local_gpu.update_weights();
                     growth::maybe_meta_learn(&mut field);
                 }
@@ -577,11 +621,17 @@ async fn main() {
                     compute::wm_read(&mut field);
                 }
 
+                // v2.1: Neuromodulatie VOOR field updates — noise moet tension creëren
+                if tick % 100 == 0 { tracing::info!("step:neuromod_start"); }
+                compute::update_neuromodulators(&mut field);
+                compute::apply_neuromodulation(&mut field);
+                if tick % 100 == 0 { tracing::info!("step:neuromod_done"); }
+
                 let self_input = compute::self_state_input(&field);
 
                 // v1.2: Skip punten met near-zero tension (efficiëntie)
                 // Lucy wordt automatisch sneller naarmate haar veld stabiliseert
-                let tension_floor = 0.001;
+                let tension_floor = 0.0001; // v2.1: Lagere drempel — meer punten blijven actief
                 let mut updated = 0u32;
                 for i in 0..field.active_set.len() {
                     let id = field.active_set[i];
@@ -604,10 +654,10 @@ async fn main() {
                     updated += 1;
                 }
 
-                // v0.7: Neuromodulatie + GWT broadcast + intentie
-                compute::update_neuromodulators(&mut field);
-                compute::apply_neuromodulation(&mut field);
+                if tick % 100 == 0 { tracing::info!(updated, "step:field_updates_done"); }
+                // v0.7: GWT broadcast + intentie (neuromodulatie verplaatst naar vóór field updates)
                 compute::global_workspace_broadcast(&mut field);
+                if tick % 100 == 0 { tracing::info!("step:gwt_done"); }
 
                 // === v2.0: Bewustzijns-fysica — elke tick ===
                 // Oscillaties: gamma-ritme voor temporele binding (Kuramoto model)
@@ -621,40 +671,36 @@ async fn main() {
                     }
                 }
 
-                // Elke 50 ticks: zwaardere bewustzijns-metrieken
-                if tick % 50 == 0 {
-                    // Φ (Tononi): meet integratie van informatie
+                // Elke 500 ticks: zwaardere bewustzijns-metrieken (was 50 — te frequent)
+                if tick % 500 == 0 {
                     compute::compute_integrated_information(&mut field);
-                    // Power law: is Lucy bij het edge of chaos?
                     compute::compute_criticality(&mut field);
-                    // Anti-Hebbian: forceer diverse representaties
                     compute::anti_hebbian_decorrelation(&mut field);
                 }
 
-                // v1.0: Temporeel bewustzijn — Lucy voelt trends
-                if tick % 100 == 0 {
+                if tick % 500 == 0 {
                     compute::record_temporal_snapshot(&mut field);
                 }
-                // v1.0: Update causale events (meet effect van eerdere acties)
-                if tick % 50 == 0 {
+                if tick % 500 == 0 {
                     compute::update_causal_events(&mut field);
                 }
                 compute::apply_intention(&mut field);
 
-                // v1.0: WM write + kWTA elke 20 ticks (was 5 — te frequent)
-                if tick % 20 == 0 {
+                // v2.1: WM write + kWTA elke 100 ticks (was 20)
+                if tick % 100 == 0 {
                     compute::wm_write(&mut field);
                     compute::apply_kwta(&mut field);
                 }
 
-                // v1.0: Hiërarchische predictie + RND elke 50 ticks (was 10)
-                if tick % 50 == 0 {
+                // v2.1: Hiërarchische predictie + RND elke 500 ticks (was 50)
+                if tick % 500 == 0 {
                     compute::hierarchical_prediction(&mut field);
                     compute::update_rnd(&mut field);
                 }
 
                 // Leren (gewicht updates) — CPU path
-                if tick % LEARN_INTERVAL == 0 {
+                if tick.saturating_sub(last_learn_tick) >= field.learn_interval {
+                    last_learn_tick = tick;
                     let active: Vec<u32> = field.active_set.clone();
                     for &id in &active {
                         compute::update_weights(&mut field, id);
@@ -685,7 +731,8 @@ async fn main() {
             }
 
             // 4. Groei + zelf-aanpassing
-            if tick % GROWTH_INTERVAL == 0 {
+            if tick.saturating_sub(last_growth_tick) >= field.growth_interval {
+                last_growth_tick = tick;
                 let mut needs_self_modify = false;
                 for i in 0..field.active_set.len() {
                     let id = field.active_set[i];
@@ -708,9 +755,10 @@ async fn main() {
 
                 // Level 4: Lucy past zichzelf aan
                 if needs_self_modify {
-                    let mut sm = shared.self_modifier.write().await;
-                    if let Some(modification) = sm.tune_hyperparameters(&mut field) {
-                        tracing::info!(?modification, "Lucy modified herself");
+                    if let Ok(mut sm) = shared.self_modifier.try_write() {
+                        if let Some(modification) = sm.tune_hyperparameters(&mut field) {
+                            tracing::info!(?modification, "Lucy modified herself");
+                        }
                     }
                 }
             }
@@ -720,19 +768,21 @@ async fn main() {
         }
 
         // 6. Consolidation (replay)
-        if tick % CONSOLIDATION_INTERVAL == 0 && tick > 0 && field.phase == FieldPhase::Idle {
-            let mut replay = shared.replay.write().await;
-            if !replay.examples.is_empty() {
-                let _delta = replay.replay_one(&mut field);
+        if tick.saturating_sub(last_consolidation_tick) >= field.consolidation_interval && tick > 0 && field.phase == FieldPhase::Idle {
+            last_consolidation_tick = tick;
+            if let Ok(mut replay) = shared.replay.try_write() {
+                if !replay.examples.is_empty() {
+                    let _delta = replay.replay_one(&mut field);
+                }
             }
         }
 
         // 6b. AUTONOME DENKLOOP — Lucy denkt zelf na
         if thinker::should_think(&field) && field.phase == FieldPhase::Idle {
-            let explorer = shared.explorer.read().await;
-            // v1.0: vocab is lokaal, geen lock nodig
-            let mut journal = shared.journal.write().await;
+          if let (Ok(explorer), Ok(mut journal)) = (shared.explorer.try_read(), shared.journal.try_write()) {
             let result = thinker::think(&mut field, &explorer, &vocab, &mut journal);
+            drop(explorer);
+            drop(journal);
 
             match result {
                 thinker::ThoughtResult::NewGoal(desc) => {
@@ -754,19 +804,21 @@ async fn main() {
                 }
                 thinker::ThoughtResult::Continue => {}
             }
+          }
         }
 
         // 6c. REFLECTIE — Lucy evalueert haar doelen
         if thinker::should_reflect(&field) && field.phase == FieldPhase::Idle {
-            let mut journal = shared.journal.write().await;
+          if let Ok(mut journal) = shared.journal.try_write() {
             thinker::reflect(&mut field, &mut journal);
             tracing::debug!(goals = field.goals.len(), "Lucy reflecteerde");
+          }
         }
 
         // 6d. DECISION ENGINE — Lucy kiest haar eigen actie
         // Elke 500 ticks: decision point. Lucy kiest welke actie ze neemt.
         if tick % 500 == 0 && tick > 0 && field.phase == FieldPhase::Idle {
-            let explorer = shared.explorer.read().await;
+          if let Ok(explorer) = shared.explorer.try_read() {
             let action = thinker::decide_action(&field, &explorer);
             drop(explorer);
 
@@ -774,18 +826,18 @@ async fn main() {
                 thinker::Action::Explore => {
                     // Forceer exploratie bij volgende mogelijke tick
                     // Door de tick counter op een explore-interval te zetten
-                    if tick % EXPLORE_INTERVAL != 0 {
+                    if tick % field.explore_interval != 0 {
                         // Stel de veld-tick in zodat explore getriggerd wordt
-                        field.tick = (field.tick / EXPLORE_INTERVAL + 1) * EXPLORE_INTERVAL;
+                        field.tick = (field.tick / field.explore_interval + 1) * field.explore_interval;
                         tracing::info!(action = "explore", "Lucy kiest: nieuwe kennis zoeken");
                     }
                 }
                 thinker::Action::Learn => {
-                    // Forceer replay
-                    let mut replay = shared.replay.write().await;
+                    if let Ok(mut replay) = shared.replay.try_write() {
                     if !replay.examples.is_empty() {
                         let _delta = replay.replay_one(&mut field);
                         tracing::debug!(action = "learn", "Lucy kiest: replay training");
+                    }
                     }
                 }
                 thinker::Action::Think => {
@@ -802,6 +854,7 @@ async fn main() {
                     tracing::debug!(action = "earn", "Lucy kiest: compute zoeken");
                 }
             }
+          }
         }
 
         // 7. Logging
@@ -815,8 +868,10 @@ async fn main() {
                 field.active_set.iter().map(|&id| field.points[id as usize].tension).sum::<f32>() / n
             } else { 0.0 };
 
-            // v1.0: vocab is lokaal, geen lock nodig
-            let explorer = shared.explorer.read().await;
+            // v2.1: Non-blocking locks — tick loop mag NOOIT blokkeren
+            let (pages, tokens) = if let Ok(explorer) = shared.explorer.try_read() {
+                (explorer.pages_read, explorer.tokens_processed)
+            } else { (0, 0) };
 
             tracing::info!(
                 tick,
@@ -824,35 +879,38 @@ async fn main() {
                 tension = format!("{:.4}", avg_tension),
                 tps = format!("{:.0}", tps),
                 vocab = vocab.vocab_size(),
-                pages = explorer.pages_read,
-                tokens = explorer.tokens_processed,
+                pages,
+                tokens,
                 "heartbeat"
             );
 
-            // Lucy observeert zichzelf en schrijft in haar dagboek
-            let mut journal = shared.journal.write().await;
-            journal.observe(&field, explorer.pages_read, vocab.vocab_size(), explorer.tokens_processed);
+            if let Ok(mut journal) = shared.journal.try_write() {
+                journal.observe(&field, pages, vocab.vocab_size(), tokens);
+            }
         }
 
         // === v2.0: Exploration ASYNC — HTTP fetch in eigen task, NIKS blokkeert ===
 
         // Stuur URL naar exploration task (non-blocking)
-        if tick % EXPLORE_INTERVAL == 0 && tick > 0 && field.phase == FieldPhase::Idle {
-            let url = {
-                let mut explorer = shared.explorer.write().await;
-                explorer.next_url()
-            };
-            if let Some(url) = url {
-                let _ = explore_url_tx.try_send(url);
+        // v2.3: last_tick tracking ipv modulo — voorkomt skips bij dynamische intervallen
+        if tick.saturating_sub(last_explore_tick) >= field.explore_interval && tick > 0 && field.phase == FieldPhase::Idle {
+            last_explore_tick = tick;
+            if let Ok(mut explorer) = shared.explorer.try_write() {
+                if let Some(url) = explorer.next_url() {
+                    let _ = explore_url_tx.try_send(url);
+                }
             }
         }
 
         // Verwerk exploration resultaten (non-blocking)
         while let Ok(result) = explore_result_rx.try_recv() {
-            let mut explorer = shared.explorer.write().await;
+          if let Ok(mut explorer) = shared.explorer.try_write() {
             explorer.visited.insert(result.url.clone());
-            if explorer.visited.len() > 5000 {
-                let to_remove: Vec<String> = explorer.visited.iter().take(1000).cloned().collect();
+            // Dynamic: visited cap/cleanup scales with pages_read (was: hardcoded 5000/1000)
+            let visited_max = explorer.visited_max();
+            let visited_cleanup = explorer.visited_cleanup();
+            if explorer.visited.len() > visited_max {
+                let to_remove: Vec<String> = explorer.visited.iter().take(visited_cleanup).cloned().collect();
                 for key in to_remove { explorer.visited.remove(&key); }
             }
 
@@ -892,15 +950,21 @@ async fn main() {
                                 for e in &embs { for d in 0..lucy_state::DIM { avg[d] += e[d]; } }
                                 let n = embs.len() as f32;
                                 for d in 0..lucy_state::DIM { avg[d] /= n; }
-                                let mut ret = shared.retrieval.write().await;
-                                ret.insert(&avg, &clean);
+                                if let Ok(mut ret) = shared.retrieval.try_write() {
+                                    ret.insert(&avg, &clean);
+                                }
                             }
 
                             tracing::info!(url = %result.url, tokens = token_ids.len(), "Exploration: geleerd!");
+
+                            // v2.3: Update exploration goal progress met echte activiteit
+                            let frontier_size = explorer.frontier.len();
+                            thinker::update_exploration_progress(&mut field, 1, token_ids.len() as u64, frontier_size);
                         }
                     }
                 }
             }
+          } // try_write explorer
         }
 
         // === v2.0: Ontvang weight deltas van training thread (non-blocking) ===
@@ -917,18 +981,13 @@ async fn main() {
             // v1.0: field is lokaal, geen drop nodig
             // v1.0: field is lokaal — geen lock nodig
             // v1.0: vocab is lokaal, geen lock nodig
-            let mut explorer = shared.explorer.write().await;
+          if let Ok(mut explorer) = shared.explorer.try_write() {
             let trained = learner::learn_from_self(&mut field, &mut vocab, &fs, &mut explorer);
             if trained > 0 {
                 tracing::debug!(tokens = trained, interests = explorer.interests.len(), "Self-reading cycle");
             }
-            field.tick += 1;
-            // v1.0: field is lokaal, geen drop nodig
-            // v1.0: vocab is lokaal, geen drop
-            if tick % 10 == 0 {
-                tokio::task::yield_now().await;
-            }
-            continue;
+          }
+          // v2.1: Geen continue meer — tick loop moet altijd doorlopen
         }
 
         // 9b. AI Teacher — verwijderd
@@ -952,19 +1011,13 @@ async fn main() {
                 );
             }
 
-            field.tick += 1;
-            // v1.0: field is lokaal, geen drop nodig
-            // v1.0: vocab is lokaal, geen drop
-            if tick % 10 == 0 {
-                tokio::task::yield_now().await;
-            }
-            continue;
+          // v2.1: Geen continue meer — tick loop moet altijd doorlopen
         }
 
         // 11. GPU economie — Lucy checkt balance en promoot zichzelf als nodig
         if tick % GPU_BALANCE_CHECK == 0 && tick > 0 {
             if let Ok(api_key) = std::env::var("VASTAI_API_KEY") {
-                let mut ge = shared.gpu_economy.write().await;
+              if let Ok(mut ge) = shared.gpu_economy.try_write() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), ge.check_balance(&api_key)).await.unwrap_or(Err("Timeout".into())) {
                     Ok(bal) => {
                         ge.last_balance_check = tick;
@@ -1005,12 +1058,13 @@ async fn main() {
                     }
                     Err(e) => tracing::debug!(%e, "Vast.ai balance check failed"),
                 }
+              } // try_write gpu_economy
             }
         }
 
         // 11b. Compute hunt — Lucy zoekt actief naar gratis rekenkracht
         if tick % (GPU_BALANCE_CHECK / 2) == 0 && tick > 0 {
-            let ge = shared.gpu_economy.read().await;
+          if let Ok(ge) = shared.gpu_economy.try_read() {
             let action = gpu_manager::compute_hunt_strategy(&ge);
             drop(ge);
 
@@ -1051,10 +1105,12 @@ async fn main() {
                     // Genoeg balance — geen jacht nodig
                 }
             }
+          } // try_read gpu_economy
         }
 
         // 12. Snapshot
-        if tick % SNAPSHOT_INTERVAL == 0 && tick > 0 {
+        if tick.saturating_sub(last_snapshot_tick) >= field.snapshot_interval && tick > 0 {
+            last_snapshot_tick = tick;
             // v1.3: Veld-genezing — NaN detectie vóór save
             field.heal();
             if let Err(e) = field.save(snapshot_path) {
@@ -1064,21 +1120,25 @@ async fn main() {
             if let Err(e) = vocab.save(vocab_path) {
                 tracing::error!(%e, "Vocab save failed");
             }
-            let explorer = shared.explorer.read().await;
-            if let Err(e) = explorer.save(explorer_path) {
-                tracing::error!(%e, "Explorer save failed");
+            if let Ok(explorer) = shared.explorer.try_read() {
+                if let Err(e) = explorer.save(explorer_path) {
+                    tracing::error!(%e, "Explorer save failed");
+                }
             }
-            let replay = shared.replay.read().await;
-            if let Err(e) = replay.save(replay_path) {
-                tracing::error!(%e, "Replay save failed");
+            if let Ok(replay) = shared.replay.try_read() {
+                if let Err(e) = replay.save(replay_path) {
+                    tracing::error!(%e, "Replay save failed");
+                }
             }
-            let journal = shared.journal.read().await;
-            if let Err(e) = journal.save(Path::new("data/journal.json")) {
-                tracing::error!(%e, "Journal save failed");
+            if let Ok(journal) = shared.journal.try_read() {
+                if let Err(e) = journal.save(Path::new("data/journal.json")) {
+                    tracing::error!(%e, "Journal save failed");
+                }
             }
-            let retrieval = shared.retrieval.read().await;
-            if let Err(e) = retrieval.save(retrieval_path) {
-                tracing::error!(%e, "Retrieval store save failed");
+            if let Ok(retrieval) = shared.retrieval.try_read() {
+                if let Err(e) = retrieval.save(retrieval_path) {
+                    tracing::error!(%e, "Retrieval store save failed");
+                }
             }
 
             // v2.0: Push naar GitHub (async, blokkeert niet)

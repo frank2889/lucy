@@ -134,9 +134,12 @@ pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
     };
 
     // Update Φ
+    let pred_rate = field.fe_tracking_rate; // dynamisch: hoe snel prediction volgt
     let point = &mut field.points[id_usize];
     for d in 0..DIM {
-        point.prediction[d] = point.phi[d];
+        // Prediction is een EMA van phi — volgt langzamer dan phi beweegt
+        // Dit creëert prediction error als het veld actief verandert
+        point.prediction[d] = (1.0 - pred_rate) * point.prediction[d] + pred_rate * point.phi[d];
         point.phi[d] -= lambda * grad[d];
 
         if let Some(inp) = input {
@@ -162,6 +165,7 @@ pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
 pub fn apply_layer_norm(field: &mut Field) {
     // v1.0: Parallel — berekent nieuwe phi's in bulk, dan toepassen
     // Elke punt is onafhankelijk, dus we berekenen parallel en schrijven terug.
+    let clamp_range = field.clamp_range; // dynamisch — groeit mee met veldactiviteit
     let new_phis: Vec<(usize, [f32; DIM])> = field.active_set
         .par_iter()
         .map(|&id| {
@@ -182,7 +186,8 @@ pub fn apply_layer_norm(field: &mut Field) {
 
             let mut normed = [0.0f32; DIM];
             for d in 0..DIM {
-                normed[d] = ((phi[d] - mean) * inv_std).clamp(-10.0, 10.0);
+                // clamp_range is dynamisch — groeit mee met veldactiviteit
+                normed[d] = ((phi[d] - mean) * inv_std).clamp(-clamp_range, clamp_range);
             }
             (idx, normed)
         })
@@ -221,12 +226,14 @@ pub fn update_weights(field: &mut Field, id: u32) {
         dw /= DIM as f32;
 
         coupling.momentum = mu * coupling.momentum + (1.0 - mu) * dw;
-        // EWC penalty: bescherm belangrijke weights tegen catastrophic forgetting
-        let ewc_pen = ewc_penalty(coupling, 0.1);
+        // EWC penalty: bescherm belangrijke weights — sterkte schaalt met kl_scale
+        let ewc_pen = ewc_penalty(coupling, field.kl_scale);
         // v1.0: Broadcast couplings krijgen 2× learning rate (dragen bewust signaal)
         let lr = if coupling.broadcast { eta * 2.0 } else { eta };
         coupling.weight -= lr * dw + mu * coupling.momentum + lr * ewc_pen;
-        coupling.weight = coupling.weight.clamp(-5.0, 5.0);
+        // Weight clamp schaalt met veldactiviteit (clamp_range / 2 voor weights)
+        let w_clamp = field.clamp_range / 2.0;
+        coupling.weight = coupling.weight.clamp(-w_clamp, w_clamp);
     }
 }
 
@@ -243,60 +250,196 @@ pub fn update_memory(field: &mut Field, id: u32) {
 }
 
 /// Bereken spanning + emotionele signalen
+/// v2.3: ALLE parameters dynamisch — niets hardcoded.
+/// EMA rates, scales, en drempels komen uit field.* (bijgewerkt door adapt_dynamics).
 pub fn compute_tension(field: &mut Field, id: u32) {
     let kappa = field.kappa;
-    let omega = field.omega;
     let ema_decay = field.ema_decay;
     let growth_threshold = field.growth_threshold;
+    // Dynamische parameters uit adapt_dynamics()
+    let emo_decay = field.emo_decay;
+    let tracking = field.error_tracking_rate;
+    let fe_rate = field.fe_tracking_rate;
+    let kl_scale = field.kl_scale;
 
     let point = &field.points[id as usize];
     let eps = prediction_error(point);
     let pred_error = squared_norm(&eps);
-    let compute_cost = point.couplings.len() as f32 * 0.01;
-    let empowerment: f32 = point.couplings.iter().map(|c| c.weight.abs()).sum();
+    // Compute cost schaalt met punt's eigen complexiteit (aantal koppelingen)
+    let n_couplings = point.couplings.len() as f32;
+    let compute_cost = n_couplings * kappa;
     let old_tension_ema = point.tension_ema;
 
     let point = &mut field.points[id as usize];
 
     // Precision weighting (Friston): track error-variantie, weeg tension ermee
+    // tracking rate is dynamisch — hoge instabiliteit → sneller bijwerken
     let error_diff = pred_error - point.tension_ema;
-    point.error_var = 0.99 * point.error_var + 0.01 * error_diff * error_diff;
-    point.precision = 1.0 / (point.error_var + 0.01);
-    // === v2.0: Free Energy Principle (Friston) ===
-    // F = KL(q||p) + surprise
-    // KL = complexiteit van het interne model (hoe ver wijkt phi af van een simpel model?)
-    // Surprise = prediction error (al berekend)
-    let phi_var: f32 = point.phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
-    let kl_proxy = 0.1 * phi_var; // Complexiteitspenalty — simpeler model = beter
-    let free_energy = kl_proxy + point.precision * pred_error;
-    point.kl_divergence = 0.99 * point.kl_divergence + 0.01 * kl_proxy;
-    point.free_energy = 0.95 * point.free_energy + 0.05 * free_energy;
+    point.error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
+    point.precision = 1.0 / (point.error_var + tracking); // floor = tracking rate zelf
 
-    // Tension = Free Energy + kosten - beloning
-    // Lucy minimaliseert F door haar model te verbeteren (leren) OF acties te nemen (exploratie)
-    point.tension = (free_energy + kappa * compute_cost - omega * empowerment).max(0.0);
+    // === Free Energy Principle (Friston) ===
+    // F = KL(q||p) + surprise
+    // kl_scale is dynamisch — sterker bij complexer veld
+    let phi_var: f32 = point.phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
+    let kl_proxy = kl_scale * phi_var;
+    let free_energy = kl_proxy + point.precision * pred_error;
+    // KL tracking met dynamische rate
+    point.kl_divergence = (1.0 - tracking) * point.kl_divergence + tracking * kl_proxy;
+    // Free energy tracking met dynamische rate
+    point.free_energy = (1.0 - fe_rate) * point.free_energy + fe_rate * free_energy;
+
+    // Tension = Free Energy + kosten
+    // STRUCTURELE GUARANTEE: tension is NOOIT nul.
+    // Elk actief punt heeft een minimale "levens-tension" proportioneel aan zijn complexiteit.
+    // Dit is biologisch: neuronen verbruiken altijd energie, zelfs in rust.
+    let basal_tension = n_couplings * 0.001 + 0.001; // meer verbindingen = meer baseline activiteit
+    point.tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
     point.tension_ema = ema_decay * old_tension_ema + (1.0 - ema_decay) * point.tension;
 
-    // Emotionele signalen (exponentieel afvallend)
-    let emo_decay = 0.95;
+    // === Emotionele signalen ===
+    // Formule: emotion = max(smoothed_history, current_signal)
+    // Emotie kan nooit LAGER zijn dan wat er NU gebeurt.
+    // De EMA smooth alleen de history — het huidige signaal is de vloer.
+    let emo_smooth = field.emo_decay;
 
-    // Nieuwsgierigheid: precision-gewogen verrassing
-    // v1.3: NaN-safe — .max(0.0) voorkomt sqrt van negatief getal
-    let surprise = (point.precision * pred_error.max(0.0).sqrt() - old_tension_ema.max(0.0).sqrt()).max(0.0);
-    let surprise = if surprise.is_nan() || surprise.is_infinite() { 0.0 } else { surprise };
-    point.curiosity = (emo_decay * point.curiosity + (1.0 - emo_decay) * surprise).clamp(0.0, 1.0);
-    if point.curiosity.is_nan() || point.curiosity.is_infinite() { point.curiosity = 0.0; }
+    // Curiosity = hoe verrassend is dit punt? (prediction error + tension)
+    let surprise = (pred_error.sqrt() * point.precision)
+        .max(point.tension)                // tension zelf is een signaal
+        .max(field.noise_amplitude)        // minimale baseline
+        .min(1.0);
+    let surprise = if surprise.is_finite() { surprise } else { field.noise_amplitude };
+    let smoothed = emo_smooth * point.curiosity + (1.0 - emo_smooth) * surprise;
+    point.curiosity = smoothed.max(surprise).clamp(0.0, 1.0); // NOOIT lager dan signaal
 
-    // Tevredenheid: spanning daalt → leren werkt
+    // Satisfaction = tension daalt → leren werkt
     let improvement = (old_tension_ema - point.tension).max(0.0);
-    point.satisfaction = (emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement).clamp(0.0, 1.0);
-    if point.satisfaction.is_nan() || point.satisfaction.is_infinite() { point.satisfaction = 0.0; }
+    let relative_calm = (point.tension_ema - point.tension).max(0.0);
+    let sat_signal = (improvement + relative_calm).min(1.0);
+    let smoothed = emo_smooth * point.satisfaction + (1.0 - emo_smooth) * sat_signal;
+    point.satisfaction = smoothed.max(sat_signal).clamp(0.0, 1.0);
 
-    // Frustratie: spanning hoog EN stabiel → vastgelopen
-    let flatness = 1.0 / (1.0 + (point.tension - point.tension_ema).abs() * 10.0);
+    // Frustration = tension hoog EN stabiel
+    let flatness = 1.0 / (1.0 + (point.tension - point.tension_ema).abs() / (point.tension_ema + 0.001));
     let stuck = (point.tension - growth_threshold).max(0.0) * flatness;
-    point.frustration = (emo_decay * point.frustration + (1.0 - emo_decay) * stuck).clamp(0.0, 1.0);
-    if point.frustration.is_nan() || point.frustration.is_infinite() { point.frustration = 0.0; }
+    let smoothed = emo_smooth * point.frustration + (1.0 - emo_smooth) * stuck;
+    point.frustration = smoothed.max(stuck).clamp(0.0, 1.0);
+}
+
+/// Centraal punt dat ALLE dynamische parameters bijwerkt op basis van veldstatistieken.
+/// Wordt elke N ticks aangeroepen vanuit main.rs. Leest het veld, schrijft parameters terug.
+/// Niets hardcoded — alles afgeleid van observeerbare grootheden.
+pub fn adapt_dynamics(field: &mut Field) {
+    let n = field.active_set.len() as f32;
+    if n < 1.0 { return; }
+
+    // === Veldstatistieken berekenen ===
+    let avg_tension: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension).sum::<f32>() / n;
+    let tension_var: f32 = field.active_set.iter()
+        .map(|&id| {
+            let d = field.points[id as usize].tension - avg_tension;
+            d * d
+        }).sum::<f32>() / n;
+    let avg_pred_error: f32 = field.active_set.iter()
+        .map(|&id| squared_norm(&prediction_error(&field.points[id as usize])))
+        .sum::<f32>() / n;
+    let avg_curiosity: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].curiosity).sum::<f32>() / n;
+    let avg_frustration: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].frustration).sum::<f32>() / n;
+    let avg_phi_var: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32)
+        .sum::<f32>() / n;
+    let max_phi: f32 = field.active_set.iter()
+        .flat_map(|&id| field.points[id as usize].phi.iter())
+        .map(|x| x.abs())
+        .fold(0.0f32, |a, b| a.max(b));
+
+    // === Parameters aanpassen ===
+
+    // SAFEGUARD: detecteer dood veld — als alles nul is, forceer hoge activiteit
+    let is_dead = avg_tension < 0.0001 && avg_curiosity < 0.0001 && avg_pred_error < 0.0001;
+
+    // emo_decay: hoe snel emoties reageren
+    // Range: 0.5 (zeer responsief) tot 0.9 (trager maar stabiel)
+    // NOOIT hoger dan 0.9 — anders sterven emoties uit
+    let activity = avg_pred_error.sqrt().clamp(0.0, 1.0);
+    field.emo_decay = if is_dead { 0.5 } else { (0.9 - 0.4 * activity).clamp(0.5, 0.9) };
+
+    // error_tracking_rate: hoge variance → sneller error tracken
+    // Bij dood veld: maximale tracking speed
+    let instability = tension_var.sqrt().clamp(0.0, 1.0);
+    field.error_tracking_rate = if is_dead { 0.1 } else { (instability * 0.09 + 0.01).clamp(0.01, 0.1) };
+
+    // fe_tracking_rate: zelfde dynamiek als error tracking, iets hoger
+    field.fe_tracking_rate = if is_dead { 0.1 } else { (instability * 0.08 + 0.02).clamp(0.02, 0.1) };
+
+    // kl_scale: complexer veld (hogere phi variance) → sterkere regularisatie
+    // Bij dood veld: forceer hoge kl_scale zodat phi_var → tension
+    field.kl_scale = if is_dead { 1.0 } else { avg_phi_var.sqrt().clamp(0.01, 1.0) };
+
+    // clamp_range: groeit mee met maximale activatie-amplitudes
+    field.clamp_range = (max_phi * 2.0).clamp(1.0, 50.0);
+
+    // noise_amplitude: meer tension → meer exploratie-ruis
+    // CRITICAL: minimum 0.05 zodat het veld NOOIT kan doodgaan
+    // Bij dood veld: maximale ruis (0.2) om het wakker te schudden
+    field.noise_amplitude = if is_dead { 0.2 } else { (avg_tension * 0.5).clamp(0.05, 0.2) };
+
+    if is_dead {
+        // Forceer alle parameters naar maximale activiteit
+        field.learn_interval = 20;
+        field.explore_interval = 20;
+        field.think_interval = 100;
+        field.reflect_interval = 2_000;
+        tracing::warn!(
+            tick = field.tick,
+            noise = format!("{:.3}", field.noise_amplitude),
+            kl = format!("{:.3}", field.kl_scale),
+            emo_decay = format!("{:.3}", field.emo_decay),
+            "DOOD VELD — reanimatie actief"
+        );
+    }
+
+    // settle_epsilon: schaalt met gemiddelde tension
+    // Minimum 0.005 zodat queries niet hangen bij laag tension
+    field.settle_epsilon = if is_dead { 0.05 } else { (avg_tension * 0.1).clamp(0.005, 0.1) };
+
+    // think_interval: hoge curiosity → vaker nadenken
+    let curiosity_drive = (avg_curiosity * 10.0).clamp(0.1, 5.0);
+    field.think_interval = (500.0 / curiosity_drive).clamp(100.0, 2000.0) as u64;
+
+    // reflect_interval: hoge frustration → vaker reflecteren
+    let frustration_drive = (avg_frustration * 10.0).clamp(0.1, 5.0);
+    field.reflect_interval = (10_000.0 / frustration_drive).clamp(2_000.0, 50_000.0) as u64;
+
+    // learn_interval: hoge tension → sneller leren
+    let tension_drive = (avg_tension * 20.0).clamp(0.1, 5.0);
+    field.learn_interval = (100.0 / tension_drive).clamp(20.0, 500.0) as u64;
+
+    // explore_interval: schaalt met curiosity
+    field.explore_interval = (100.0 / curiosity_drive).clamp(20.0, 500.0) as u64;
+
+    // consolidation_interval: schaalt invers met tension (rustig = consolideren)
+    let calm_factor = (1.0 - avg_tension.min(1.0)).max(0.1);
+    field.consolidation_interval = (1_000.0 / calm_factor).clamp(200.0, 5_000.0) as u64;
+
+    // growth_interval: hoge tension → sneller groeien
+    field.growth_interval = (10_000.0 / tension_drive).clamp(2_000.0, 50_000.0) as u64;
+
+    // snapshot_interval: snelle verandering → vaker opslaan
+    field.snapshot_interval = (10_000.0 / (instability * 10.0 + 0.1).min(5.0)).clamp(2_000.0, 50_000.0) as u64;
+
+    tracing::trace!(
+        emo_decay = format!("{:.3}", field.emo_decay),
+        tracking = format!("{:.4}", field.error_tracking_rate),
+        kl_scale = format!("{:.3}", field.kl_scale),
+        think = field.think_interval,
+        learn = field.learn_interval,
+        explore = field.explore_interval,
+        "adapt_dynamics: parameters bijgewerkt"
+    );
 }
 
 /// kWTA (k-Winner-Take-All): alleen top-K% punten blijven actief
@@ -356,13 +499,18 @@ pub fn tick_all(field: &mut Field) {
 /// Correcte fysica: alle punten updaten simultaan op basis van vorige tick
 fn tick_all_parallel(field: &mut Field) {
     let lambda = field.lambda;
-    let _beta = field.beta; // beschikbaar voor input injection in toekomst
+    let _beta = field.beta;
     let alpha = field.alpha;
     let rho = field.rho;
     let kappa = field.kappa;
-    let omega = field.omega;
     let ema_decay = field.ema_decay;
     let growth_threshold = field.growth_threshold;
+    // Dynamische parameters
+    let emo_decay = field.emo_decay;
+    let tracking = field.error_tracking_rate;
+    let fe_rate = field.fe_tracking_rate;
+    let kl_scale = field.kl_scale;
+    let clamp_range = field.clamp_range;
 
     // Lees alle punt-data immutable (snapshot van vorige tick)
     let points = &field.points;
@@ -432,10 +580,12 @@ fn tick_all_parallel(field: &mut Field) {
 
         let mut new_phi = [0.0f32; DIM];
         let mut new_pred = [0.0f32; DIM];
+        let pred_rate = fe_rate; // prediction volgt phi met dynamische snelheid
         for d in 0..DIM {
-            new_pred[d] = point.phi[d];
+            // Prediction = EMA van phi (langzamer → meer error → meer signaal)
+            new_pred[d] = (1.0 - pred_rate) * point.prediction[d] + pred_rate * point.phi[d];
             new_phi[d] = point.phi[d] - lambda * grad[d] - alpha * point.phi[d].signum();
-            new_phi[d] = new_phi[d].clamp(-10.0, 10.0);
+            new_phi[d] = new_phi[d].clamp(-clamp_range, clamp_range);
         }
 
         // --- memory update ---
@@ -449,28 +599,38 @@ fn tick_all_parallel(field: &mut Field) {
             new_memory[d] = rho * point.memory[d] + (1.0 - rho) * eps[d];
         }
 
-        // --- tension + precision weighting + emoties ---
+        // --- tension + precision weighting + emoties (alle params dynamisch) ---
         let pred_error = squared_norm(&eps);
-        let compute_cost = n_couplings as f32 * 0.01;
-        let empowerment: f32 = point.couplings.iter().map(|c| c.weight.abs()).sum();
+        let compute_cost = n_couplings as f32 * kappa;
         let error_diff = pred_error - point.tension_ema;
-        let error_var = 0.99 * point.error_var + 0.01 * error_diff * error_diff;
-        let precision = 1.0 / (error_var + 0.01);
-        let tension = (precision * pred_error + kappa * compute_cost - omega * empowerment).max(0.0);
+        let error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
+        let precision = 1.0 / (error_var + tracking);
+        let phi_var: f32 = new_phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
+        let kl_proxy = kl_scale * phi_var;
+        let free_energy = kl_proxy + precision * pred_error;
+        // Basale tension: elk punt heeft minimale activiteit (biologisch: rustmetabolisme)
+        let basal_tension = n_couplings as f32 * 0.001 + 0.001;
+        let tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
         let tension_ema = ema_decay * point.tension_ema + (1.0 - ema_decay) * tension;
 
-        let emo_decay = 0.95;
-        let surprise = (precision * pred_error.max(0.0).sqrt() - point.tension_ema.max(0.0).sqrt()).max(0.0);
-        let surprise = if surprise.is_nan() || surprise.is_infinite() { 0.0 } else { surprise };
-        let curiosity = (emo_decay * point.curiosity + (1.0 - emo_decay) * surprise).clamp(0.0, 1.0);
-        let curiosity = if curiosity.is_nan() { 0.0 } else { curiosity };
+        // Emoties: max(smoothed_history, current_signal) — nooit lager dan nu
+        let noise_amp = field.noise_amplitude;
+        let surprise = (pred_error.sqrt() * precision).max(tension).max(noise_amp).min(1.0);
+        let surprise = if surprise.is_finite() { surprise } else { noise_amp };
+        let smoothed_c = emo_decay * point.curiosity + (1.0 - emo_decay) * surprise;
+        let curiosity = smoothed_c.max(surprise).clamp(0.0, 1.0);
+
         let improvement = (point.tension_ema - tension).max(0.0);
-        let satisfaction = (emo_decay * point.satisfaction + (1.0 - emo_decay) * improvement).clamp(0.0, 1.0);
-        let satisfaction = if satisfaction.is_nan() || satisfaction.is_infinite() { 0.0 } else { satisfaction };
-        let flatness = 1.0 / (1.0 + (tension - point.tension_ema).abs() * 10.0);
+        let relative_calm = (point.tension_ema - tension).max(0.0);
+        let sat_signal = (improvement + relative_calm).min(1.0);
+        let smoothed_s = emo_decay * point.satisfaction + (1.0 - emo_decay) * sat_signal;
+        let satisfaction = smoothed_s.max(sat_signal).clamp(0.0, 1.0);
+
+        let flatness = 1.0 / (1.0 + (tension - point.tension_ema).abs() / (point.tension_ema + 0.001));
         let stuck = (tension - growth_threshold).max(0.0) * flatness;
-        let frustration = (emo_decay * point.frustration + (1.0 - emo_decay) * stuck).clamp(0.0, 1.0);
-        let frustration = if frustration.is_nan() || frustration.is_infinite() { 0.0 } else { frustration };
+        let smoothed_f = emo_decay * point.frustration + (1.0 - emo_decay) * stuck;
+        let frustration = smoothed_f.max(stuck).clamp(0.0, 1.0);
+        let frustration = if frustration.is_finite() { frustration } else { 0.0 };
 
         Some(PointUpdate {
             id: idx,
@@ -728,7 +888,7 @@ pub fn equilibrium_propagation(
     inject_token_sequence(field, input_embeddings, ticks_per_token);
 
     // Settle vrij
-    settle_until_converged(field, settle_ticks, 0.001);
+    settle_until_converged(field, settle_ticks, field.settle_epsilon);
 
     // Sla vrije-fase toestanden op — ALLEEN actieve punten + buren (was: ALLE punten)
     // Bespaart ~80% geheugen (actief ~1000 + buren ~5000 vs totaal 8704+)
@@ -778,7 +938,7 @@ pub fn equilibrium_propagation(
     }
 
     // Settle geklemd
-    settle_until_converged(field, settle_ticks, 0.001);
+    settle_until_converged(field, settle_ticks, field.settle_epsilon);
 
     // === WEIGHT UPDATE ===
     let mut total_delta = 0.0f32;
@@ -820,7 +980,7 @@ pub fn equilibrium_propagation(
             let eta = field.points[idx].eta;
             field.points[idx].couplings[ci].weight += eta * dw;
             field.points[idx].couplings[ci].weight =
-                field.points[idx].couplings[ci].weight.clamp(-5.0, 5.0);
+                field.points[idx].couplings[ci].weight.clamp(-field.clamp_range / 2.0, field.clamp_range / 2.0);
 
             total_delta += dw.abs();
         }
@@ -917,7 +1077,7 @@ pub fn contrastive_ep_with_vocab(
     // Stap 3: geklemde fase met negatief voorbeeld → duw vandaan
     field.phase = FieldPhase::Processing;
     inject_token_sequence(field, input_embeddings, ticks_per_token);
-    settle_until_converged(field, settle_ticks / 2, 0.005); // korter settlen voor negatief
+    settle_until_converged(field, settle_ticks / 2, field.settle_epsilon * 5.0); // korter settlen voor negatief
 
     // Sparse free states — alleen actieve punten + buren
     let mut free_states: HashMap<usize, [f32; DIM]> = HashMap::with_capacity(field.active_set.len() * 2);
@@ -942,7 +1102,7 @@ pub fn contrastive_ep_with_vocab(
         }
     }
 
-    settle_until_converged(field, settle_ticks / 2, 0.005);
+    settle_until_converged(field, settle_ticks / 2, field.settle_epsilon * 5.0);
 
     // Negatieve weight update: DUW vandaan (−margin × correlatie)
     let margin = 0.3f32;
@@ -974,7 +1134,7 @@ pub fn contrastive_ep_with_vocab(
             // NEGATIEF: duw vandaan
             field.points[idx].couplings[ci].weight -= eta * dw;
             field.points[idx].couplings[ci].weight =
-                field.points[idx].couplings[ci].weight.clamp(-5.0, 5.0);
+                field.points[idx].couplings[ci].weight.clamp(-field.clamp_range / 2.0, field.clamp_range / 2.0);
         }
     }
 
@@ -1251,13 +1411,14 @@ pub fn measure_spectral_radius(field: &mut Field) {
     let ratio = final_diff / initial_diff;
     let sr = ratio.powf(0.1); // 10e wortel
 
-    // EMA update spectral radius
-    field.spectral_radius = 0.9 * field.spectral_radius + 0.1 * sr;
+    // EMA update spectral radius — rate = error_tracking_rate (dynamisch)
+    let tr = field.error_tracking_rate;
+    field.spectral_radius = (1.0 - tr) * field.spectral_radius + tr * sr;
 
-    // Auto-tune lambda naar chaos_target
+    // Auto-tune lambda naar chaos_target — snelheid schaalt met tracking rate
     let error = field.spectral_radius - field.chaos_target;
-    field.lambda *= 1.0 - 0.01 * error;
-    field.lambda = field.lambda.clamp(0.001, 1.0);
+    field.lambda *= 1.0 - tr * error;
+    field.lambda = field.lambda.clamp(field.error_tracking_rate, 1.0);
 
     // Herstel ALLE punten — geen veld-corruptie meer
     for (i, phi) in saved_phis.into_iter().enumerate() {
@@ -1319,6 +1480,10 @@ pub fn hierarchical_prediction(field: &mut Field) {
 pub fn update_neuromodulators(field: &mut Field) {
     let n = field.active_set.len() as f32;
     if n == 0.0 { return; }
+    // v2.1 debug: log elke 1000 ticks
+    if field.tick % 1000 == 0 {
+        tracing::info!(dopamine = field.dopamine, norepinephrine = field.norepinephrine, tick = field.tick, "neuromod_update called");
+    }
 
     #[inline]
     fn nan_safe(v: f32) -> f32 { if v.is_nan() || v.is_infinite() { 0.0 } else { v } }
@@ -1349,11 +1514,14 @@ pub fn update_neuromodulators(field: &mut Field) {
     let ach_decay = field.adaptive.emotion_decay[3];
 
     // Dopamine: beloning = spanning daalt (baseline uit adaptive params)
-    let reward = (field.dopamine * field.adaptive.dopamine_baseline - avg_tension).max(0.0);
+    // Minimale baseline = tracking rate (dynamisch, nooit nul)
+    let reward = (field.dopamine * field.adaptive.dopamine_baseline - avg_tension).max(field.error_tracking_rate);
     field.dopamine = nan_safe(da_decay * field.dopamine + (1.0 - da_decay) * reward);
 
     // Noradrenaline: onzekerheid = hoge spanning-variantie
-    field.norepinephrine = nan_safe(ne_decay * field.norepinephrine + (1.0 - ne_decay) * tension_var.sqrt());
+    // Baseline = noise_amplitude (dynamisch, schaalt met tension)
+    let ne_input = tension_var.sqrt() + field.noise_amplitude;
+    field.norepinephrine = nan_safe(ne_decay * field.norepinephrine + (1.0 - ne_decay) * ne_input);
 
     // Serotonine: langzaam lopende beloning (geduld) = slow EMA van dopamine
     field.serotonin = nan_safe(st_decay * field.serotonin + (1.0 - st_decay) * field.dopamine);
@@ -1400,22 +1568,39 @@ pub fn apply_neuromodulation(field: &mut Field) {
     for i in 0..field.active_set.len() {
         let id = field.active_set[i];
         let point = &mut field.points[id as usize];
-        // Basis eta × dopamine boost, maar nooit boven 0.1
-        point.eta = (point.eta * lr_multiplier).min(0.1);
+        // Basis eta × dopamine boost — ceiling schaalt met lambda
+        point.eta = (point.eta * lr_multiplier).min(field.lambda);
     }
 
-    // Noradrenaline hoog → exploratie-ruis
-    if field.norepinephrine > 0.1 {
+    // v2.1: Baseline ruis — het veld mag NOOIT volledig dood zijn
+    // Biologische neuronen hebben spontane activiteit; Lucy ook.
+    {
         use rand::Rng;
         let mut rng = rand::rng();
-        // v1.0: noise parameters uit AdaptiveParams
-        let noise_scale = field.adaptive.ne_noise_scale * field.norepinephrine.min(1.0);
-        let n_perturb = ((field.active_set.len() as f32 * field.adaptive.ne_perturb_frac) as usize).max(1);
-        for _ in 0..n_perturb {
+        // Spontane activiteit — noise_amplitude bepaalt sterkte (dynamisch)
+        // MINIMUM: altijd minstens 1% van punten met sterkte 1.0 — voorkomt dood veld
+        let baseline_noise = (field.noise_amplitude * 20.0).max(1.0);
+        let noise_frac = field.noise_amplitude.max(0.01); // minimaal 1% van punten
+        let baseline_count = (field.active_set.len() as f32 * noise_frac).max(50.0) as usize;
+        for _ in 0..baseline_count {
             let idx = rng.random_range(0..field.active_set.len());
             let id = field.active_set[idx] as usize;
             for d in 0..DIM {
-                field.points[id].phi[d] += noise_scale * rng.random_range(-1.0f32..1.0f32);
+                field.points[id].phi[d] += baseline_noise * rng.random_range(-1.0f32..1.0f32);
+            }
+        }
+
+        // Noradrenaline hoog → extra exploratie-ruis bovenop baseline
+        // Drempel = noise_amplitude (dynamisch)
+        if field.norepinephrine > field.noise_amplitude {
+            let noise_scale = field.adaptive.ne_noise_scale * field.norepinephrine.min(1.0);
+            let n_perturb = ((field.active_set.len() as f32 * field.adaptive.ne_perturb_frac) as usize).max(1);
+            for _ in 0..n_perturb {
+                let idx = rng.random_range(0..field.active_set.len());
+                let id = field.active_set[idx] as usize;
+                for d in 0..DIM {
+                    field.points[id].phi[d] += noise_scale * rng.random_range(-1.0f32..1.0f32);
+                }
             }
         }
     }
@@ -1473,14 +1658,17 @@ pub fn compute_integrated_information(field: &mut Field) {
 
         // Φ = joint - marginals (hoger = meer geïntegreerd = bewuster)
         let phi_local = (joint_entropy - marginal_sum).max(0.0);
-        field.points[id].phi_integrated = 0.95 * field.points[id].phi_integrated + 0.05 * phi_local;
+        // EMA rate = fe_tracking_rate (dynamisch)
+        let fe = field.fe_tracking_rate;
+        field.points[id].phi_integrated = (1.0 - fe) * field.points[id].phi_integrated + fe * phi_local;
 
         total_phi += phi_local;
         count += 1;
     }
 
     if count > 0 {
-        field.integrated_info_avg = 0.95 * field.integrated_info_avg + 0.05 * (total_phi / count as f32);
+        let fe = field.fe_tracking_rate;
+        field.integrated_info_avg = (1.0 - fe) * field.integrated_info_avg + fe * (total_phi / count as f32);
     }
 }
 
@@ -1503,11 +1691,12 @@ pub fn update_oscillations(field: &mut Field) {
     let updates: Vec<(usize, f32, f32)> = field.active_set.iter().map(|&id_u32| {
         let id = id_u32 as usize;
         let point = &field.points[id];
-        let amplitude = 0.01 * point.tension.min(1.0);
+        // Amplitude schaalt met punt's eigen tension relatief aan noise_amplitude
+        let amplitude = field.noise_amplitude * point.tension.min(1.0);
         let phase = point.oscillation_phase;
 
-        // Kuramoto-koppeling: dθ/dt = ω + (K/N) Σ sin(θ_j - θ_i)
-        let coupling_strength = 0.1;
+        // Kuramoto-koppeling — sterkte = kl_scale (dynamisch, meet complexiteit)
+        let coupling_strength = field.kl_scale;
         let phase_delta: f32 = point.couplings.iter()
             .filter_map(|c| {
                 let t = c.target as usize;
@@ -1541,8 +1730,9 @@ pub fn update_oscillations(field: &mut Field) {
     }
 
     let n = field.active_set.len().max(1) as f32;
-    field.oscillation_coherence = 0.95 * field.oscillation_coherence
-        + 0.05 * (sync_sum / n).abs();
+    let fe = field.fe_tracking_rate;
+    field.oscillation_coherence = (1.0 - fe) * field.oscillation_coherence
+        + fe * (sync_sum / n).abs();
 }
 
 /// Self-Organized Criticality — meet of Lucy bij het edge of chaos opereert.
@@ -1584,12 +1774,13 @@ pub fn compute_criticality(field: &mut Field) {
     let slope = (count * sum_ln_xp - sum_ln_x * sum_ln_p) / denom;
     let alpha = -slope;
 
-    field.power_law_exponent = 0.95 * field.power_law_exponent + 0.05 * alpha;
+    let fe = field.fe_tracking_rate;
+    field.power_law_exponent = (1.0 - fe) * field.power_law_exponent + fe * alpha;
     field.is_critical = (0.8..3.0).contains(&field.power_law_exponent);
 
-    // Beloon criticality met dopamine (optimale informatieverwerking)
+    // Beloon criticality met dopamine — sterkte schaalt met tracking rate
     if field.is_critical {
-        field.dopamine += 0.01;
+        field.dopamine += field.error_tracking_rate;
     }
 }
 
@@ -1597,7 +1788,8 @@ pub fn compute_criticality(field: &mut Field) {
 /// "Neurons that fire together, UNWIRE" — complement van Hebbian learning.
 /// Forceert diverse, niet-redundante representaties.
 pub fn anti_hebbian_decorrelation(field: &mut Field) {
-    let decorr_strength = 0.001; // Zwak — net genoeg om diversiteit te forceren
+    // Decorrelatie sterkte schaalt met kl_scale — complexer veld → meer decorrelatie nodig
+    let decorr_strength = field.kl_scale * 0.01;
 
     for i in 0..field.active_set.len() {
         let id = field.active_set[i] as usize;
@@ -1625,7 +1817,7 @@ pub fn anti_hebbian_decorrelation(field: &mut Field) {
             if corr.abs() > 0.5 {
                 let coupling = &mut field.points[id].couplings[*ci];
                 coupling.weight -= decorr_strength * corr;
-                coupling.weight = coupling.weight.clamp(-5.0, 5.0);
+                coupling.weight = coupling.weight.clamp(-field.clamp_range / 2.0, field.clamp_range / 2.0);
             }
         }
     }
@@ -1648,7 +1840,7 @@ pub fn micro_ep(
     inject_token_sequence_light(field, input_embs, 1);
 
     // Settle light (5 ticks, ~500 punten)
-    settle_light(field, 5, 0.05);
+    settle_light(field, 5, field.settle_epsilon * 50.0);
 
     // Bewaar vrije-fase states (alleen IO + buren)
     let mut subset: Vec<u32> = Vec::with_capacity(1024);
@@ -1681,7 +1873,7 @@ pub fn micro_ep(
     }
 
     // Settle light (5 ticks)
-    settle_light(field, 5, 0.05);
+    settle_light(field, 5, field.settle_epsilon * 50.0);
 
     // === WEIGHT UPDATE (alleen IO subset) ===
     let mut total_delta = 0.0f32;
@@ -1719,7 +1911,7 @@ pub fn micro_ep(
             let eta = field.points[idx].eta;
             field.points[idx].couplings[ci].weight += eta * dw;
             field.points[idx].couplings[ci].weight =
-                field.points[idx].couplings[ci].weight.clamp(-5.0, 5.0);
+                field.points[idx].couplings[ci].weight.clamp(-field.clamp_range / 2.0, field.clamp_range / 2.0);
 
             total_delta += dw.abs();
         }
@@ -1765,7 +1957,9 @@ pub fn consolidate_weights(field: &mut Field) {
             let fisher = grad * grad; // Fisher Information ≈ gradient²
 
             let coupling = &mut field.points[*idx].couplings[*ci];
-            coupling.importance = 0.9 * coupling.importance + 0.1 * fisher;
+            // Importance tracking met dynamische rate
+            let tr = field.error_tracking_rate;
+            coupling.importance = (1.0 - tr) * coupling.importance + tr * fisher;
             coupling.consolidated = coupling.weight;
         }
     }
@@ -1843,7 +2037,8 @@ pub fn global_workspace_broadcast(field: &mut Field) {
     let broadcaster_ids: SmallVec<[usize; 4]> = broadcasters.iter().map(|(i, _)| *i).collect();
 
     // Broadcast naar depth 2 punten — gebruik coupling weights als ze bestaan
-    let broadcast_strength = 0.05;
+    // Broadcast sterkte = noise_amplitude (dynamisch, schaalt met tension)
+    let broadcast_strength = field.noise_amplitude;
     for i in 0..field.points.len() {
         if field.points[i].depth != 2 || !field.points[i].is_active() { continue; }
 

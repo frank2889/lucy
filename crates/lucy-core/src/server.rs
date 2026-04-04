@@ -67,7 +67,7 @@
 
 use axum::{
     extract::State,
-    http::{Request, StatusCode},
+    http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, Json, Response},
     routing::{get, post},
@@ -80,6 +80,26 @@ use lucy_state::GoalStrategy;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Cache-Control headers voor dashboard static assets.
+/// Gehashte assets (in /brain/assets/) krijgen immutable caching,
+/// index.html krijgt no-cache zodat de browser altijd de laatste versie laadt.
+async fn cache_headers(req: Request<axum::body::Body>, next: Next) -> Response {
+    let path = req.uri().path().to_owned();
+    let mut resp = next.run(req).await;
+    if path.starts_with("/assets/") || path.starts_with("/brain/assets/") {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    } else if path == "/" || path.starts_with("/brain") {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+    }
+    resp
+}
 
 /// Bearer token authenticatie voor gevaarlijke endpoints.
 /// Token wordt gelezen uit LUCY_API_TOKEN environment variable.
@@ -142,7 +162,7 @@ pub fn spawn_server(state: SharedState) {
 
         // Publieke endpoints — open voor iedereen
         let app = Router::new()
-            .route("/", get(root))
+            .route("/api", get(root))
             .route("/status", get(status))
             .route("/weights", get(weights_handler))
             .route("/sync", post(sync_handler))
@@ -156,10 +176,15 @@ pub fn spawn_server(state: SharedState) {
             .route("/topology", get(topology_handler))
             .route("/telemetry", get(telemetry_handler))
             .route("/plugins", get(plugins_list_handler))
-            .nest_service("/brain", ServeDir::new("dashboard").fallback(ServeFile::new("dashboard/index.html")))
+            // /brain → redirect naar / (breekt oude 301 cache in browsers)
+            .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
+            .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
+            // Dashboard op / via fallback (alles dat geen API route matcht)
+            .fallback_service(ServeDir::new("dashboard").fallback(ServeFile::new("dashboard/index.html")))
             .merge(protected)
             .with_state(state)
             .layer(CorsLayer::permissive())
+            .layer(middleware::from_fn(cache_headers))
             .layer(axum::extract::DefaultBodyLimit::max(10_000_000)); // 10MB max request body
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -331,7 +356,7 @@ async fn ask_handler(
     let cancel_token = cancel.clone();
 
     let query_result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(30), // v2.1: Meer tijd voor query processing
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 query::process_query(&mut field_copy, &vocab_arc, &q, &facts, &cancel_token)

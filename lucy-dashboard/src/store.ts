@@ -1,26 +1,22 @@
 // Lucy Dashboard — Global state store
 import { create } from 'zustand';
-import type { Telemetry, Topology, JournalData, AskResponse } from './types';
+import type { Telemetry, Topology, JournalData, AskResponse, LucyStatus, LucyActivity } from './types';
 import { api } from './api';
 
 interface LucyStore {
-  // Data
   telemetry: Telemetry | null;
   topology: Topology | null;
   journal: JournalData | null;
+  status: LucyStatus | null;
+  activity: LucyActivity | null;
   chatHistory: { role: 'user' | 'lucy'; text: string; tick?: number }[];
-
-  // Telemetry history (last 120 samples for sparklines)
   telemetryHistory: Telemetry[];
 
-  // UI state
-  selectedNode: number | null;
-  setSelectedNode: (id: number | null) => void;
-
-  // Actions
   fetchTelemetry: () => Promise<void>;
   fetchTopology: () => Promise<void>;
   fetchJournal: () => Promise<void>;
+  fetchStatus: () => Promise<void>;
+  fetchActivity: () => Promise<void>;
   askLucy: (question: string) => Promise<AskResponse>;
 }
 
@@ -28,11 +24,10 @@ export const useStore = create<LucyStore>((set, get) => ({
   telemetry: null,
   topology: null,
   journal: null,
+  status: null,
+  activity: null,
   chatHistory: [],
   telemetryHistory: [],
-  selectedNode: null,
-
-  setSelectedNode: (id) => set({ selectedNode: id }),
 
   fetchTelemetry: async () => {
     try {
@@ -61,6 +56,24 @@ export const useStore = create<LucyStore>((set, get) => ({
       set({ journal: j });
     } catch (e) {
       console.warn('journal fetch failed:', e);
+    }
+  },
+
+  fetchStatus: async () => {
+    try {
+      const s = await api.status();
+      set({ status: s });
+    } catch (e) {
+      console.warn('status fetch failed:', e);
+    }
+  },
+
+  fetchActivity: async () => {
+    try {
+      const a = await api.activity();
+      set({ activity: a });
+    } catch (e) {
+      console.warn('activity fetch failed:', e);
     }
   },
 

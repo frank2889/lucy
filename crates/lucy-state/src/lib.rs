@@ -336,6 +336,65 @@ pub struct Field {
     pub growth_threshold: f32,
     /// EMA decay voor vastloop-detectie
     pub ema_decay: f32,
+    // === Dynamische parameters — worden door adapt_dynamics() bijgewerkt ===
+    // Lucy past deze zelf aan op basis van haar veldstatistieken.
+    // Elke parameter heeft een default die geladen wordt uit oude snapshots.
+
+    /// Emotie-decay — hoe snel emoties reageren (lager = sneller)
+    /// adapt_dynamics: hoge activiteit → lagere decay → snellere emotie-response
+    #[serde(default = "default_emo_decay")]
+    pub emo_decay: f32,
+    /// Hoe snel error_var bijwerkt — hoge tension-variance → sneller tracken
+    #[serde(default = "default_error_tracking_rate")]
+    pub error_tracking_rate: f32,
+    /// Hoe snel free_energy EMA bijwerkt — schaalbaar met instabiliteit
+    #[serde(default = "default_fe_tracking_rate")]
+    pub fe_tracking_rate: f32,
+    /// KL-divergentie complexiteitspenalty — sterker bij complexer veld
+    #[serde(default = "default_kl_scale")]
+    pub kl_scale: f32,
+    /// Dynamische clamp range voor phi/weights — groeit mee met activatie-amplitudes
+    #[serde(default = "default_clamp_range")]
+    pub clamp_range: f32,
+    /// Convergentie-drempel voor settling — schaalt met gemiddelde tension
+    #[serde(default = "default_settle_epsilon")]
+    pub settle_epsilon: f32,
+    /// Exploratie-ruis amplitude — meer tension → meer exploratie
+    #[serde(default = "default_noise_amplitude")]
+    pub noise_amplitude: f32,
+    /// Hoe vaak Lucy nadenkt (ticks) — sneller bij hoge curiosity
+    #[serde(default = "default_think_interval")]
+    pub think_interval: u64,
+    /// Hoe vaak Lucy reflecteert (ticks) — sneller bij hoge frustration
+    #[serde(default = "default_reflect_interval")]
+    pub reflect_interval: u64,
+    /// Max actieve doelen — meer bij hogere activiteit
+    #[serde(default = "default_max_goals")]
+    pub max_goals: usize,
+    /// Hebbian learning interval — sneller bij hoge tension
+    #[serde(default = "default_learn_interval")]
+    pub learn_interval: u64,
+    /// Exploratie interval — sneller bij volle frontier
+    #[serde(default = "default_explore_interval")]
+    pub explore_interval: u64,
+    /// Consolidatie interval — sneller bij volle replay buffer
+    #[serde(default = "default_consolidation_interval")]
+    pub consolidation_interval: u64,
+    /// Snapshot interval — sneller bij snelle verandering
+    #[serde(default = "default_snapshot_interval")]
+    pub snapshot_interval: u64,
+    /// Groei interval — sneller bij hoge tension
+    #[serde(default = "default_growth_interval")]
+    pub growth_interval: u64,
+    /// Sampling temperature — lagere coherence → lager (veiliger)
+    #[serde(default = "default_sampling_temperature")]
+    pub sampling_temperature: f32,
+    /// Nucleus sampling drempel — beweegt mee met confidence
+    #[serde(default = "default_sampling_top_p")]
+    pub sampling_top_p: f32,
+    /// Herhalingspenalty — meer herhaling → hogere penalty
+    #[serde(default = "default_repetition_penalty")]
+    pub repetition_penalty: f32,
 
     // === Zelfdenkend: Autonome Doelen ===
 
@@ -588,6 +647,27 @@ fn default_chaos_target() -> f32 { 1.0 }
 fn default_precision() -> f32 { 1.0 }
 fn default_teacher_interval() -> u64 { 10_000 }
 
+// === Defaults voor dynamische parameters ===
+// Deze waarden zijn startpunten — adapt_dynamics() past ze aan op basis van veldstaat.
+fn default_emo_decay() -> f32 { 0.95 }
+fn default_error_tracking_rate() -> f32 { 0.01 }
+fn default_fe_tracking_rate() -> f32 { 0.05 }
+fn default_kl_scale() -> f32 { 0.1 }
+fn default_clamp_range() -> f32 { 10.0 }
+fn default_settle_epsilon() -> f32 { 0.001 }
+fn default_noise_amplitude() -> f32 { 0.05 }
+fn default_think_interval() -> u64 { 500 }
+fn default_reflect_interval() -> u64 { 10_000 }
+fn default_max_goals() -> usize { 10 }
+fn default_learn_interval() -> u64 { 100 }
+fn default_explore_interval() -> u64 { 100 }
+fn default_consolidation_interval() -> u64 { 1_000 }
+fn default_snapshot_interval() -> u64 { 10_000 }
+fn default_growth_interval() -> u64 { 10_000 }
+fn default_sampling_temperature() -> f32 { 0.7 }
+fn default_sampling_top_p() -> f32 { 0.9 }
+fn default_repetition_penalty() -> f32 { 1.3 }
+
 // === Bitflag constanten ===
 pub const FLAG_ACTIVE: u8 = 1 << 0;
 pub const FLAG_INHIBITORY: u8 = 1 << 1;
@@ -695,6 +775,25 @@ impl Field {
             mu: 0.9,
             growth_threshold: 0.5,
             ema_decay: 0.99,
+            // Dynamische parameters — startwaarden, adapt_dynamics() past aan
+            emo_decay: default_emo_decay(),
+            error_tracking_rate: default_error_tracking_rate(),
+            fe_tracking_rate: default_fe_tracking_rate(),
+            kl_scale: default_kl_scale(),
+            clamp_range: default_clamp_range(),
+            settle_epsilon: default_settle_epsilon(),
+            noise_amplitude: default_noise_amplitude(),
+            think_interval: default_think_interval(),
+            reflect_interval: default_reflect_interval(),
+            max_goals: default_max_goals(),
+            learn_interval: default_learn_interval(),
+            explore_interval: default_explore_interval(),
+            consolidation_interval: default_consolidation_interval(),
+            snapshot_interval: default_snapshot_interval(),
+            growth_interval: default_growth_interval(),
+            sampling_temperature: default_sampling_temperature(),
+            sampling_top_p: default_sampling_top_p(),
+            repetition_penalty: default_repetition_penalty(),
             goals: Vec::new(),
             last_think_tick: 0,
             last_reflect_tick: 0,

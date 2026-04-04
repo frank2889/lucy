@@ -73,6 +73,26 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    // Dynamic: frontier max scales with pages_read (was: hardcoded 1000)
+    // More experience → larger exploration horizon
+    pub fn frontier_max(&self) -> usize {
+        let base = 1000usize;
+        let scale = (self.pages_read as usize / 100).min(9000);
+        base + scale // range: 1000..10_000
+    }
+
+    // Dynamic: visited max = 5x frontier_max (was: hardcoded 5000)
+    pub fn visited_max(&self) -> usize {
+        self.frontier_max() * 5
+    }
+
+    // Dynamic: visited cleanup amount = frontier_max (was: hardcoded 1000)
+    pub fn visited_cleanup(&self) -> usize {
+        self.frontier_max()
+    }
+}
+
+impl Explorer {
     pub fn new() -> Self {
         Self {
             frontier: VecDeque::new(), // LEEG — Lucy begint met niets
@@ -199,10 +219,11 @@ impl Explorer {
                 || clean.contains("graphql")
                 || clean.contains("endpoint");
 
+            // Dynamic: frontier cap scales with pages_read (was: hardcoded 1000)
             if (clean.starts_with("http://") || clean.starts_with("https://"))
                 && is_api
                 && !self.visited.contains(&clean.to_string())
-                && self.frontier.len() < 1000
+                && self.frontier.len() < self.frontier_max()
             {
                 self.frontier.push_back(clean.to_string());
                 // Persisteer — Lucy onthoudt APIs die ze vindt
@@ -259,9 +280,10 @@ impl Explorer {
     pub fn discover_urls(&mut self, text: &str) {
         for word in text.split_whitespace() {
             let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != ':' && c != '.' && c != '-' && c != '_');
+            // Dynamic: frontier cap scales with pages_read (was: hardcoded 1000)
             if (clean.starts_with("http://") || clean.starts_with("https://"))
                 && !self.visited.contains(&clean.to_string())
-                && self.frontier.len() < 1000
+                && self.frontier.len() < self.frontier_max()
             {
                 self.frontier.push_back(clean.to_string());
             }
@@ -574,9 +596,11 @@ pub async fn learn_from_exploration(
     };
 
     explorer.visited.insert(url.clone());
-    if explorer.visited.len() > 5000 {
-        // HashSet: verwijder ~1000 willekeurige entries
-        let to_remove: Vec<String> = explorer.visited.iter().take(1000).cloned().collect();
+    // Dynamic: visited cap = 5x frontier_max, cleanup = frontier_max (was: hardcoded 5000/1000)
+    let visited_max = explorer.visited_max();
+    let visited_cleanup = explorer.visited_cleanup();
+    if explorer.visited.len() > visited_max {
+        let to_remove: Vec<String> = explorer.visited.iter().take(visited_cleanup).cloned().collect();
         for key in to_remove { explorer.visited.remove(&key); }
     }
 
