@@ -47,6 +47,12 @@ export interface Consciousness {
   coherence: number;
   free_energy: number;
   is_critical: boolean;
+  // v2.4: upgraded bewustzijns-metrieken
+  theta_gamma_coupling: number;
+  branching_ratio: number;
+  ignition_active: boolean;
+  ignition_strength: number;
+  expected_free_energy: number;
 }
 
 export interface Goal {

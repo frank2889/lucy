@@ -302,6 +302,12 @@ async fn status(State(state): State<SharedState>) -> Json<Value> {
             "power_law_exponent": format!("{:.4}", f.power_law_exponent),
             "is_critical": f.is_critical,
             "avg_free_energy": format!("{:.4}", f.avg_free_energy),
+            // v2.4: Upgraded metrieken
+            "theta_gamma_coupling": format!("{:.4}", f.theta_gamma_coupling),
+            "branching_ratio": format!("{:.4}", f.branching_ratio_avg),
+            "ignition_active": f.ignition_active,
+            "ignition_strength": format!("{:.4}", f.ignition_strength),
+            "avg_expected_free_energy": format!("{:.4}", f.avg_expected_free_energy),
         },
     }))
 }
@@ -1067,6 +1073,12 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
             "coherence": f.oscillation_coherence,
             "free_energy": f.avg_free_energy,
             "is_critical": f.is_critical,
+            // v2.4
+            "theta_gamma_coupling": f.theta_gamma_coupling,
+            "branching_ratio": f.branching_ratio_avg,
+            "ignition_active": f.ignition_active,
+            "ignition_strength": f.ignition_strength,
+            "expected_free_energy": f.avg_expected_free_energy,
         },
         "goals": f.goals.iter().take(5).map(|g| {
             json!({

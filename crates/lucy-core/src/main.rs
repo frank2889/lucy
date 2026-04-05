@@ -155,6 +155,12 @@ async fn main() {
         field::bootstrap_field()
     };
 
+    // v2.5: Onmiddellijk healen na laden/bootstrap — voorkomt inf bij tick 0
+    let healed = field.heal();
+    if healed > 0 {
+        tracing::info!(healed, "Post-bootstrap healing complete");
+    }
+
     // === Laad vocabulaire ===
     let vocab_path = Path::new(VOCAB_PATH);
     let mut vocab = if vocab_path.exists() {
@@ -522,32 +528,31 @@ async fn main() {
             tracing::info!(tick, phase = ?field.phase, "tick_alive");
         }
 
-        // v2.3: Reanimatie — detecteer dood veld en schud het wakker
-        // Checkt elke 50 ticks of het veld dood is (tension ≈ 0) en injecteert sterke ruis
-        if tick % 50 == 0 {
+        // v2.5: Reanimatie — ALLEEN bij echt dood veld (niet bij sluggish)
+        // Was: elke 50 ticks, drempel = settle_epsilon (0.02 bij sluggish → triggerde ALTIJD)
+        // Nu: elke 200 ticks, vaste drempel 0.005 (alleen echt-nul velden)
+        // PLUS: error_var NIET resetten (dat vernietigde precision tracking)
+        if tick % 200 == 0 {
             let avg_t: f32 = field.active_set.iter()
                 .map(|&id| field.points[id as usize].tension).sum::<f32>()
                 / field.active_set.len().max(1) as f32;
-            // Drempel: tension onder settle_epsilon = effectief dood
-            if avg_t < field.settle_epsilon {
+            // Vaste drempel: 0.005 = alleen als tension ECHT bijna nul is
+            // (basal tension ≈ 0.015, dus dit triggert alleen bij echt dood veld)
+            if avg_t < 0.005 {
                 use rand::Rng;
                 let mut rng = rand::rng();
-                // Re-initialiseer phi naar random [-0.1, 0.1] (zelfde als bootstrap_field)
-                // maar LAAT prediction op 0 → maximale prediction error
                 for &id in &field.active_set {
                     let p = &mut field.points[id as usize];
                     for d in 0..lucy_state::DIM {
-                        p.phi[d] = rng.random_range(-0.1f32..0.1f32);
-                        p.prediction[d] = 0.0; // prediction = 0 → error = phi
+                        p.phi[d] = rng.random_range(-0.3f32..0.3f32); // sterker: was ±0.1
+                        p.prediction[d] = 0.0;
                     }
-                    // Reset ook de tension tracking zodat het niet gedempd wordt
                     p.tension_ema = 0.0;
-                    p.error_var = 0.0;
+                    // v2.5: error_var NIET resetten — precision tracking bewaren
                 }
-                // Forceer lambda en alpha zodat het veld niet meteen teruggetrokken wordt
-                field.alpha = field.alpha.min(0.0001); // minimale sparse penalty tijdens reanimatie
+                field.alpha = field.alpha.min(0.0001);
                 tracing::warn!(tick, avg_tension = %format!("{:.6}", avg_t),
-                    "REANIMATIE: dood veld — phi gereset, prediction op nul, sparse penalty verlaagd");
+                    "REANIMATIE: echt dood veld — phi gereset");
             }
         }
 
@@ -673,8 +678,9 @@ async fn main() {
 
                 // Elke 500 ticks: zwaardere bewustzijns-metrieken (was 50 — te frequent)
                 if tick % 500 == 0 {
-                    compute::compute_integrated_information(&mut field);
-                    compute::compute_criticality(&mut field);
+                    compute::compute_integrated_information(&mut field);  // IIT 4.0 causale φ
+                    compute::compute_criticality(&mut field);             // Branching ratio σ
+                    compute::compute_expected_free_energy(&mut field);    // Active Inference EFE
                     compute::anti_hebbian_decorrelation(&mut field);
                 }
 
@@ -725,9 +731,14 @@ async fn main() {
                 compute::maybe_perturb(&mut field);
             }
 
-            // v0.7: Edge of chaos monitoring (elke 1000 ticks)
-            if tick % 1000 == 0 {
-                compute::measure_spectral_radius(&mut field);
+            // v2.4: Edge of chaos monitoring — vaker bij laag spectral radius
+            // Was: elke 1000 ticks (= ~2.5 min bij 8704 punten). Recovery te traag.
+            // Nu: elke 100 ticks als SR < 0.5, anders elke 500 ticks.
+            {
+                let sr_interval = if field.spectral_radius < 0.5 { 100 } else { 500 };
+                if tick % sr_interval == 0 {
+                    compute::measure_spectral_radius(&mut field);
+                }
             }
 
             // 4. Groei + zelf-aanpassing

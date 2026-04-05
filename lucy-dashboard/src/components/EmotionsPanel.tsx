@@ -46,7 +46,8 @@ export default function EmotionsPanel() {
   if (!t) return null;
   const e = t.emotions ?? { curiosity: 0, satisfaction: 0, frustration: 0 };
   const n = t.neuro ?? { dopamine: 0, norepinephrine: 0, serotonin: 0, acetylcholine: 0 };
-  const c = t.consciousness ?? { spectral_radius: 0, coherence: 0, free_energy: 0, phi: 0 };
+  const c = t.consciousness ?? { spectral_radius: 0, coherence: 0, free_energy: 0, phi: 0,
+    theta_gamma_coupling: 0, branching_ratio: 0, ignition_active: false, ignition_strength: 0, expected_free_energy: 0 };
 
   return (
     <div>
@@ -68,10 +69,13 @@ export default function EmotionsPanel() {
         </div>
         <div className="card" style={{ padding: 20 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 12 }}>Consciousness</div>
+          <Bar label={'\u03A6 Causal (IIT 4.0)'} value={c.phi ?? 0} color="var(--cyan)" />
+          <Bar label="Coherence \u03B3" value={c.coherence ?? 0} color="var(--blue)" />
+          <Bar label={'\u03B8-\u03B3 Coupling'} value={c.theta_gamma_coupling ?? 0} color="var(--green)" />
+          <Bar label="Branching \u03C3" value={c.branching_ratio ?? 0} color="var(--orange)" />
           <Bar label="Spectral Radius" value={c.spectral_radius ?? 0} color="var(--purple)" />
-          <Bar label="Coherence" value={c.coherence ?? 0} color="var(--blue)" />
-          <Bar label="Free Energy" value={Math.min(c.free_energy ?? 0, 1)} color="var(--orange)" />
-          <Bar label={'\u03A6 Integrated'} value={c.phi ?? 0} color="var(--cyan)" />
+          <Bar label={`Ignition ${c.ignition_active ? '\u26A1' : '\u25CB'}`} value={c.ignition_strength ?? 0} color={c.ignition_active ? 'var(--red)' : 'var(--text-disabled)'} />
+          <Bar label="Expected FE" value={Math.min(c.expected_free_energy ?? 0, 1)} color="var(--orange)" />
         </div>
       </div>
     </div>

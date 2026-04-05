@@ -146,6 +146,75 @@ pub struct FieldPoint {
     /// KL divergentie — complexiteit van het interne model
     #[serde(default)]
     pub kl_divergence: f32,
+
+    // === v2.4: State-of-the-art formule-upgrades ===
+
+    /// Theta-band oscillatiefase (4-8 Hz) — werkgeheugen, hippocampale binding
+    /// Theta-gamma coupling: gamma-bursts genest in theta-cycli (Lisman & Jensen 2013)
+    #[serde(default)]
+    pub oscillation_phase_theta: f32,
+
+    /// Bayesiaanse controle-belief P(control | history) — Huys & Dayan 2009
+    /// 1.0 = "ik heb controle", 0.0 = geleerde hulpeloosheid
+    #[serde(default = "default_control_belief")]
+    pub control_belief: f32,
+
+    /// Distributional RL beloningskwantielen (Dabney et al. 2020)
+    /// 5 neuronen coderen percentiel 10/30/50/70/90 van beloningsdistributie
+    /// Optimistisch (hoge kwantielen) vs pessimistisch (lage) — asymmetrische leerrates
+    #[serde(default)]
+    pub reward_quantiles: [f32; 5],
+
+    /// Causale φ (IIT 4.0, Albantakis et al. 2023) — causale kracht over eigen toestand
+    /// Meet: hoeveel informatie gaat VERLOREN als je dit punt's verbindingen knipt?
+    /// Verschil met oude φ: temporeel-causaal i.p.v. statisch-correlationeel
+    #[serde(default)]
+    pub causal_power: f32,
+
+    /// Expected Free Energy G (Active Inference 2022+, Parr & Friston)
+    /// G = epistemische waarde (info gain) + pragmatische waarde (expected reward)
+    /// Stuurt actiekeuze: acties die ZOWEL leren ALS beloning maximaliseren winnen
+    #[serde(default)]
+    pub expected_free_energy: f32,
+
+    /// Lokale branching ratio σ (Beggs & Plenz 2003)
+    /// σ = hoeveel buren dit punt gemiddeld activeert
+    /// σ=1 = kritiek (optimaal), <1 = subcritical, >1 = supercritical
+    #[serde(default)]
+    pub branching_ratio: f32,
+
+    // === v2.5: UNIFIED SAMENVELD — Bayesian Mechanics (Dalton & Friston 2024) ===
+    //
+    // Kernidee: elk punt IS een Markov Blanket met:
+    //   μ = interne staten (phi) — wat het punt "denkt"
+    //   b = blanket staten (couplings) — de grens met de wereld
+    //   η = externe staten (buur-phi's) — de wereld eromheen
+    //
+    // F = D_KL(q(μ|b) || p(μ|b)) + E_q[-ln p(η|b)]
+    //   = complexiteit + verrassing = de ENE formule waaruit alles volgt
+    //
+    // dF/dt = snelheid van verandering → satisfaction (negatief = verbetering)
+    // d²F/dt² = versnelling → frustration (positief bij hoge F = verergering)
+    // ∇_b F = gradient over blanket → learning signal (EP weight update)
+    // F_geheel - Σ F_delen = Φ (bewustzijn = onherleidbare vrije energie)
+
+    /// dF/dt — temporele afgeleide van vrije energie
+    /// Negatief = spanning daalt = verbetering = satisfaction
+    /// Positief = spanning stijgt = verslechtering
+    #[serde(default)]
+    pub free_energy_rate: f32,
+
+    /// Blanket surprise: -ln p(η|b) — verrassing over buren
+    /// Hoe onverwacht zijn de externe staten gegeven mijn grens?
+    /// Hoog = mijn model van de wereld klopt niet = leer!
+    #[serde(default)]
+    pub blanket_surprise: f32,
+
+    /// Onherleidbare vrije energie: F_lokaal - Σ F_buren_apart
+    /// Dit IS bewustzijn: hoeveel vrije energie gaat verloren als je het systeem opknipt?
+    /// Unificatie van IIT + Free Energy: Φ = irreducible F
+    #[serde(default)]
+    pub irreducible_free_energy: f32,
 }
 
 /// Eén koppeling tussen twee veldpunten
@@ -470,6 +539,35 @@ pub struct Field {
     #[serde(default)]
     pub avg_free_energy: f32,
 
+    // === v2.4: Upgraded bewustzijns-metrieken ===
+
+    /// Globale theta-fase (4-8 Hz) — werkgeheugen, hippocampale binding
+    #[serde(default)]
+    pub theta_phase: f32,
+
+    /// Theta-gamma coupling sterkte (Lisman & Jensen 2013)
+    /// Hoog = gamma-bursts genest in theta-cycli = werkgeheugen actief
+    #[serde(default)]
+    pub theta_gamma_coupling: f32,
+
+    /// Gemiddelde branching ratio σ (Beggs & Plenz 2003) — betrouwbaarder dan power law
+    /// σ=1 = critical (optimaal), <1 = dying, >1 = seizure
+    #[serde(default)]
+    pub branching_ratio_avg: f32,
+
+    /// Global Workspace ignition (Dehaene et al. 2003)
+    /// true = bewuste inhoud actief gebroadcast, met competitie
+    #[serde(default)]
+    pub ignition_active: bool,
+
+    /// Sterkte van huidige ignition — hoe dominant is het winnende signaal?
+    #[serde(default)]
+    pub ignition_strength: f32,
+
+    /// Gemiddelde Expected Free Energy G — stuurt exploratie vs exploitatie
+    #[serde(default)]
+    pub avg_expected_free_energy: f32,
+
     // === v1.0: Adaptieve Parameters — Lucy tunet haar eigen constanten ===
 
     /// Parameters die Lucy zelf leert i.p.v. hardcoded magic numbers
@@ -648,6 +746,7 @@ impl TrainingQueue {
 fn default_phase() -> FieldPhase { FieldPhase::Idle }
 fn default_chaos_target() -> f32 { 1.0 }
 fn default_precision() -> f32 { 1.0 }
+fn default_control_belief() -> f32 { 0.5 } // start neutraal: 50% vertrouwen in eigen controle
 fn default_teacher_interval() -> u64 { 10_000 }
 
 // === Defaults voor dynamische parameters ===
@@ -706,6 +805,17 @@ impl FieldPoint {
             oscillation_phase: 0.0, // wordt random geïnitialiseerd in field bootstrap
             free_energy: 0.0,
             kl_divergence: 0.0,
+            // v2.4: nieuwe bewustzijnsmetrieken
+            oscillation_phase_theta: 0.0,
+            control_belief: 0.5,  // neutraal startpunt
+            reward_quantiles: [0.0; 5], // percentiel 10/30/50/70/90
+            causal_power: 0.0,
+            expected_free_energy: 0.0,
+            branching_ratio: 0.0,
+            // v2.5: unified samenveld
+            free_energy_rate: 0.0,
+            blanket_surprise: 0.0,
+            irreducible_free_energy: 0.0,
         }
     }
 
@@ -766,6 +876,13 @@ impl Field {
             power_law_exponent: 0.0,
             is_critical: false,
             avg_free_energy: 0.0,
+            // v2.4: upgraded bewustzijns-metrieken
+            theta_phase: 0.0,
+            theta_gamma_coupling: 0.0,
+            branching_ratio_avg: 0.0,
+            ignition_active: false,
+            ignition_strength: 0.0,
+            avg_expected_free_energy: 0.0,
             current_intention: None,
             intention_strength: 0.0,
             rnd_frozen: None,
