@@ -137,21 +137,15 @@ async fn main() {
     let fs = FileSystem::new(root.clone());
 
     // === Laad of bootstrap veld ===
+    // v2.5: ONSTERFELIJKE LOAD — primary → backups 1-5 → fresh bootstrap
+    // Lucy's geleerde data gaat NOOIT verloren.
     let snapshot_path = Path::new(SNAPSHOT_PATH);
-    let mut field = if snapshot_path.exists() {
-        match Field::load(snapshot_path) {
-            Ok(mut f) => {
-                f.cache_io_ids();
-                tracing::info!(tick = f.tick, points = f.points.len(), "Resumed from snapshot");
-                f
-            }
-            Err(e) => {
-                tracing::warn!(%e, "Failed to load snapshot, bootstrapping fresh");
-                field::bootstrap_field()
-            }
-        }
+    let mut field = if let Some(mut f) = Field::load_with_fallback(snapshot_path) {
+        f.cache_io_ids();
+        tracing::info!(tick = f.tick, points = f.points.len(), "Snapshot geladen (met fallback)");
+        f
     } else {
-        tracing::info!("No snapshot found, bootstrapping field");
+        tracing::error!("ALLE snapshots gefaald — bootstrapping fresh. GELEERDE DATA VERLOREN!");
         field::bootstrap_field()
     };
 
@@ -668,11 +662,16 @@ async fn main() {
                 // Oscillaties: gamma-ritme voor temporele binding (Kuramoto model)
                 compute::update_oscillations(&mut field);
 
-                // v2.0: Micro-EP training — 1 chunk per tick uit de queue
-                if let Some(chunk) = training_queue.pop() {
-                    let delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
-                    if delta > 0.001 && tick % 1000 == 0 {
-                        tracing::info!(delta = format!("{:.4}", delta), queue = training_queue.len(), "Micro-EP training");
+                // v2.5: Micro-EP training — batch bij volle queue, 1 bij rustig
+                {
+                    let batch = if training_queue.len() > 500 { 5 } else { 1 };
+                    for _ in 0..batch {
+                        if let Some(chunk) = training_queue.pop() {
+                            let delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
+                            if delta > 0.001 && tick % 1000 == 0 {
+                                tracing::info!(delta = format!("{:.4}", delta), queue = training_queue.len(), "Micro-EP batch");
+                            }
+                        } else { break; }
                     }
                 }
 

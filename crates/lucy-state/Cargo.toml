@@ -9,3 +9,4 @@ bincode = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true }
 serde-big-array = { workspace = true }
+crc32fast = { workspace = true }

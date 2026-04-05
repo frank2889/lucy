@@ -48,12 +48,13 @@ use crate::encoding::{self, Vocabulary};
 use crate::decoding;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// v1.2: Ultra-licht — 8704 punten vereist minimale settle
-const TICKS_PER_TOKEN: usize = 1;       // v2.1: Snellere token injection
-const SETTLE_PER_ROUND: usize = 5;      // v2.1: Halveer settle — snellere response
-const MAX_THINK_ROUNDS: usize = 1;
-const COHERENCE_THRESHOLD: f32 = 0.30;
-const MAX_OUTPUT_TOKENS: usize = 30;    // v2.1: Meer tokens voor langere antwoorden
+/// v2.5: Settle ticks verhoogd — signaal moet door hele veld propageren
+/// Input(0-255) → Hidden(256-8447) → Output(8448-8703) = 4+ hops minimum
+const TICKS_PER_TOKEN: usize = 3;       // v2.5: was 1, signaal moet inzinken
+const SETTLE_PER_ROUND: usize = 50;     // v2.5: was 5, veld heeft 50 ticks nodig om te settlen
+const MAX_THINK_ROUNDS: usize = 3;      // v2.5: was 1, meer denk-rondes = dieper nadenken
+const COHERENCE_THRESHOLD: f32 = 0.50;  // v2.5: was 0.30, hogere drempel = beter antwoord
+const MAX_OUTPUT_TOKENS: usize = 60;    // v2.5: was 30, langere antwoorden mogelijk
 
 /// Verwerk een vraag door het veld met denk-loops.
 /// Lucy denkt meerdere rondes na tot haar gedachten stabiliseren.
@@ -281,15 +282,21 @@ pub fn process_query(
     // Bewaar beste output als laatste gedachte → continuous thought stream
     field.last_thought = Some(best_output);
 
-    // v1.0: META-INTELLIGENTIE — Lucy checkt haar eigen antwoord
-    // Als het onzin is, geeft ze dat eerlijk toe en maakt er een leerdoel van
+    // v2.5: META-INTELLIGENTIE — Lucy checkt haar eigen antwoord
+    // Als het onzin is (byte-tokens, herhalingen, te kort), gebruik RAG-feiten als fallback
     let answer = if !output_ids.is_empty() {
-        // Check: herhaalt het antwoord zichzelf?
         let unique_tokens: std::collections::HashSet<u32> = output_ids.iter().copied().collect();
         let repeat_ratio = 1.0 - (unique_tokens.len() as f32 / output_ids.len() as f32);
 
-        // Check: is het antwoord te kort of te repetitief?
-        if repeat_ratio > 0.5 || output_ids.len() < 3 || final_coherence < 0.2 {
+        // v2.5: Check of output leesbaar is
+        let attempt = decoding::tokens_to_text(&output_ids, vocab);
+        let alpha_count = attempt.chars().filter(|c| c.is_alphabetic()).count();
+        let unique_chars: std::collections::HashSet<char> = attempt.chars().collect();
+        let is_byte_soup = alpha_count < 5; // minder dan 5 letters = geen woorden
+        let is_monotone = unique_chars.len() < 4; // minder dan 4 unieke chars = herhaling
+        let is_garbage = repeat_ratio > 0.5 || output_ids.len() < 3 || is_byte_soup || is_monotone;
+
+        if is_garbage {
             // Lucy weet dat ze het niet weet — DAT is intelligentie
             tracing::info!(
                 repeat_ratio,
@@ -323,13 +330,22 @@ pub fn process_query(
                 }
             }
 
-            // v2.0: Geen hardcoded taal — Lucy probeert vanuit haar veld te antwoorden
-            // Als dat niet lukt: universeel antwoord zonder taalvoorkeur
-            let attempt = decoding::tokens_to_text(&output_ids, vocab);
-            if attempt.len() > 3 && !attempt.contains("a5068") {
-                attempt // gebruik wat ze had, ook al is het niet perfect
+            // v2.5: RAG-fallback — als het veld-antwoord onzin is, gebruik opgehaalde feiten
+            // Lucy is EERLIJK: ze geeft toe dat haar veld nog leert, maar deelt wat ze WEL weet
+            if !facts.is_empty() {
+                // Gebruik de beste RAG-match als antwoord
+                let rag_answer = facts.iter()
+                    .max_by_key(|f| (f.len() as f32 * 100.0) as i32) // langste = meest informatief
+                    .map(|f| {
+                        // Trim tot ~200 chars voor beknopt antwoord
+                        if f.len() > 200 { format!("{}...", &f[..200]) } else { f.clone() }
+                    })
+                    .unwrap_or_else(|| "...".to_string());
+                rag_answer
+            } else if attempt.len() > 3 {
+                attempt
             } else {
-                "...".to_string() // universeel: ik denk na maar kan nog niet antwoorden
+                "...".to_string()
             }
         } else {
             answer

@@ -99,3 +99,106 @@ impl FileSystem {
         Ok(())
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DATA ONSTERFELIJKHEID — shared functies voor alle save/load operaties
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Roteer backups: `data/file.bin` → `data/backups/file.bin.1` t/m `.{keep}`
+/// Meest recente = .1, oudste wordt verwijderd.
+/// Lucy's geleerde data gaat NOOIT verloren.
+pub fn rotate_backups(path: &Path, keep: usize) {
+    let backup_dir = path.parent().unwrap_or(Path::new(".")).join("backups");
+    let _ = std::fs::create_dir_all(&backup_dir);
+
+    let filename = path.file_name().unwrap_or_default().to_string_lossy();
+
+    // Shift: .4→.5, .3→.4, .2→.3, .1→.2
+    for i in (1..keep).rev() {
+        let from = backup_dir.join(format!("{}.{}", filename, i));
+        let to = backup_dir.join(format!("{}.{}", filename, i + 1));
+        let _ = std::fs::rename(&from, &to);
+    }
+
+    // Verwijder de oudste die eraf valt
+    let oldest = backup_dir.join(format!("{}.{}", filename, keep + 1));
+    let _ = std::fs::remove_file(&oldest);
+
+    // Kopieer huidige naar .1
+    if path.exists() {
+        let newest = backup_dir.join(format!("{}.1", filename));
+        let _ = std::fs::copy(path, &newest);
+    }
+}
+
+/// Schrijf CRC32 checksum sidecar naast een databestand
+pub fn write_checksum(path: &Path, data: &[u8]) {
+    let checksum = crc32fast::hash(data);
+    let checksum_path = path.with_extension("crc32");
+    let _ = std::fs::write(&checksum_path, checksum.to_le_bytes());
+}
+
+/// Valideer CRC32 checksum. Returns true als ok of als geen checksum bestaat (backward compat).
+pub fn validate_checksum(path: &Path) -> bool {
+    let checksum_path = path.with_extension("crc32");
+    if !checksum_path.exists() {
+        return true; // geen checksum = oud formaat, accepteer
+    }
+    let Ok(data) = std::fs::read(path) else { return false };
+    let Ok(stored) = std::fs::read(&checksum_path) else { return false };
+    if stored.len() != 4 { return false; }
+    let stored_crc = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
+    let actual_crc = crc32fast::hash(&data);
+    actual_crc == stored_crc
+}
+
+/// Probeer een bestand te laden van primary, dan backups 1-5.
+/// Retourneert (bytes, bron) of None.
+pub fn load_with_fallback(path: &Path) -> Option<(Vec<u8>, String)> {
+    // 1. Primary
+    if path.exists() {
+        if validate_checksum(path) {
+            if let Ok(data) = std::fs::read(path) {
+                return Some((data, "primary".to_string()));
+            }
+        }
+    }
+
+    // 2. Backups
+    let backup_dir = path.parent().unwrap_or(Path::new(".")).join("backups");
+    let filename = path.file_name().unwrap_or_default().to_string_lossy();
+    for i in 1..=5 {
+        let backup = backup_dir.join(format!("{}.{}", filename, i));
+        if backup.exists() {
+            if let Ok(data) = std::fs::read(&backup) {
+                // Herstel primary van deze backup
+                let _ = std::fs::copy(&backup, path);
+                return Some((data, format!("backup#{}", i)));
+            }
+        }
+    }
+
+    None
+}
+
+/// Atomic save met checksum + backup rotatie.
+/// Dit is de ENIGE manier om data te schrijven. Gebruikt door alle subsystemen.
+pub fn atomic_save(path: &Path, data: &[u8], keep_backups: usize) -> Result<(), String> {
+    // Valideer: weiger lege data te schrijven (bescherming tegen bugs)
+    if data.len() < 16 {
+        return Err(format!("Weiger save: data te klein ({} bytes) — mogelijk corrupt", data.len()));
+    }
+
+    // Atomic write: tmp → rename
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data).map_err(|e| format!("Write tmp: {}", e))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Rename: {}", e))?;
+
+    // Checksum sidecar
+    write_checksum(path, data);
+
+    // Roteer backups
+    rotate_backups(path, keep_backups);
+
+    Ok(())
+}

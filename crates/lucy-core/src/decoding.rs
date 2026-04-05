@@ -38,8 +38,14 @@ pub fn decode_token_with_context(
     let vocab_size = vocab.vocab_size();
     if vocab_size == 0 { return (0, 0.0); }
 
+    // v2.5: Skip speciale tokens — <pad>, <unk>, <eos> mogen NOOIT gegenereerd worden
+    // Token IDs 0-2 zijn speciale tokens (byte 0x00, 0x01, 0x02), 256 = <pad>
+    // Deze verschijnen alleen als het veld geen signaal genereert
+    let skip_ids: HashSet<u32> = [0u32, 1, 2, 256].iter().copied().collect();
+
     // Pass 1: coarse score op eerste COARSE_DIMS dimensies
     let mut scores: Vec<(u32, f32)> = (0..vocab_size as u32)
+        .filter(|id| !skip_ids.contains(id)) // v2.5: filter speciale tokens
         .map(|id| {
             let emb = vocab.embed(id);
             let coarse: f32 = (0..COARSE_DIMS.min(DIM)).map(|d| output_phi[d] * emb[d]).sum();

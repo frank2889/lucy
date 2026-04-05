@@ -317,6 +317,10 @@ impl Explorer {
         let bytes = bincode::serialize(self)?;
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, path)?;
+        // CRC32 checksum + backup rotation
+        let checksum = crc32fast::hash(&bytes);
+        let _ = std::fs::write(path.with_extension("crc32"), checksum.to_le_bytes());
+        lucy_io::fs::rotate_backups(path, 5);
         Ok(())
     }
 
@@ -672,7 +676,7 @@ pub fn learn_from_text(
     let ticks_per_token = 2; // v1.2: minimaal, laat het veld organisch leren
     let settle_ticks = 10; // v1.2: kort settlen, meer iteraties > minder diep
 
-    for chunk in token_ids.windows(chunk_size).step_by(chunk_size) { // v1.2: geen overlap
+    for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) { // v2.5: 50% overlap — elk token 2× gezien
         if chunk.len() < 3 { break; }
 
         // Input: eerste helft van de chunk

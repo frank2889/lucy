@@ -38,13 +38,15 @@ COPY --from=builder /lucy/crates/ /lucy/crates/
 COPY --from=builder /lucy/Cargo.toml /lucy/Cargo.toml
 COPY --from=builder /lucy/Cargo.lock /lucy/Cargo.lock
 
-# Persistent directories
-RUN mkdir -p /lucy/data /lucy/modules /lucy/dashboard
-
 # Dashboard static files
+RUN mkdir -p /lucy/dashboard
 COPY --from=dashboard /dashboard/dist/ /lucy/dashboard/
 
-VOLUME ["/lucy/data", "/lucy/modules"]
+# v2.5: GEEN mkdir data/ of VOLUME declaratie in Dockerfile
+# Data en modules worden ALLEEN via docker-compose named volumes gemount.
+# VOLUME declaratie in Dockerfile maakt anonymous volumes die conflicteren
+# met named volumes bij container recreatie → DATA VERLIES.
+# De directories worden automatisch aangemaakt door Docker bij volume mount.
 
 # Environment
 ENV RUST_LOG=info

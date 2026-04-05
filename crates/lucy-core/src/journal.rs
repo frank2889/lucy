@@ -159,6 +159,10 @@ impl Journal {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, path)?;
+        // CRC32 checksum + backup rotation
+        let checksum = crc32fast::hash(json.as_bytes());
+        let _ = std::fs::write(path.with_extension("crc32"), checksum.to_le_bytes());
+        lucy_io::fs::rotate_backups(path, 5);
         Ok(())
     }
 

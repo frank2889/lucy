@@ -991,7 +991,7 @@ pub fn attention_tick(field: &mut Field) {
     if n == 0 { return; }
 
     // v1.0: Cache tensions — voorkomt herberekening na update_phi/compute_tension
-    let tensions: SmallVec<[f32; 2048]> = field.active_set.iter()
+    let tensions: Vec<f32> = field.active_set.iter()
         .map(|&id| field.points[id as usize].tension)
         .collect();
 
@@ -1015,20 +1015,29 @@ pub fn attention_tick(field: &mut Field) {
     }
 }
 
-/// v1.2: Lichte settle voor queries — alleen IO punten + buren (niet alle 8704)
-/// ~10× sneller dan full settle. Gebruikt voor /ask endpoint.
+/// v2.5: Settle voor queries — IO + 2-hop buren (signaal moet doorstromen)
+/// Was: alleen directe buren → signaal stierf na 1 hop → output = nul → <pad>
+/// Nu: 2-hop → input kan via 2 tussenstappen output bereiken
 pub fn settle_light(field: &mut Field, max_ticks: usize, epsilon: f32) -> (usize, f32) {
-    // Bouw subset: input + output + hun directe buren
-    let mut subset: Vec<u32> = Vec::with_capacity(2048);
+    // Bouw subset: input + output + 2-hop buren
+    let mut subset: Vec<u32> = Vec::with_capacity(4096);
     let mut seen = std::collections::HashSet::new();
 
+    // Hop 1: IO + directe buren
+    let mut hop1: Vec<u32> = Vec::with_capacity(2048);
     for &id in field.input_ids.iter().chain(field.output_ids.iter()) {
-        if seen.insert(id) { subset.push(id); }
-        // Voeg directe buren toe
-        let neighbors: SmallVec<[u32; 16]> = field.points[id as usize].couplings
+        if seen.insert(id) { subset.push(id); hop1.push(id); }
+        for c in &field.points[id as usize].couplings {
+            if seen.insert(c.target) { subset.push(c.target); hop1.push(c.target); }
+        }
+    }
+
+    // Hop 2: buren van hop-1 buren (verdubbelt bereik)
+    for &id in &hop1 {
+        let targets: SmallVec<[u32; 16]> = field.points[id as usize].couplings
             .iter().map(|c| c.target).collect();
-        for &n in &neighbors {
-            if seen.insert(n) { subset.push(n); }
+        for &t in &targets {
+            if seen.insert(t) { subset.push(t); }
         }
     }
 
@@ -2549,47 +2558,63 @@ pub fn ewc_penalty(coupling: &Coupling, ewc_lambda: f32) -> f32 {
 
 // === v0.7: HIËRARCHIE + GLOBAL WORKSPACE BROADCAST ===
 
-/// Wijs depth toe aan punten op basis van connectiviteit.
-/// depth 0 = I/O, depth 1+ = steeds abstracter.
+/// v2.5: Depth op basis van MINIMUM afstand tot I/O (BFS flood fill)
+/// depth 0 = I/O punten zelf
+/// depth 1 = directe buren van I/O
+/// depth 2 = 2 hops van I/O
+/// depth 3 = 3+ hops van I/O (abstracte representaties — ignition candidates)
+///
+/// Was: max 4 iteraties, max(buur_depths)+1 → bijna alles depth 1-2
+/// Nu: echte BFS flood fill → gegarandeerd depth 3 voor verre punten
 pub fn assign_depths(field: &mut Field) {
-    // I/O punten = depth 0
-    for &id in &field.input_ids {
-        field.points[id as usize].depth = 0;
-    }
-    for &id in &field.output_ids {
-        field.points[id as usize].depth = 0;
+    let n = field.points.len();
+    // Initialiseer alle depths op 255 (onbezocht)
+    for p in &mut field.points {
+        p.depth = 255;
     }
 
-    // BFS vanuit I/O punten
-    let mut changed = true;
-    let mut iteration = 0;
-    while changed && iteration < 4 {
-        changed = false;
-        iteration += 1;
+    // I/O punten = depth 0 (bron van BFS)
+    let mut frontier: Vec<u32> = Vec::with_capacity(1024);
+    for &id in field.input_ids.iter().chain(field.output_ids.iter()) {
+        field.points[id as usize].depth = 0;
+        frontier.push(id);
+    }
 
-        for i in 0..field.points.len() {
-            if field.points[i].depth > 0 || field.points[i].is_input() || field.points[i].is_output() {
-                continue; // al assigned
-            }
-
-            // Kijk naar buren — depth = max(buur_depths) + 1
-            let max_neighbor_depth = field.points[i].couplings.iter()
-                .filter_map(|c| field.points.get(c.target as usize))
-                .map(|p| p.depth)
-                .max()
-                .unwrap_or(0);
-
-            if max_neighbor_depth > 0 || field.points[i].couplings.iter().any(|c| {
-                field.points.get(c.target as usize).is_some_and(|p| p.is_input() || p.is_output())
-            }) {
-                let new_depth = (max_neighbor_depth + 1).min(3);
-                if field.points[i].depth != new_depth {
-                    field.points[i].depth = new_depth;
-                    changed = true;
+    // BFS flood fill — onbeperkte iteraties tot alle punten bereikt
+    let mut current_depth: u8 = 0;
+    while !frontier.is_empty() && current_depth < 3 {
+        let mut next_frontier: Vec<u32> = Vec::new();
+        for &id in &frontier {
+            let targets: SmallVec<[u32; 16]> = field.points[id as usize].couplings
+                .iter().map(|c| c.target).collect();
+            for &t in &targets {
+                let tidx = t as usize;
+                if tidx < n && field.points[tidx].depth == 255 {
+                    field.points[tidx].depth = current_depth + 1;
+                    next_frontier.push(t);
                 }
             }
         }
+        frontier = next_frontier;
+        current_depth += 1;
     }
+
+    // Alle nog onbezochte punten (depth 255) → depth 3 (meest abstract)
+    for p in &mut field.points {
+        if p.depth == 255 {
+            p.depth = 3;
+        }
+    }
+
+    // Log depth distributie
+    let mut counts = [0u32; 4];
+    for p in &field.points {
+        counts[p.depth as usize] += 1;
+    }
+    tracing::info!(
+        depth0 = counts[0], depth1 = counts[1], depth2 = counts[2], depth3 = counts[3],
+        "Depths assigned (BFS flood fill)"
+    );
 }
 
 /// Global Workspace — Ignition Dynamics (Dehaene, Changeux & Naccache 2003)
@@ -2627,7 +2652,7 @@ pub fn global_workspace_broadcast(field: &mut Field) {
             * (1.0 + p.phi_integrated)     // IIT boost: geïntegreerd = bewuster
             * (1.0 + p.expected_free_energy * 0.5); // EFE boost: relevante info wint
 
-        if ignition_score > field.noise_amplitude * 2.0 { // dynamische drempel
+        if ignition_score > field.noise_amplitude * 0.5 { // v2.5: verlaagd van 2.0
             candidates.push((i, ignition_score, p.phi));
         }
     }
@@ -2663,7 +2688,10 @@ pub fn global_workspace_broadcast(field: &mut Field) {
     let avg_support = if n_recurrent > 0 { recurrent_support / n_recurrent as f32 } else { 0.0 };
 
     // Ignition drempel: winnaar-score × recurrente support > threshold
-    let ignition_threshold = field.noise_amplitude * 5.0; // dynamisch
+    // v2.5: verlaagd van 5.0 naar 1.5 — oude drempel was onbereikbaar
+    // Met typische phi_norm ~0.1-1.0 en noise_amplitude ~0.05-0.15,
+    // was 5.0 × 0.15 = 0.75 onhaalbaar. Nu: 1.5 × 0.15 = 0.225.
+    let ignition_threshold = field.noise_amplitude * 1.5;
     let ignition_product = winner_score * (1.0 + avg_support);
 
     if ignition_product < ignition_threshold {

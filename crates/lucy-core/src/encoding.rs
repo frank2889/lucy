@@ -316,6 +316,10 @@ impl Vocabulary {
         let bytes = bincode::serialize(self)?;
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, path)?;
+        // CRC32 checksum + backup rotation
+        let checksum = crc32fast::hash(&bytes);
+        let _ = std::fs::write(path.with_extension("crc32"), checksum.to_le_bytes());
+        lucy_io::fs::rotate_backups(path, 5);
         tracing::info!(vocab_size = self.id_to_token.len(), merges = self.merges.len(), "Vocabulary saved (atomic)");
         Ok(())
     }

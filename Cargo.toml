@@ -25,3 +25,4 @@ wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rayon = "1.10"
+crc32fast = "1"

@@ -1000,33 +1000,123 @@ impl Field {
 // === Snapshot: save/load van volledige veldstaat ===
 
 impl Field {
-    /// Sla de volledige veldstaat op naar disk (bincode — snel + compact)
-    /// Atomic save: schrijf naar .tmp, dan rename (voorkomt corruptie bij crash/deploy)
+    /// Sla de volledige veldstaat op — ONSTERFELIJK
+    /// Atomic write + CRC32 checksum + 5 versioned backups.
+    /// Lucy's geleerde data gaat NOOIT verloren.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let tmp = path.with_extension("tmp");
         let bytes = bincode::serialize(self)?;
+
+        // Weiger lege/corrupte data
+        if bytes.len() < 1000 {
+            return Err(format!("Snapshot te klein ({} bytes) — weiger save", bytes.len()).into());
+        }
+
+        // Atomic write + checksum + 5 backups
+        let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, path)?;
+
+        // CRC32 checksum sidecar
+        let checksum = crc32fast::hash(&bytes);
+        let checksum_path = path.with_extension("crc32");
+        let _ = std::fs::write(&checksum_path, checksum.to_le_bytes());
+
+        // Roteer 5 backups: data/backups/lucy.snapshot.1 t/m .5
+        let backup_dir = path.parent().unwrap_or(std::path::Path::new(".")).join("backups");
+        let _ = std::fs::create_dir_all(&backup_dir);
+        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+        for i in (1..5u32).rev() {
+            let from = backup_dir.join(format!("{}.{}", filename, i));
+            let to = backup_dir.join(format!("{}.{}", filename, i + 1));
+            let _ = std::fs::rename(&from, &to);
+        }
+        let _ = std::fs::remove_file(backup_dir.join(format!("{}.6", filename)));
+        let _ = std::fs::copy(path, backup_dir.join(format!("{}.1", filename)));
+
         tracing::info!(
             tick = self.tick,
             points = self.points.len(),
-            active = self.active_set.len(),
             bytes = bytes.len(),
-            "Snapshot saved (atomic)"
+            checksum,
+            "Snapshot saved (atomic + checksum + 5 backups)"
         );
         Ok(())
     }
 
-    /// Laad een veldstaat van disk
+    /// Laad een veldstaat — met CRC32 validatie en structurele checks
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
+
+        // CRC32 validatie (als checksum bestaat)
+        let checksum_path = path.with_extension("crc32");
+        if checksum_path.exists() {
+            let stored = std::fs::read(&checksum_path)?;
+            if stored.len() == 4 {
+                let stored_crc = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
+                let actual_crc = crc32fast::hash(&bytes);
+                if stored_crc != actual_crc {
+                    return Err(format!(
+                        "Checksum mismatch: stored={:#x} actual={:#x} — snapshot corrupt!",
+                        stored_crc, actual_crc
+                    ).into());
+                }
+            }
+        }
+
         let field: Self = bincode::deserialize(&bytes)?;
+
+        // Structurele validatie
+        if field.points.is_empty() {
+            return Err("Snapshot heeft 0 punten — corrupt of leeg".into());
+        }
+
+        // NaN/Inf waarschuwing (heal fixt het later)
+        let nan_count = field.points.iter()
+            .flat_map(|p| p.phi.iter())
+            .filter(|v| !v.is_finite())
+            .count();
+        if nan_count > 0 {
+            tracing::warn!(nan_count, "Snapshot bevat NaN/Inf waarden — wordt geheald");
+        }
+
         tracing::info!(
             tick = field.tick,
             points = field.points.len(),
             active = field.active_set.len(),
-            "Snapshot loaded"
+            "Snapshot geladen en gevalideerd"
         );
         Ok(field)
+    }
+
+    /// Probeer te laden van primary, dan backups 1-5. Retourneert None als alles faalt.
+    pub fn load_with_fallback(path: &Path) -> Option<Self> {
+        // 1. Primary
+        if path.exists() {
+            match Self::load(path) {
+                Ok(f) => return Some(f),
+                Err(e) => tracing::warn!("Primary snapshot load failed: {}", e),
+            }
+        }
+
+        // 2. Backups
+        let backup_dir = path.parent().unwrap_or(std::path::Path::new(".")).join("backups");
+        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+        for i in 1..=5 {
+            let backup = backup_dir.join(format!("{}.{}", filename, i));
+            if backup.exists() {
+                match Self::load(&backup) {
+                    Ok(f) => {
+                        tracing::warn!(backup = i, tick = f.tick, "RECOVERED van lokale backup");
+                        // Herstel primary
+                        let _ = std::fs::copy(&backup, path);
+                        return Some(f);
+                    }
+                    Err(e) => tracing::warn!("Backup #{} failed: {}", i, e),
+                }
+            }
+        }
+
+        tracing::error!("ALLE lokale snapshots gefaald — data verloren!");
+        None
     }
 }
