@@ -1,33 +1,35 @@
-// StatusBar — Compact header
 import { useStore } from '../store';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 export default function StatusBar() {
   const t = useStore((s) => s.telemetry);
+  const activity = useStore((s) => s.activity);
+  const mobile = useIsMobile();
+  if (!t) return <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>Connecting to Lucy...</div>;
 
-  if (!t) return (
-    <div className="text-center text-[--text2] text-lg py-8">
-      Connecting to Lucy...
-    </div>
-  );
+  const mood = activity?.mood ?? 'loading';
+  const moodColors: Record<string, { color: string; bg: string }> = {
+    kalm: { color: 'var(--green)', bg: 'var(--green-bg)' },
+    curious: { color: 'var(--cyan)', bg: 'var(--cyan-bg)' },
+    gefrustreerd: { color: 'var(--red)', bg: 'var(--red-bg)' },
+    loading: { color: 'var(--text-disabled)', bg: 'var(--page-bg)' },
+  };
+  const mc = moodColors[mood] ?? moodColors.kalm;
 
   return (
-    <div className="flex items-center justify-between fade-in">
-      <div className="flex items-center gap-3">
-        <div className="w-3 h-3 rounded-full bg-[--green]" />
-        <h1 className="text-2xl font-bold tracking-tight">Lucy</h1>
-        <span className="text-[--text2] text-sm">v2.0</span>
+    <div className="card" style={{ padding: mobile ? '10px 12px' : '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--green)' }} />
+        <span style={{ fontSize: mobile ? 16 : 20, fontWeight: 600 }}>Lucy</span>
+        <span style={{ fontSize: 11, color: mc.color, background: mc.bg, padding: '2px 8px', borderRadius: 20, fontWeight: 600 }}>{mood}</span>
       </div>
-      <div className="flex items-center gap-6 text-sm text-[--text2]">
-        <span>tick <strong className="text-[--text] mono">{t.tick.toLocaleString()}</strong></span>
-        <span className="px-2.5 py-1 rounded-full text-xs font-semibold"
-          style={{
-            color: t.phase === 'Idle' ? 'var(--green)' : t.phase === 'Processing' ? 'var(--blue)' : 'var(--orange)',
-            background: t.phase === 'Idle' ? 'rgba(52,199,89,0.12)' : t.phase === 'Processing' ? 'rgba(0,122,255,0.12)' : 'rgba(255,149,0,0.12)',
-          }}>
-          {t.phase}
-        </span>
-        <span><strong className="text-[--text] mono">{t.points.toLocaleString()}</strong> nodes</span>
-        <span>tension <strong className="text-[--text] mono">{(t.tension ?? 0).toFixed(4)}</strong></span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: mobile ? 8 : 20, fontSize: mobile ? 11 : 13, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+        <span>tick <strong className="mono" style={{ color: 'var(--text-primary)' }}>{(t.tick ?? 0).toLocaleString()}</strong></span>
+        <span style={{ padding: '2px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+          color: t.phase === 'Idle' ? 'var(--green)' : 'var(--blue)',
+          background: t.phase === 'Idle' ? 'var(--green-bg)' : 'var(--blue-bg)',
+        }}>{t.phase}</span>
+        {!mobile && <span><strong className="mono" style={{ color: 'var(--text-primary)' }}>{(t.points ?? 0).toLocaleString()}</strong> nodes</span>}
       </div>
     </div>
   );

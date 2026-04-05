@@ -1,28 +1,29 @@
-// FieldStats — Key metrics as big number cards
 import { useStore } from '../store';
+import { useIsMobile } from '../hooks/useIsMobile';
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+function Stat({ label, value, color, compact }: { label: string; value: string; color?: string; compact?: boolean }) {
   return (
-    <div className="card flex flex-col gap-1 items-center text-center py-4">
-      <span className="text-2xl font-bold mono" style={color ? { color } : undefined}>{value}</span>
-      <span className="text-xs text-[--text2] font-medium">{label}</span>
+    <div className="card" style={{ padding: compact ? '10px 12px' : '16px 20px' }}>
+      <div style={{ fontSize: compact ? 11 : 12, color: 'var(--text-secondary)', marginBottom: 2 }}>{label}</div>
+      <div className="mono" style={{ fontSize: compact ? 16 : 22, fontWeight: 700, color: color ?? 'var(--text-primary)' }}>{value}</div>
     </div>
   );
 }
 
 export default function FieldStats() {
-  const status = useStore((s) => s.status);
+  const s = useStore((s) => s.status);
   const t = useStore((s) => s.telemetry);
-  if (!status && !t) return null;
+  const mobile = useIsMobile();
+  if (!s && !t) return null;
 
   return (
-    <div className="grid grid-cols-6 gap-3 fade-in">
-      <Stat label="Points" value={status?.field?.points?.toLocaleString() ?? t?.points?.toLocaleString() ?? '-'} />
-      <Stat label="Couplings" value={status?.field?.couplings?.toLocaleString() ?? '-'} />
-      <Stat label="Vocabulary" value={status?.vocabulary?.size?.toLocaleString() ?? '-'} color="var(--blue)" />
-      <Stat label="Pages Read" value={status?.explorer?.pages_read?.toString() ?? '-'} color="var(--green)" />
-      <Stat label="Tokens" value={status?.explorer?.tokens_processed?.toLocaleString() ?? '-'} />
-      <Stat label="Reflections" value={status?.self_modification?.reflection_count?.toString() ?? '-'} color="var(--purple)" />
+    <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)', gap: mobile ? 8 : 16 }}>
+      <Stat label="Points" value={s?.field?.points?.toLocaleString() ?? t?.points?.toLocaleString() ?? '-'} compact={mobile} />
+      <Stat label="Couplings" value={s?.field?.couplings?.toLocaleString() ?? '-'} compact={mobile} />
+      <Stat label="Vocab" value={s?.vocabulary?.size?.toLocaleString() ?? '-'} color="var(--blue)" compact={mobile} />
+      <Stat label="Pages" value={s?.explorer?.pages_read?.toString() ?? '-'} color="var(--green)" compact={mobile} />
+      <Stat label="Tokens" value={s?.explorer?.tokens_processed?.toLocaleString() ?? '-'} compact={mobile} />
+      <Stat label="Reflect" value={s?.self_modification?.reflection_count?.toString() ?? '-'} color="var(--purple)" compact={mobile} />
     </div>
   );
 }
