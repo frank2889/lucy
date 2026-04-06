@@ -556,6 +556,9 @@ pub fn adapt_dynamics(field: &mut Field) {
     // === Veldstatistieken berekenen ===
     let avg_tension: f32 = field.active_set.iter()
         .map(|&id| field.points[id as usize].tension).sum::<f32>() / n;
+    // FIX: avg_free_energy was NOOIT geschreven — nu wel
+    field.avg_free_energy = field.active_set.iter()
+        .map(|&id| field.points[id as usize].free_energy).sum::<f32>() / n;
     let tension_var: f32 = field.active_set.iter()
         .map(|&id| {
             let d = field.points[id as usize].tension - avg_tension;
@@ -1984,13 +1987,20 @@ pub fn apply_neuromodulation(field: &mut Field) {
         let id = field.active_set[i];
         let point = &mut field.points[id as usize];
 
-        // #8: Emotie-modulatie: curiosity → leer sneller, frustration → leer langzamer
-        let emo_factor = 0.5 + point.curiosity * 0.5 - point.frustration * 0.3;
-        let emo_factor = emo_factor.clamp(0.3, 1.5);
+        // #8: Emotie-modulatie
+        let emo_factor = (0.5 + point.curiosity * 0.5 - point.frustration * 0.3).clamp(0.3, 1.5);
 
-        // #2: Gamma-synchronie → learning gate (alleen leren bij hoge coherentie)
-        // #9: Φ → learning boost (geïntegreerd systeem leert effectiever)
-        let total_boost = lr_multiplier * emo_factor * coherence_boost * phi_boost;
+        // FIX: causal_power → extra learning boost voor causaal sterke punten
+        // Hoge causal_power = dit punt heeft sterke causale invloed → leer harder
+        let causal_boost = 1.0 + point.causal_power.min(1.0) * 0.5; // 1.0-1.5
+
+        // FIX: free_energy_rate → urgentie-modulatie
+        // Snel dalende F (rate < 0) = convergentie → leer langzamer (al goed)
+        // Snel stijgende F (rate > 0) = verslechtering → leer sneller (urgentie)
+        let urgency = if point.free_energy_rate > 0.01 { 1.0 + point.free_energy_rate.min(0.5) } else { 1.0 };
+
+        // Combineer ALLE modulatie-signalen
+        let total_boost = lr_multiplier * emo_factor * coherence_boost * phi_boost * causal_boost * urgency;
 
         point.eta = (point.eta * total_boost).min(field.lambda);
     }
@@ -3229,12 +3239,24 @@ pub fn init_working_memory(field: &mut Field) {
 pub fn wm_write(field: &mut Field) {
     if field.working_memory.is_empty() { return; }
 
+    // FIX: theta_gamma_coupling → WM capacity gating
+    // Hoge θ-γ coupling = meer items in werkgeheugen (~7±2 per theta-cyclus)
+    // Lage coupling = minder effectief werkgeheugen
+    let tg = field.theta_gamma_coupling.clamp(0.01, 1.0);
+    let effective_slots = ((field.working_memory.len() as f32) * tg).max(2.0) as usize;
+
+    // FIX: ignition_strength → ignited content krijgt WM prioriteit
+    // Bewuste inhoud (ignited) moet EERST in werkgeheugen opgeslagen worden
+    let ignition_boost = if field.ignition_active { 2.0 } else { 1.0 };
+
     for i in 0..field.active_set.len() {
         let id = field.active_set[i] as usize;
         let point = &field.points[id];
 
-        // Alleen schrijven als tension hoog is (= onzeker, zoekt antwoord)
-        if point.tension < 0.1 { continue; }
+        // Alleen schrijven als tension hoog is OF punt in ignited broadcast zit
+        let tension_gate = point.tension > 0.1;
+        let ignition_gate = field.ignition_active && point.depth >= 2;
+        if !tension_gate && !ignition_gate { continue; }
 
         // Vind beste WM slot via dot product
         let phi = point.phi;
