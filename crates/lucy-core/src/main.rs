@@ -269,11 +269,26 @@ async fn main() {
 
     // === Dagboek ===
     let journal_path = Path::new("data/journal.json");
-    let journal = if journal_path.exists() {
+    let mut journal = if journal_path.exists() {
         journal::Journal::load(journal_path).unwrap_or_else(|_| journal::Journal::new())
     } else {
         journal::Journal::new()
     };
+
+    // v2.5: Herstel verloren tellers vanuit journal (overleeft struct-wijzigingen)
+    if field.reflection_count == 0 && journal.reflection_count > 0 {
+        tracing::info!(
+            journal_reflections = journal.reflection_count,
+            "Reflection count hersteld vanuit journal"
+        );
+        field.reflection_count = journal.reflection_count;
+    }
+    // Sync journal → field voor pages/tokens (als field ze kwijt is)
+    if field.pages_read == 0 && journal.total_pages_read > 0 {
+        field.pages_read = journal.total_pages_read;
+        field.tokens_processed = journal.total_tokens_processed;
+        tracing::info!(pages = journal.total_pages_read, "Explorer stats hersteld vanuit journal");
+    }
 
     // === GPU initialisatie: remote GPU (Vast.ai) → lokale GPU → CPU ===
     let gpu_url = std::env::var("GPU_URL").ok();
@@ -557,6 +572,12 @@ async fn main() {
             if let Ok(exp) = shared.explorer.try_read() {
                 field.pages_read = exp.pages_read;
                 field.tokens_processed = exp.tokens_processed;
+            }
+            // v2.5: Sync tellers naar journal (overleeft struct-wijzigingen)
+            if let Ok(mut j) = shared.journal.try_write() {
+                j.reflection_count = field.reflection_count;
+                j.total_pages_read = field.pages_read;
+                j.total_tokens_processed = field.tokens_processed;
             }
             // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
             field_snapshot.store(Arc::new(field.clone()));

@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     libssl3 \
+    gcc \
+    pkg-config \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Installeer Rust toolchain — Lucy moet zichzelf kunnen hercompileren

@@ -48,6 +48,16 @@ pub struct Journal {
     prev_tension: f32,
     /// Milestones die al getriggerd zijn
     pub milestones_hit: Vec<String>,
+    /// v2.5: Reflection count opgeslagen in journal (JSON, overleeft struct-wijzigingen)
+    /// Dit is de bron van waarheid — Field.reflection_count wordt hieruit geladen.
+    #[serde(default)]
+    pub reflection_count: u64,
+    /// Totaal geleerde pagina's (backup — overleeft snapshot reset)
+    #[serde(default)]
+    pub total_pages_read: u64,
+    /// Totaal geleerde tokens (backup — overleeft snapshot reset)
+    #[serde(default)]
+    pub total_tokens_processed: u64,
 }
 
 impl Journal {
@@ -59,6 +69,9 @@ impl Journal {
             prev_frustration: 0.0,
             prev_tension: 0.0,
             milestones_hit: Vec::new(),
+            reflection_count: 0,
+            total_pages_read: 0,
+            total_tokens_processed: 0,
         }
     }
 

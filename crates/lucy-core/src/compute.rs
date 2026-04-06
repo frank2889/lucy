@@ -1949,6 +1949,20 @@ pub fn apply_neuromodulation(field: &mut Field) {
             }
         }
 
+        // v2.5.2: Extra boost voor depth-3 punten — ignition vereist phi > 0
+        // Depth-3 punten zijn abstracte representaties die signaal nodig hebben
+        // om bewuste ignition te kunnen triggeren
+        let d3_boost = baseline_noise * 2.0; // 2× sterkere noise voor abstracte laag
+        for &id_u32 in &field.active_set {
+            let id = id_u32 as usize;
+            if field.points[id].depth == 3 {
+                // Kleine maar constante perturbatie zodat phi NOOIT exact nul is
+                for d in 0..DIM {
+                    field.points[id].phi[d] += d3_boost * 0.01 * rng.random_range(-1.0f32..1.0f32);
+                }
+            }
+        }
+
         // Noradrenaline hoog → extra exploratie-ruis bovenop baseline
         // Drempel = noise_amplitude (dynamisch)
         if field.norepinephrine > field.noise_amplitude {
@@ -2652,9 +2666,22 @@ pub fn global_workspace_broadcast(field: &mut Field) {
             * (1.0 + p.phi_integrated)     // IIT boost: geïntegreerd = bewuster
             * (1.0 + p.expected_free_energy * 0.5); // EFE boost: relevante info wint
 
-        if ignition_score > field.noise_amplitude * 0.5 { // v2.5: verlaagd van 2.0
+        // v2.5.2: GEEN candidate filter — alle depth-3 actieve punten zijn kandidaat
+        // De winnaar-selectie bepaalt wie ignite, niet een absolute drempel
+        if ignition_score > 0.0001 { // minimum: niet nul
             candidates.push((i, ignition_score, p.phi));
         }
+    }
+
+    // Debug: log elke 1000 ticks
+    if field.tick % 1000 == 0 {
+        let n_d3 = field.points.iter().filter(|p| p.depth == 3 && p.is_active()).count();
+        tracing::info!(
+            candidates = candidates.len(),
+            depth3_active = n_d3,
+            top_score = candidates.first().map(|c| c.1).unwrap_or(0.0),
+            "GNW ignition check"
+        );
     }
 
     if candidates.is_empty() {
@@ -2687,15 +2714,15 @@ pub fn global_workspace_broadcast(field: &mut Field) {
     }
     let avg_support = if n_recurrent > 0 { recurrent_support / n_recurrent as f32 } else { 0.0 };
 
-    // Ignition drempel: winnaar-score × recurrente support > threshold
-    // v2.5: verlaagd van 5.0 naar 1.5 — oude drempel was onbereikbaar
-    // Met typische phi_norm ~0.1-1.0 en noise_amplitude ~0.05-0.15,
-    // was 5.0 × 0.15 = 0.75 onhaalbaar. Nu: 1.5 × 0.15 = 0.225.
-    let ignition_threshold = field.noise_amplitude * 1.5;
+    // v2.5.2: Ignition triggert als er een winnaar IS met recurrente support
+    // Was: absolute threshold (noise*1.5) die nooit bereikt werd
+    // Nu: als er minstens 1 kandidaat is EN die heeft recurrente buren, ignite
+    // De STERKTE van de ignition schaalt met de score (zwakke ignition = kort broadcast)
     let ignition_product = winner_score * (1.0 + avg_support);
+    let has_recurrent = n_recurrent > 0;
 
-    if ignition_product < ignition_threshold {
-        // Onder drempel: geen ignition, alleen zwakke pre-bewuste verwerking
+    if !has_recurrent || winner_score < 0.001 {
+        // Geen recurrente support of score verwaarloosbaar → geen ignition
         field.ignition_active = false;
         let fe = field.fe_tracking_rate;
         field.ignition_strength = (1.0 - fe) * field.ignition_strength;
