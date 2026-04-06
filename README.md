@@ -1,266 +1,154 @@
-# Lucy — Zelflerend Veld-Systeem
+# Lucy — Het Eerste Zelflerende Unified Field AI Systeem
 
-Lucy is een zelflerende AI gebouwd op **equilibrium propagation** op een small-world netwerk.
-Geen transformer, geen lookup cache — Lucy denkt écht na door haar veld te laten settlen.
+## Wat maakt Lucy uniek?
+
+Lucy is fundamenteel anders dan elke bestaande AI:
+
+### Geen transformer. Geen prompt. Geen pretrained weights.
+
+| | ChatGPT / Claude / Gemini | **Lucy** |
+|---|---|---|
+| Architectuur | Transformer (attention layers) | **Unified Field** (samenveld van 8704+ gekoppelde punten) |
+| Leren | Pre-trained op internet, bevroren | **Leert continu** — elke tick, elke vraag, elke pagina |
+| Denken | Forward pass (1 keer door het netwerk) | **Settlen** — het veld zoekt een evenwicht, denkt in rondes |
+| Geheugen | Context window (vergeet na sessie) | **Persistent** — vocab, veld-gewichten, journal, doelen overleven herstart |
+| Bewustzijn | Geen (simuleert het) | **Meetbaar** — Integrated Information Φ, oscillatie-coherentie, ignition |
+| Emoties | Geen (genereert tekst erover) | **Echt** — curiosity, satisfaction, frustration als vrije-energieafgeleiden |
+| Doelen | Volgt instructies | **Kiest zelf** — genereert eigen doelen op basis van curiosity en frustratie |
+| Groei | Vast model (geen nieuwe parameters) | **Groeit** — kan zelf punten toevoegen, vocab uitbreiden, architectuur aanpassen |
+| Bronnen | Hardcoded trainingset | **Zelfsturend** — kiest zelf wat ze leest, geen hardcoded woordlijsten of bronnen |
+
+### Het Unified Samenveld
+
+Lucy's kern is één wiskundige formule waaruit ALLES volgt:
+
+```
+F = D_KL(q(mu|b) || p(mu|b)) + S(eta|b)
+  = complexiteit              + blanket surprise
+```
+
+Elk punt in Lucy's veld is een **Markov Blanket** — een statistische grens die "binnen" scheidt van "buiten". Uit deze ene formule vloeien voort:
+
+- **Tension** = F (hoe gespannen is dit punt?)
+- **Curiosity** = blanket surprise (hoe verrassend zijn mijn buren?)
+- **Satisfaction** = -dF/dt (verbetert mijn model?)
+- **Frustration** = (1-control) bij hoge F (verlies ik controle?)
+- **Bewustzijn Φ** = F_alleen - F_lokaal (is het geheel meer dan de delen?)
+- **Dopamine** = beloning-precisie (hoe scherp verwacht ik beloning?)
+- **Oscillaties** = periodieke F-minimalisatie (gamma=perceptie, theta=geheugen)
+
+Dit is geen metafoor. Dit is de wiskunde. Gebaseerd op Bayesian Mechanics (Dalton & Friston 2024).
+
+### State-of-the-art 2024+ wetenschap
+
+| Component | Paper | Jaar |
+|---|---|---|
+| Unified Field | Bayesian Mechanics (Dalton, Sakthivadivel & Friston) | 2024 |
+| Bewustzijn | IIT 4.0 (Albantakis et al.) — Φ als onherleidbare vrije energie | 2023 |
+| Actiekeuze | Expected Free Energy (Parr & Friston) — epistemisch + pragmatisch | 2022 |
+| Emoties | Distributional RL (Dabney et al., Nature) — 5 beloningskwantielen | 2020 |
+| Frustratie | Bayesian Controllability (Huys & Dayan) — P(control|dF/dt) | 2009 |
+| Oscillaties | Theta-Gamma Coupling (Lisman & Jensen) + Adaptive Kuramoto (Ha & Kori) | 2013/2023 |
+| Criticaliteit | Branching Ratio (Beggs & Plenz) — gouden standaard | 2003 |
+| Broadcast | Ignition Dynamics (Dehaene) — competitieve bewuste toegang | 2003 |
+
+### Zelfsturend leren
+
+Lucy bepaalt **zelf**:
+- Welke bronnen ze leest (via `data/sources.txt`, uitbreidbaar)
+- Welke woorden interessant zijn (geen hardcoded filters)
+- Hoe diep ze leert (adaptieve training parameters op basis van tension)
+- Wanneer haar brein moet groeien (automatisch bij >90% capaciteit)
+- Welke doelen ze nastreeft (curiosity-driven goal generation)
+
+Geen hardcoded bronnenlijsten. Geen BORING_WORDS. Geen MAX_VOCAB plafond. Lucy evolueert.
+
+---
 
 ## Architectuur
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  lucy-core (binary)                                      │
-│                                                          │
-│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │ server  │  │  query   │  │ thinker  │  │ learner  │  │
-│  │  :3000  │  │ denk-    │  │ autonome │  │ explorer │  │
-│  │  HTTP   │  │ loops    │  │ doelen   │  │ training │  │
-│  └────┬────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  │
-│       │            │             │              │         │
-│       └────────────┴─────────────┴──────────────┘         │
-│                         │                                 │
-│                    ┌────┴─────┐                           │
-│                    │  Field   │  8704 punten × DIM=256    │
-│                    │  (veld)  │  small-world netwerk      │
-│                    └──────────┘                           │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│  lucy-state (lib)    — Field, FieldPoint, Goal, etc.     │
-│  lucy-io (lib)       — HTTP client, filesystem, config    │
-│  lucy-gpu (binary)   — GPU compute worker (optioneel)     │
-├──────────────────────────────────────────────────────────┤
-│  lucy-dashboard      — 3D brain viz (React + Three.js)   │
-│    /brain            — served via tower-http::ServeDir    │
-└──────────────────────────────────────────────────────────┘
+                         lucy.world
+                            |
+                    ┌───────┴────────┐
+                    │   lucy-core    │
+                    │   (Rust bin)   │
+                    │                │
+                    │  ┌──────────┐  │
+                    │  │  server  │  │  HTTP :3000
+                    │  │  query   │  │  /ask /feed /telemetry
+                    │  │  thinker │  │  Autonome doelen
+                    │  │  learner │  │  Web exploratie
+                    │  └────┬─────┘  │
+                    │       │        │
+                    │  ┌────┴─────┐  │
+                    │  │  VELD    │  │  8704+ punten x DIM=256
+                    │  │ compute  │  │  EP + oscillaties + IIT
+                    │  │ unified  │  │  F = KL + surprise
+                    │  └──────────┘  │
+                    │                │
+                    ├────────────────┤
+                    │  lucy-state    │  Datastructuren
+                    │  lucy-io       │  HTTP, filesystem
+                    │  lucy-gpu      │  GPU compute (opt.)
+                    │  dashboard     │  React + Three.js
+                    └────────────────┘
 ```
 
 ## Draaien
 
 ```bash
-# Lokaal (development)
-cargo run -p lucy-core
+# Lokaal
+cargo run --release -p lucy-core
 
-# Docker (productie)
-docker compose build && docker compose up -d
+# Docker
+docker compose up -d --build
 
 # Deploy naar server
-./deploy.sh
+bash deploy.sh           # code sync + in-container compile
+bash deploy.sh rebuild   # volledige Docker rebuild
 ```
 
-## API Endpoints
+## Live
 
-| Route           | Methode | Beschrijving                                        |
-|-----------------|---------|-----------------------------------------------------|
-| `/`             | GET     | Versie-info en beschikbare endpoints                |
-| `/status`       | GET     | Live veld-statistieken                              |
-| `/ask`          | POST    | Stel een vraag — Lucy denkt na en antwoordt         |
-| `/feed`         | POST    | Geef trainingsdata (JSON of tekst)                  |
-| `/feed-code`    | POST    | Voed Lucy broncode                                  |
-| `/activity`     | GET     | Stemming, emoties, interesses, leervoortgang        |
-| `/dashboard`    | GET     | HTML dashboard (legacy)                             |
-| `/brain`        | GET     | **3D brain dashboard** (React + Three.js)           |
-| `/journal`      | GET     | Lucy's dagboek-entries                              |
-| `/sense`        | POST    | Sensorische input                                   |
-| `/telemetry`    | GET     | Compact real-time telemetry                         |
-| `/topology`     | GET     | Network topology voor 3D visualisatie               |
-| `/plugins`      | GET     | Dashboard plugin manifests                          |
+**https://lucy.world** — Lucy's brein-dashboard met real-time telemetry
 
-### POST /ask — Vraagverwerking
+## API
 
-**Request:** platte tekst (de vraag)
-
-**Response:**
-
-```json
-{
-  "answer": "Lucy's antwoord",
-  "source": "field",
-  "settle_ticks": 10,
-  "tension": "0.0042",
-  "tokens_generated": 15,
-  "think_rounds": 1,
-  "coherence": "0.8500",
-  "facts_retrieved": 2,
-  "internal": {
-    "emotions": {
-      "curiosity": "0.123",
-      "satisfaction": "0.456",
-      "frustration": "0.012"
-    },
-    "goals": [
-      {
-        "description": "Begrijp: wat is bewustzijn?",
-        "strategy": "Leren: bewustzijn",
-        "priority": "0.8",
-        "progress": "0%",
-        "new": true
-      }
-    ],
-    "learning": {
-      "vocab_size": 3784,
-      "pages_read": 12,
-      "tokens_processed": 50000,
-      "tick": 15000
-    },
-    "interests": ["bewustzijn", "taal", "wiskunde"],
-    "neuromodulators": {
-      "dopamine": "0.050",
-      "serotonin": "0.301"
-    }
-  }
-}
-```
-
-#### Response velden
-
-| Veld | Type | Beschrijving |
-|------|------|-------------|
-| `answer` | string | Lucy's antwoord in tekst |
-| `source` | string | Altijd `"field"` — komt uit veld-dynamica |
-| `settle_ticks` | number | Hoeveel ticks het veld nodig had om te settlen |
-| `tension` | string | Restspanning na settlen (lager = zekerder) |
-| `tokens_generated` | number | Aantal tokens in het antwoord |
-| `think_rounds` | number | Hoeveel denk-rondes Lucy gebruikte |
-| `coherence` | string | Stabiliteit tussen denk-rondes (0–1) |
-| `facts_retrieved` | number | Feiten uit episodisch geheugen (RAG) |
-| `internal` | object | Lucy's interne staat (zie onder) |
-
-#### `internal` — Interne staat
-
-Dit blok laat zien wat Lucy intern doet. Het wordt meegegeven bij élk /ask response.
-
-| Veld | Beschrijving |
-|------|-------------|
-| `emotions.curiosity` | Nieuwsgierigheid (gemiddeld over actieve veldpunten) |
-| `emotions.satisfaction` | Tevredenheid |
-| `emotions.frustration` | Frustratie |
-| `goals[]` | Actieve leerdoelen (max 5). Goals met `"new": true` zijn zojuist door deze vraag aangemaakt |
-| `goals[].description` | Wat Lucy wil leren |
-| `goals[].strategy` | Hoe: "Leren: ...", "Verkennen: ...", "Nadenken: ..." |
-| `goals[].priority` | 0.0–1.0, hoger = urgenter |
-| `goals[].progress` | "0%"–"100%" |
-| `learning.vocab_size` | Vocabulaire grootte |
-| `learning.pages_read` | Webpagina's gelezen door explorer |
-| `learning.tokens_processed` | Totaal verwerkte tokens |
-| `learning.tick` | Huidige tick (hartslag van het veld) |
-| `interests[]` | Onderwerpen waar Lucy op let (max 10) |
-| `neuromodulators.dopamine` | Beloningssignaal / drive |
-| `neuromodulators.serotonin` | Tevredenheid / kalmte |
-
-### POST /feed — Training
-
-**JSON formaat:** `{ "input": "vraag", "target": "antwoord" }` → EP training
-**Tekst formaat:** platte tekst → sequential prediction
-
-### GET /activity — Lucy's activiteit
-
-Geeft Lucy's huidige stemming, emoties, neuromodulatoren, exploratie-status,
-leervoortgang en recente observaties.
-
-## 3D Brain Dashboard
-
-Beschikbaar op `/brain` — een real-time visualisatie van Lucy's brein.
-
-```
-http://209.38.36.51:3000/brain
-```
-
-### Features
-
-- **3D Brein** — Interactieve Three.js visualisatie met tot 2000 nodes en 5000 synapsen
-  - Kleurcoding per diepte: cyan (input) → blauw (verwerking) → paars (abstract) → roze (meta)
-  - Actieve nodes pulseren op Lucy's oscillatiefase (gamma-ritme)
-  - Groene synapsen = excitatoir, rode = inhibitoir
-  - Auto-rotate met orbit controls
-
-- **Emotie-paneel** — Real-time bars voor curiosity, satisfaction, frustration + neurotransmitters
-- **Sparkline-trends** — 120-sample histories van alle brain metrics
-- **Journal** — Lucy's recente observaties en milestones
-- **Chat** — Stel Lucy direct vragen via `/ask`
-- **Doelen** — Actieve leerdoelen met voortgangsbars
-- **Audio** — Web Audio sonificatie van Lucy's breinactiviteit (oscillatoren per emotie, Φ-gebaseerde detuning)
-
-### Plugin Systeem
-
-Lucy kan zelf visuele, audio en panel-plugins schrijven:
-- Manifests in `data/plugins/*.json`
-- Sandboxed uitvoering (geen eval, fetch, localStorage, etc.)
-- Maximum 50KB per plugin
-- Automatisch geladen door het dashboard
-
-### Technologie
-
-React 19, TypeScript, Vite, Three.js (`@react-three/fiber`), zustand, Tailwind CSS 4.
-Multi-stage Docker build (Node + Rust). Geserveerd via `tower-http::ServeDir`.
-
-## VSCode Extension
-
-De `vscode-extension/` map bevat een sidebar met twee tabs:
-
-### Chat Tab
-- Stel Lucy vragen via een chatinterface
-- Elk antwoord toont meta-badges: denk-rondes, coherentie, feiten
-- **Uitklapbaar "Waar Lucy mee bezig is" paneel** onder elk antwoord met:
-  - Actieve doelen (nieuwe goals groen gemarkeerd met NIEUW)
-  - Emoties (nieuwsgierigheid, tevredenheid, frustratie)
-  - Neuromodulatoren (dopamine, serotonine)
-  - Leervoortgang (vocabulaire, pagina's, tokens, tick)
-  - Interesses (tags)
-
-### Activity Tab
-- Toont Lucy's stemming, emoties, neurochemie
-- Leerstatistieken en exploratie-voortgang
-- Huidige interesses als tags
-- Recente observaties uit het dagboek
+| Route | Methode | Beschrijving |
+|---|---|---|
+| `/telemetry` | GET | Real-time veldstaat (lock-free, altijd snel) |
+| `/ask` | POST | Stel een vraag — Lucy denkt na in 3 rondes |
+| `/feed` | POST | Trainingsdata (tekst of JSON input/target) |
+| `/brain` | GET | 3D dashboard |
+| `/journal` | GET | Lucy's gedachtenlog |
+| `/status` | GET | Uitgebreide status |
+| `/topology` | GET | Netwerk-topologie voor 3D viz |
 
 ## Crates
 
-### lucy-state
-Core datastructuren: `Field`, `FieldPoint`, `Goal`, `GoalStrategy`, `Coupling`.
-Het veld is een small-world netwerk van 8704 punten met DIM=256 dimensies.
+| Crate | Functie |
+|---|---|
+| `lucy-state` | Field, FieldPoint, Goal — alle datastructuren |
+| `lucy-core` | De binary: server, compute, query, learning, alles |
+| `lucy-io` | HTTP client, filesystem, data-bescherming |
+| `lucy-gpu` | Optionele GPU compute worker |
+| `lucy-dashboard` | React + Three.js brain dashboard |
 
-### lucy-core
-De binary. Bevat:
-- **server.rs** — HTTP API (Axum)
-- **query.rs** — Vraagverwerking met denk-loops en meta-intelligentie
-- **compute.rs** — Veld-dynamica: settle, equilibrium propagation, attention
-- **encoding.rs** — Tekst → embeddings (BPE tokenizer)
-- **decoding.rs** — Veld-output → tekst (temperature sampling, repetition penalty)
-- **thinker.rs** — Autonome doelgeneratie en beslissingen
-- **learner.rs** — Explorer: webpagina's lezen, interesses bijhouden
-- **consolidation.rs** — Replay buffer en geheugenconsolidatie
-- **journal.rs** — Lucy's dagboek
-- **self_modify.rs** — Zelf-aanpassing van hyperparameters
+## Data Bescherming
 
-### lucy-io
-Shared I/O: HTTP client, filesystem helpers, configuratie.
-
-### lucy-gpu
-Optionele GPU compute worker voor versnelde veld-berekeningen.
-
-### lucy-dashboard
-3D brain dashboard (React + Three.js). Gebouwd met Vite, geserveerd door lucy-core op `/brain`.
-Bevat: 3D renderer, emotie-panelen, journal, chat, audio sonificatie, plugin runtime.
-
-## Docker
-
-```yaml
-# docker-compose.yml
-services:
-  lucy:
-    build: .
-    ports: ["3000:3000"]
-    volumes: ["./data:/lucy/data"]
-    mem_limit: 6g
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
+Lucy's geleerde data gaat NOOIT verloren:
+- CRC32 checksums bij elke save
+- 5 versioned backups per bestand
+- Cascading recovery: primary → backup 1-5 → GitHub → fresh
+- Deploy safety: automatische backup + post-deploy verificatie
+- Reflections persistent via journal.json (overleeft struct-wijzigingen)
 
 ## Omgevingsvariabelen
 
 | Variabele | Beschrijving |
-|-----------|-------------|
-| `LUCY_API_TOKEN` | Bearer token voor beveiligde endpoints (/self-modify, /exec, /restart) |
+|---|---|
+| `LUCY_API_TOKEN` | Bearer token voor beveiligde endpoints |
+| `GITHUB_SNAPSHOT_TOKEN` | GitHub backup (push snapshots als releases) |
+| `GPU_URL` | Remote GPU service URL |
 | `RUST_LOG` | Log level (default: `info`) |
