@@ -87,6 +87,16 @@ pub fn process_query(
     // v0.9+: Clear working memory — schoon scratchpad per vraag
     compute::init_working_memory(field);
 
+    // v2.5: Leer van ELKE interactie — de vraag zelf is trainingsdata
+    // Lucy absorbeert de woorden en patronen in de vraag.
+    // Dit is hoe een mens ook leert: door te luisteren naar wat anderen zeggen.
+    if embeddings.len() >= 4 {
+        let mid = embeddings.len() / 2;
+        let input_embs: Vec<[f32; DIM]> = embeddings[..mid].to_vec();
+        let target_embs: Vec<[f32; DIM]> = embeddings[mid..].to_vec();
+        compute::micro_ep(field, &input_embs, &target_embs);
+    }
+
     // v1.3: Feiten worden nu vóór spawn_blocking opgehaald (scheelt ~120MB per query)
     let mut all_embeddings = Vec::new();
     let facts_retrieved = facts.len();
@@ -96,6 +106,14 @@ pub fn process_query(
     }
     if facts_retrieved > 0 {
         tracing::debug!(facts = facts_retrieved, "Lucy herinnert zich relevante feiten");
+        // v2.5: Leer van opgehaalde feiten — context wordt trainingsdata
+        // De feiten zijn het beste wat Lucy al weet → versterk die kennis
+        if all_embeddings.len() >= 4 {
+            let mid = all_embeddings.len() / 2;
+            let input_embs: Vec<[f32; DIM]> = all_embeddings[..mid].to_vec();
+            let target_embs: Vec<[f32; DIM]> = all_embeddings[mid..].to_vec();
+            compute::micro_ep(field, &input_embs, &target_embs);
+        }
     }
 
     // Voeg de vraag-embeddings toe na de context
