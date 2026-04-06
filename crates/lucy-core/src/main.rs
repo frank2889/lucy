@@ -690,27 +690,42 @@ async fn main() {
                     compute::update_oscillations(&mut field);
                 }
 
-                // v2.6: Verwerk max 20 chunks per tick (was 1-5 → queue overflow)
-                // Elke 10e chunk: full EP ipv micro (hidden layer leert mee)
+                // v2.6: Training — NOOIT lege ticks
+                // Als queue items heeft: verwerk max 20 chunks
+                // Als queue LEEG is: replay oud voorbeeld (consolidatie)
+                // Effect: ELKE tick leert Lucy iets, nooit nul-gradient
                 {
-                    let batch = training_queue.len().min(20);
-                    let ep_beta = field.adaptive.ep_beta; // kopieer voor borrow checker
-                    let mut chunk_count = 0u32;
-                    for _ in 0..batch {
-                        if let Some(chunk) = training_queue.pop() {
-                            chunk_count += 1;
-                            if chunk_count % 10 == 0 && chunk.input_embs.len() >= 4 {
-                                let _delta = compute::equilibrium_propagation(
-                                    &mut field, &chunk.input_embs, &chunk.target_embs,
-                                    1, 10, ep_beta,
-                                );
-                            } else {
-                                let _delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
+                    let queue_len = training_queue.len();
+                    if queue_len > 0 {
+                        // Verwerk nieuwe data
+                        let batch = queue_len.min(20);
+                        let ep_beta = field.adaptive.ep_beta;
+                        let mut chunk_count = 0u32;
+                        for _ in 0..batch {
+                            if let Some(chunk) = training_queue.pop() {
+                                chunk_count += 1;
+                                if chunk_count % 10 == 0 && chunk.input_embs.len() >= 4 {
+                                    let _delta = compute::equilibrium_propagation(
+                                        &mut field, &chunk.input_embs, &chunk.target_embs,
+                                        1, 10, ep_beta,
+                                    );
+                                } else {
+                                    let _delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
+                                }
+                            } else { break; }
+                        }
+                        if chunk_count > 0 && tick % 1000 == 0 {
+                            tracing::info!(chunks = chunk_count, queue = training_queue.len(), "Training: nieuwe data");
+                        }
+                    } else {
+                        // Queue leeg → replay oud voorbeeld via consolidatie
+                        // Dit voorkomt nul-gradient ticks: Lucy leert ALTIJD
+                        // Elke 5e lege tick: replay (niet elke tick, te duur)
+                        if tick % 5 == 0 {
+                            if let Ok(mut replay) = shared.replay.try_write() {
+                                let _ = replay.replay_one(&mut field);
                             }
-                        } else { break; }
-                    }
-                    if chunk_count > 0 && tick % 1000 == 0 {
-                        tracing::info!(chunks = chunk_count, queue = training_queue.len(), "Training batch");
+                        }
                     }
                 }
 
@@ -1053,9 +1068,8 @@ async fn main() {
         }
 
         // v2.6: BPE periodiek bijleren — vocab groeit met nieuwe domeinen
-        // Was: alleen bij bootstrap (vocab bevroren op source code)
-        // Nu: elke 50K ticks, leer nieuwe BPE merges van recent gelezen tekst
-        if tick % 50_000 == 0 && tick > 0 {
+        // v2.6: BPE bijleren elke 10K ticks (was 50K — vocab groeide nooit)
+        if tick % 10_000 == 0 && tick > 0 {
             let recent_text = fs.read_own_source().unwrap_or_default()
                 .into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(" ");
             if recent_text.len() > 100 {
