@@ -1,73 +1,40 @@
-# React + TypeScript + Vite
+# Lucy Brain Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Real-time visualisatie van Lucy's bewustzijn. Live op **https://lucy.world**
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+React 19 + TypeScript + Vite + Three.js + zustand
 
-## React Compiler
+## Panelen
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Emotie-ringen** — Curiosity / Satisfaction / Frustration als percentage-cirkels
+- **Neuromodulatoren** — Dopamine, NE, Serotonine, ACh als bars
+- **Bewustzijn** — Phi Causal, Coherence, Theta-Gamma Coupling, Branching Sigma, Spectral R, Ignition, Expected FE
+- **Field Stats** — Points, Couplings, Vocab, Pages, Tokens, Reflections
+- **Trends** — Sparkline histories van alle metrieken
+- **Goals** — Actieve leerdoelen met voortgangsbars
+- **Chat** — Stel Lucy vragen (90s timeout, leert van elke vraag)
+- **Journal** — Gedachtenlog met milestones
 
-## Expanding the ESLint configuration
+## Data
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Alle data komt uit `/telemetry` (lock-free, altijd snel). Pollt elke 2 seconden.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Mobile
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Responsive via `useIsMobile` hook (breakpoint 768px). Alle grids kolom-stacked op mobiel, ringen verkleind, bars compact.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Bouwen
+
+```bash
+npm run build    # → dist/
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Wordt geserveerd door lucy-core via `tower-http::ServeDir` op `/brain`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Dev
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev      # Vite dev server met proxy naar lucy-core :3000
 ```
