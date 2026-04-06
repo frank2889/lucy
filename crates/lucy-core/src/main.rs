@@ -249,11 +249,12 @@ async fn main() {
         let _ = std::fs::write(bootstrap_marker, b"done");
     }
 
-    // Seed API discovery — Lucy vindt zelf welke APIs en data er bestaan
-    explorer.seed_api_discovery();
-    // Laad APIs die Lucy zelf eerder heeft ontdekt en opgeslagen
+    // v2.5: Seed diverse bronnen (uit data/sources.txt) + diversifieer frontier
+    explorer.seed_api_discovery(); // leest uit sources.txt (niet meer hardcoded)
     explorer.load_self_managed_apis();
-    tracing::info!(frontier = explorer.frontier.len(), "API discovery sources seeded");
+    // Schoon de frontier op: max 20% per domein (breekt API-monoculture)
+    explorer.diversify_frontier();
+    tracing::info!(frontier = explorer.frontier.len(), interests = explorer.interests.len(), "Exploration bronnen geladen + gediversifieerd");
 
     // === v0.7: Initialiseer bewustzijns-systemen ===
     compute::init_rnd(&mut field);

@@ -46,7 +46,7 @@ use lucy_io::http::HttpClient;
 use crate::encoding::Vocabulary;
 use crate::compute;
 use rand::Rng;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lucy's autonome ontdekkingssysteem.
 /// Ze kiest ZELF waar ze leert. Geen hardcoded bronnen.
@@ -90,6 +90,33 @@ impl Explorer {
     pub fn visited_cleanup(&self) -> usize {
         self.frontier_max()
     }
+
+    /// v2.5: Diversifieer de frontier — voorkom domein-monoculture
+    /// Elk domein mag maximaal 20% van de frontier beslaan.
+    /// Over-vertegenwoordigde domeinen worden getrimd.
+    pub fn diversify_frontier(&mut self) {
+        if self.frontier.len() < 20 { return; }
+
+        let max_per_domain = self.frontier.len() / 5; // max 20%
+        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+        let mut keep: VecDeque<String> = VecDeque::new();
+
+        for url in self.frontier.drain(..) {
+            let domain = extract_domain(&url);
+            let count = domain_counts.entry(domain).or_default();
+            if *count < max_per_domain {
+                *count += 1;
+                keep.push_back(url);
+            }
+            // Anders: URL wordt gedropt (te veel van dit domein)
+        }
+
+        let trimmed = self.frontier.len().saturating_sub(keep.len());
+        self.frontier = keep;
+        if trimmed > 0 {
+            tracing::info!(trimmed, remaining = self.frontier.len(), "Frontier gediversifieerd");
+        }
+    }
 }
 
 impl Explorer {
@@ -103,13 +130,71 @@ impl Explorer {
         }
     }
 
-    /// Lucy kiest zelf de volgende URL of genereert er een
+    /// Lucy kiest zelf de volgende URL — curiosity-gedreven
+    /// v2.5: Niet FIFO maar DIVERS:
+    /// - Elke 3e URL: verse bron uit sources.txt (doorbreekt loops)
+    /// - Andere URLs: kies de URL met het MEEST ONBEKENDE domein
+    ///   (domein dat ze het minst bezocht heeft = meeste novelty)
+    /// - Frontier leeg: genereer vanuit interests
     pub fn next_url(&mut self) -> Option<String> {
-        if let Some(url) = self.frontier.pop_front() {
-            return Some(url);
+        self.pages_read += 0; // trigger type check
+
+        // Elke 3e pagina: verse bron uit sources.txt (diversiteitsgarantie)
+        if self.pages_read % 3 == 0 {
+            if let Some(url) = self.fresh_source_url() {
+                return Some(url);
+            }
         }
-        // Frontier leeg → genereer een zoekopdracht vanuit wat ze weet
-        self.generate_curiosity_url()
+
+        if self.frontier.is_empty() {
+            return self.generate_curiosity_url();
+        }
+
+        // Kies URL met het meest onbekende domein (niet FIFO!)
+        // Tel hoe vaak elk domein al bezocht is
+        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+        for visited in &self.visited {
+            let domain = extract_domain(visited);
+            *domain_counts.entry(domain).or_default() += 1;
+        }
+
+        // Zoek de frontier-URL waarvan het domein het MINST bezocht is
+        let mut best_idx = 0;
+        let mut best_score = usize::MAX;
+        for (i, url) in self.frontier.iter().enumerate() {
+            let domain = extract_domain(url);
+            let count = domain_counts.get(&domain).copied().unwrap_or(0);
+            if count < best_score {
+                best_score = count;
+                best_idx = i;
+            }
+        }
+
+        self.frontier.remove(best_idx)
+    }
+
+    /// Haal een verse URL uit sources.txt (de diverse bronnen)
+    fn fresh_source_url(&mut self) -> Option<String> {
+        let path = std::path::Path::new("data/sources.txt");
+        if !path.exists() { return None; }
+        let content = std::fs::read_to_string(path).ok()?;
+        let sources: Vec<&str> = content.lines()
+            .filter(|l| l.starts_with("http"))
+            .collect();
+        if sources.is_empty() { return None; }
+
+        // Kies random bron die niet recent bezocht is
+        use rand::Rng;
+        let mut rng = rand::rng();
+        for _ in 0..10 { // max 10 pogingen
+            let idx = rng.random_range(0..sources.len());
+            let url = sources[idx].trim().to_string();
+            if !self.visited.contains(&url) {
+                return Some(url);
+            }
+        }
+        // Alle sources bezocht → geef toch een (voor random Wikipedia = altijd nieuw)
+        Some(sources[rng.random_range(0..sources.len())].trim().to_string())
     }
 
     /// Lucy genereert zelf een URL vanuit haar interesses
@@ -833,4 +918,15 @@ pub fn extract_readable_text(body: &str) -> String {
     clean.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Extract domein uit URL (bijv. "https://en.wikipedia.org/wiki/Foo" → "en.wikipedia.org")
+fn extract_domain(url: &str) -> String {
+    url.split("//")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
 }
