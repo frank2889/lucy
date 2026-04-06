@@ -1,27 +1,29 @@
 import { useStore } from '../store';
+import { useIsMobile } from '../hooks/useIsMobile';
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+function Stat({ label, value, color, compact }: { label: string; value: string; color?: string; compact?: boolean }) {
   return (
-    <div className="card" style={{ padding: '16px 20px' }}>
-      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>{label}</div>
-      <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: color ?? 'var(--text-primary)' }}>{value}</div>
+    <div className="card" style={{ padding: compact ? '10px 12px' : '16px 20px' }}>
+      <div style={{ fontSize: compact ? 11 : 12, color: 'var(--text-secondary)', marginBottom: 2 }}>{label}</div>
+      <div className="mono" style={{ fontSize: compact ? 16 : 22, fontWeight: 700, color: color ?? 'var(--text-primary)' }}>{value}</div>
     </div>
   );
 }
 
 export default function FieldStats() {
-  const s = useStore((s) => s.status);
   const t = useStore((s) => s.telemetry);
-  if (!s && !t) return null;
+  const mobile = useIsMobile();
+  if (!t) return null;
 
+  // v2.5: Alles uit /telemetry (lock-free, altijd beschikbaar)
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 16 }}>
-      <Stat label="Points" value={s?.field?.points?.toLocaleString() ?? t?.points?.toLocaleString() ?? '-'} />
-      <Stat label="Couplings" value={s?.field?.couplings?.toLocaleString() ?? '-'} />
-      <Stat label="Vocabulary" value={s?.vocabulary?.size?.toLocaleString() ?? '-'} color="var(--blue)" />
-      <Stat label="Pages Read" value={s?.explorer?.pages_read?.toString() ?? '-'} color="var(--green)" />
-      <Stat label="Tokens" value={s?.explorer?.tokens_processed?.toLocaleString() ?? '-'} />
-      <Stat label="Reflections" value={s?.self_modification?.reflection_count?.toString() ?? '-'} color="var(--purple)" />
+    <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)', gap: mobile ? 8 : 16 }}>
+      <Stat label="Points" value={(t.points ?? 0).toLocaleString()} compact={mobile} />
+      <Stat label="Couplings" value={(t as any).couplings?.toLocaleString() ?? '-'} compact={mobile} />
+      <Stat label="Vocab" value={(t as any).vocab_size?.toLocaleString() ?? '-'} color="var(--blue)" compact={mobile} />
+      <Stat label="Pages" value={(t as any).pages_read?.toLocaleString() ?? '-'} color="var(--green)" compact={mobile} />
+      <Stat label="Tokens" value={(t as any).tokens_processed?.toLocaleString() ?? '-'} compact={mobile} />
+      <Stat label="Reflect" value={(t as any).reflection_count?.toLocaleString() ?? '-'} color="var(--purple)" compact={mobile} />
     </div>
   );
 }

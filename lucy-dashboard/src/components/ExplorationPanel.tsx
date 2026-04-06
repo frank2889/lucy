@@ -1,16 +1,18 @@
 import { useStore } from '../store';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 export default function ExplorationPanel() {
   const activity = useStore((s) => s.activity);
+  const mobile = useIsMobile();
   if (!activity) return null;
 
   const interests = (activity.exploring?.current_interests ?? [])
     .filter((s) => /^[\x20-\x7E]+$/.test(s) && s.length < 30);
 
   return (
-    <div className="card" style={{ padding: 20 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 16 }}>Exploration</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, textAlign: 'center', marginBottom: interests.length > 0 ? 16 : 0 }}>
+    <div className="card" style={{ padding: mobile ? 12 : 20 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 12 }}>Exploration</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, textAlign: 'center', marginBottom: interests.length > 0 ? 12 : 0 }}>
         <div>
           <div className="mono" style={{ fontSize: 18, fontWeight: 700, color: 'var(--blue)' }}>{(activity.exploring?.pages_read ?? 0).toLocaleString()}</div>
           <div style={{ fontSize: 12, color: 'var(--text-disabled)' }}>Pages</div>

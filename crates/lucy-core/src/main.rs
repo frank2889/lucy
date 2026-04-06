@@ -553,6 +553,11 @@ async fn main() {
         // v2.3: adapt_dynamics — update ALLE dynamische parameters op basis van veldstaat
         if tick == 0 || tick % 50 == 0 {
             compute::adapt_dynamics(&mut field);
+            // v2.5: Sync explorer stats naar field (lock-free access voor dashboard)
+            if let Ok(exp) = shared.explorer.try_read() {
+                field.pages_read = exp.pages_read;
+                field.tokens_processed = exp.tokens_processed;
+            }
             // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
             field_snapshot.store(Arc::new(field.clone()));
             vocab_snapshot.store(Arc::new(vocab.clone()));

@@ -1050,12 +1050,26 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
         f.active_set.iter().map(|&id| f.points[id as usize].tension).sum::<f32>() / n
     } else { 0.0 };
 
+    // v2.5: Alles uit Field snapshot (lock-free via ArcSwap)
+    let vocab_size = state.vocab.try_read().map(|v| v.vocab_size()).unwrap_or(0);
+    let pages_read = f.pages_read;         // gesync'd vanuit explorer elke 50 ticks
+    let tokens_processed = f.tokens_processed;
+    let n_couplings: usize = f.active_set.iter()
+        .map(|&id| f.points[id as usize].couplings.len())
+        .sum();
+
     Json(json!({
         "tick": f.tick,
         "phase": format!("{:?}", f.phase),
         "points": f.points.len(),
         "active": f.active_set.len(),
         "tension": avg_tension,
+        // v2.5: field stats direct in telemetry (geen /status nodig)
+        "vocab_size": vocab_size,
+        "pages_read": pages_read,
+        "tokens_processed": tokens_processed,
+        "couplings": n_couplings,
+        "reflection_count": f.reflection_count,
         "emotions": {
             "curiosity": avg_curiosity,
             "satisfaction": avg_satisfaction,

@@ -587,6 +587,13 @@ pub struct Field {
     /// Goal history — voltooide/verlaten doelen informeren toekomstige keuzes
     #[serde(default)]
     pub goal_history: Vec<GoalOutcome>,
+
+    // v2.5: Explorer stats in Field (lock-free access via ArcSwap snapshot)
+    // Bijgewerkt vanuit main.rs tick loop na elke exploration
+    #[serde(default)]
+    pub pages_read: u64,
+    #[serde(default)]
+    pub tokens_processed: u64,
 }
 
 /// v1.0: Parameters die Lucy zelf aanpast — geen hardcoded magic numbers meer.
@@ -929,6 +936,8 @@ impl Field {
             temporal_history: Vec::new(),
             causal_log: Vec::new(),
             goal_history: Vec::new(),
+            pages_read: 0,
+            tokens_processed: 0,
         }
     }
 

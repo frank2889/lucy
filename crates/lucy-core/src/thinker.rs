@@ -287,14 +287,32 @@ pub fn reflect(
 
         let age = tick.saturating_sub(goal.created_tick);
 
-        // Exploration goals: progress wordt extern bijgewerkt via update_exploration_progress()
-        // Andere goals: progress op basis van velddynamica
+        // v2.5: Voltooide goals meteen opruimen
+        if goal.progress >= 1.0 {
+            completed_indices.push(i);
+            continue;
+        }
+
+        // Progress op basis van velddynamica
         let is_explore = matches!(&goal.strategy, GoalStrategy::Explore(_));
+        let is_think = matches!(&goal.strategy, GoalStrategy::Think(_));
         if !is_explore {
-            let avg_alignment = alignments[i];
-            let new_progress = (avg_alignment * 0.7 + avg_satisfaction * 0.3).min(1.0);
-            if new_progress > goal.progress {
-                goal.progress = goal.progress * 0.9 + new_progress * 0.1;
+            if is_think {
+                // v2.5: Think-goals hebben progress op basis van TIJD + tension-reductie
+                // Was: alignment-based (altijd ~0 → goal bleef op 0% hangen)
+                // Nu: leeftijd-gebaseerd + tension-trend als bonus
+                let age_progress = (age as f32 / (field.reflect_interval * 3) as f32).min(0.8);
+                let tension_bonus = if avg_satisfaction > 0.01 { 0.2 } else { 0.0 };
+                let new_progress = (age_progress + tension_bonus).min(1.0);
+                if new_progress > goal.progress {
+                    goal.progress = new_progress;
+                }
+            } else {
+                let avg_alignment = alignments[i];
+                let new_progress = (avg_alignment * 0.7 + avg_satisfaction * 0.3).min(1.0);
+                if new_progress > goal.progress {
+                    goal.progress = goal.progress * 0.9 + new_progress * 0.1;
+                }
             }
         }
 
@@ -304,9 +322,8 @@ pub fn reflect(
             completed_indices.push(i);
         }
 
-        // v2.3: Abandon drempels relatief — geen vaste tick-aantallen
-        // Age drempel = 5× reflect_interval (dynamisch)
-        let max_age = field.reflect_interval * 5;
+        // v2.5: Abandon sneller — max_age = 3× reflect_interval (was 5×)
+        let max_age = field.reflect_interval * 3;
         if age > max_age && goal.progress < 0.1 {
             abandoned_indices.push(i);
         }
