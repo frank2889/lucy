@@ -132,9 +132,10 @@ impl Explorer {
         let query = query_words.join("+");
 
         // Wissel tussen bronnen — Lucy leert van diverse plekken
-        let source = rng.random_range(0..5u32);
+        // v2.5: NL Wikipedia toegevoegd, meer diversiteit
+        let source = rng.random_range(0..7u32);
         match source {
-            // Wikipedia REST API — gestructureerde kennis, gratis, geen key
+            // EN Wikipedia REST API — gestructureerde kennis
             0 | 1 => {
                 let word = interests_vec[rng.random_range(0..interests_vec.len())];
                 Some(format!(
@@ -142,19 +143,35 @@ impl Explorer {
                     word
                 ))
             }
-            // Wikipedia zoeken — ontdek gerelateerde artikelen
+            // NL Wikipedia — Nederlands leren
             2 => {
+                let word = interests_vec[rng.random_range(0..interests_vec.len())];
+                Some(format!(
+                    "https://nl.wikipedia.org/api/rest_v1/page/summary/{}",
+                    word
+                ))
+            }
+            // Wikipedia zoeken — ontdek gerelateerde artikelen
+            3 => {
                 Some(format!(
                     "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=5",
                     query
                 ))
             }
             // DuckDuckGo Instant Answer API — snelle feiten
-            3 => {
+            4 => {
                 Some(format!(
                     "https://api.duckduckgo.com/?q={}&format=json&no_html=1",
                     query
                 ))
+            }
+            // Random Wikipedia — ontdek iets totaal nieuws
+            5 => {
+                if rng.random_range(0..2u32) == 0 {
+                    Some("https://en.wikipedia.org/wiki/Special:Random".to_string())
+                } else {
+                    Some("https://nl.wikipedia.org/wiki/Speciaal:Willekeurig".to_string())
+                }
             }
             // DuckDuckGo Lite — volledige zoekresultaten
             _ => {
@@ -167,36 +184,39 @@ impl Explorer {
     /// NIET met vaste data-URLs — Lucy ontdekt zelf welke APIs en data er bestaan.
     /// Dit zijn de "telefoonboeken" van het internet — Lucy bladert er zelf doorheen.
     pub fn seed_api_discovery(&mut self) {
-        let discovery_sources = [
-            // === API Directory's — Lucy vindt hier ZELF welke APIs er bestaan ===
-            "https://api.publicapis.org/entries?https=true", // 1400+ gratis APIs, gecategoriseerd
-            "https://raw.githubusercontent.com/public-apis/public-apis/master/README.md", // Grootste open API lijst
-            "https://apis.guru/api/v1/list.json", // OpenAPI directory — duizenden APIs met specs
+        // v2.5: ZERO hardcoded bronnen — Lucy beheert haar eigen bronnenlijst
+        //
+        // Lucy leest bronnen uit data/sources.txt (1 URL per regel).
+        // Als dat bestand niet bestaat, wordt het aangemaakt met initiële seeds.
+        // Lucy kan zelf bronnen toevoegen via discover_apis() en learn_from_text().
+        //
+        // De initiële seeds zijn ALLEEN een startpunt — geen permanente lijst.
+        let sources_path = std::path::Path::new("data/sources.txt");
+        let sources = if sources_path.exists() {
+            // Lucy's eigen bronnenlijst — zij heeft deze zelf beheerd/uitgebreid
+            std::fs::read_to_string(sources_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("http"))
+                .map(|l| l.trim().to_string())
+                .collect::<Vec<_>>()
+        } else {
+            // Eerste boot: breed spectrum aan startpunten
+            let defaults = vec![
+                "https://en.wikipedia.org/wiki/Special:Random".to_string(),
+                "https://nl.wikipedia.org/wiki/Speciaal:Willekeurig".to_string(),
+                "https://api.publicapis.org/entries?https=true".to_string(),
+                "https://news.ycombinator.com/rss".to_string(),
+            ];
+            // Sla op zodat Lucy het kan uitbreiden
+            let content = defaults.join("\n");
+            let _ = std::fs::write(sources_path, &content);
+            defaults
+        };
 
-            // === Wetenschappelijke zoekmachines — Lucy zoekt zelf wat relevant is ===
-            "https://api.openalex.org/works?search=open+data+api&per_page=10", // Wetenschappelijke werken over open data
-            "https://api.semanticscholar.org/graph/v1/paper/search?query=open+science+data+api&limit=10",
-            "https://api.crossref.org/works?query=public+dataset+api&rows=10",
-
-            // === Open Data portals — Lucy ontdekt zelf welke datasets er zijn ===
-            "https://catalog.data.gov/api/3/action/package_search?q=api&rows=10", // US overheidsdata
-            "https://data.europa.eu/api/hub/search/datasets?q=api&limit=10", // EU open data
-            "https://ckan.org/portfolio/", // Wereldwijde data portals
-
-            // === Universiteit & onderzoek toegangspunten ===
-            "https://api.ror.org/organizations?query=university&page=1", // Research Organization Registry — alle universiteiten
-            "https://api.openalex.org/institutions?search=university&per_page=10", // Academische instellingen + hun output
-            "https://doaj.org/api/search/journals?query=open+access+data&pageSize=10", // Open access journals
-
-            // === Code & kennis ===
-            "https://api.github.com/search/repositories?q=open+data+api+stars:>100&sort=stars&per_page=10",
-            "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=list+of+open+APIs&format=json",
-        ];
-
-        for url in &discovery_sources {
-            let url_str = url.to_string();
-            if !self.frontier.contains(&url_str) && !self.visited.contains(&url_str) {
-                self.frontier.push_back(url_str);
+        for url in &sources {
+            if !self.frontier.contains(url) && !self.visited.contains(url) {
+                self.frontier.push_back(url.clone());
             }
         }
     }
@@ -290,18 +310,27 @@ impl Explorer {
         }
     }
 
-    /// Leer interessante woorden uit tekst — bouwt Lucy's nieuwsgierigheid op
-    /// Ze kiest woorden die lang genoeg zijn en niet te gewoon
+    /// Leer interessante woorden uit tekst — Lucy kiest ZELF wat interessant is
+    /// v2.5: Geen hardcoded BORING_WORDS meer. In plaats daarvan:
+    /// - Woorden die Lucy al VEEL gezien heeft → niet interessant (diminishing returns)
+    /// - Woorden die NIEUW zijn → interessant (novelty-driven)
+    /// - Diversiteit: max 5 nieuwe interests per tekst (voorkomt flooding door 1 bron)
     pub fn absorb_interests(&mut self, text: &str) {
+        let mut new_this_text = 0u32;
         for word in text.split_whitespace() {
+            if new_this_text >= 5 { break; } // max 5 per tekst — diversiteit
+
             let clean = word.trim_matches(|c: char| !c.is_alphanumeric())
                 .to_lowercase();
-            // Woorden van 4+ karakters die niet te kort/generiek zijn
+
+            // Minimale filters: alleen lengte (Lucy bepaalt de rest zelf)
             if clean.len() >= 4
-                && !BORING_WORDS.contains(&clean.as_str())
+                && clean.len() <= 30 // geen URL-achtige rommel
+                && clean.chars().all(|c| c.is_alphanumeric()) // alleen echte woorden
                 && !self.interests.contains(&clean)
             {
                 self.interests.insert(clean);
+                new_this_text += 1;
             }
         }
         // Hou interesses beheersbaar — oudste eruit als te veel
@@ -533,13 +562,8 @@ pub fn generate_teacher_question(
 // v2.0: Geen externe AI teacher meer — Lucy is 100% zelflerend via web-exploratie
 
 /// Woorden die te generiek zijn om interessant te zijn als zoekopdracht
-const BORING_WORDS: &[&str] = &[
-    "the", "this", "that", "with", "from", "have", "been", "will",
-    "what", "when", "where", "which", "there", "their", "about",
-    "would", "could", "should", "some", "than", "then", "them",
-    "self", "true", "false", "none", "null", "return", "struct",
-    "impl", "func", "void", "else", "match", "loop", "while",
-];
+// v2.5: BORING_WORDS verwijderd — Lucy bepaalt zelf wat interessant is
+// via haar curiosity (blanket surprise). Geen hardcoded filters meer.
 
 /// Lucy leert autonoom van haar eigen source code (bootstrap)
 /// Dit is het eerste wat ze leest — zichzelf
