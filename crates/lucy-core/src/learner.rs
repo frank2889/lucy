@@ -696,9 +696,17 @@ pub fn learn_from_text(
     if token_ids.len() < 3 { return 0; }
 
     let mut trained = 0;
-    let chunk_size = 32; // v1.2: kleiner = sneller, meer pagina's per uur
-    let ticks_per_token = 2; // v1.2: minimaal, laat het veld organisch leren
-    let settle_ticks = 10; // v1.2: kort settlen, meer iteraties > minder diep
+    // v2.5: Adaptieve training parameters — Lucy bepaalt zelf hoe diep ze leert
+    // Hoge tension = veel te leren → grotere chunks, meer settle (diep leren)
+    // Lage tension = al bekend → kleine chunks, snel (breed leren)
+    let avg_tension = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension).sum::<f32>()
+        / field.active_set.len().max(1) as f32;
+    let tension_factor = (avg_tension * 10.0).clamp(0.5, 3.0);
+
+    let chunk_size = (32.0 * tension_factor) as usize; // 16-96 tokens per chunk
+    let ticks_per_token = (2.0 * tension_factor) as usize; // 1-6 ticks per token
+    let settle_ticks = (10.0 * tension_factor) as usize; // 5-30 settle ticks
 
     for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) { // v2.5: 50% overlap — elk token 2× gezien
         if chunk.len() < 3 { break; }

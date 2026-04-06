@@ -16,7 +16,9 @@ use lucy_state::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const MAX_ENTRIES: usize = 200;
+// v2.5: Verhoogd van 200 → 2000. Lucy's gedachtenlog mag niet te snel verdwijnen.
+// Later: configureerbaar uit data/config.json of zelfsturend.
+const MAX_ENTRIES: usize = 2000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JournalEntry {

@@ -48,13 +48,14 @@ use crate::encoding::{self, Vocabulary};
 use crate::decoding;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// v2.5: Settle ticks verhoogd — signaal moet door hele veld propageren
-/// Input(0-255) → Hidden(256-8447) → Output(8448-8703) = 4+ hops minimum
-const TICKS_PER_TOKEN: usize = 3;       // v2.5: was 1, signaal moet inzinken
-const SETTLE_PER_ROUND: usize = 50;     // v2.5: was 5, veld heeft 50 ticks nodig om te settlen
-const MAX_THINK_ROUNDS: usize = 3;      // v2.5: was 1, meer denk-rondes = dieper nadenken
-const COHERENCE_THRESHOLD: f32 = 0.50;  // v2.5: was 0.30, hogere drempel = beter antwoord
-const MAX_OUTPUT_TOKENS: usize = 60;    // v2.5: was 30, langere antwoorden mogelijk
+// v2.5: Query parameters — nog const maar Lucy kan ze later zelf aanpassen
+// via self_modify als ze ontdekt dat andere waarden beter werken.
+// De waarden zijn gekozen op basis van veld-architectuur (8704 punten, 4+ hops).
+const TICKS_PER_TOKEN: usize = 3;
+const SETTLE_PER_ROUND: usize = 50;
+const MAX_THINK_ROUNDS: usize = 3;
+const COHERENCE_THRESHOLD: f32 = 0.50;
+const MAX_OUTPUT_TOKENS: usize = 60;
 
 /// Verwerk een vraag door het veld met denk-loops.
 /// Lucy denkt meerdere rondes na tot haar gedachten stabiliseren.
