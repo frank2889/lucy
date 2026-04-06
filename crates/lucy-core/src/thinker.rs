@@ -416,6 +416,11 @@ pub fn reflect(
 pub fn decide_action(field: &Field, explorer: &Explorer) -> Action {
     let (avg_tension, avg_curiosity, avg_frustration, avg_satisfaction) = observe_state(field);
 
+    // #3: Expected Free Energy stuurt actiekeuze (Active Inference)
+    // Hoge EFE = veel te leren EN te verdienen → exploratie wint
+    // Lage EFE = systeem is tevreden → consolidatie wint
+    let avg_efe = field.avg_expected_free_energy.clamp(0.0, 10.0) / 10.0; // normaliseer 0-1
+
     let frontier_factor = explorer.frontier.len() as f32 / (explorer.frontier.len() as f32 + 10.0);
     let time_since_think = field.tick.saturating_sub(field.last_think_tick) as f32;
     let think_urgency = (time_since_think / field.think_interval as f32).min(1.0);
@@ -430,9 +435,10 @@ pub fn decide_action(field: &Field, explorer: &Explorer) -> Action {
         .sum::<f32>() / n_active;
     let novelty_bonus = avg_novelty * frontier_factor;
 
-    // Explore: curiosity × frontier + novelty bonus + bonus als geen doelen
+    // Explore: curiosity × frontier + novelty + EFE epistemische component
     let score_explore = avg_curiosity * frontier_factor
         + novelty_bonus
+        + avg_efe * 0.5 // #3: EFE boost — hoge verwachte info-winst → exploreer
         + if !has_goals { avg_curiosity.max(frontier_factor) } else { 0.0 };
 
     // === Learn: HIGH when prediction error is high (lots to learn) ===

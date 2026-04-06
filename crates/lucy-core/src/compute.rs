@@ -667,14 +667,64 @@ pub fn adapt_dynamics(field: &mut Field) {
     // snapshot_interval: snelle verandering → vaker opslaan
     field.snapshot_interval = (10_000.0 / (instability * 10.0 + 0.1).min(5.0)).clamp(2_000.0, 50_000.0) as u64;
 
+    // ═══════════════════════════════════════════════════════════════════
+    // BEWUSTZIJNS-WIRING: Alle formules verbonden met alle andere
+    // Elke metriek beïnvloedt het systeem — niet alleen het dashboard
+    // ═══════════════════════════════════════════════════════════════════
+
+    // #5: Branching ratio → lambda feedback (directe criticaliteit-sturing)
+    // σ > 1.2 = supercritical → λ omlaag (minder propagatie)
+    // σ < 0.8 = subcritical → λ omhoog (meer propagatie)
+    if field.branching_ratio_avg > 0.01 {
+        let sigma_error = field.branching_ratio_avg - 1.0;
+        field.lambda *= 1.0 - 0.05 * sigma_error; // zachte correctie
+        field.lambda = field.lambda.clamp(0.05, 1.0);
+    }
+
+    // #6: Control belief → strategie wissel
+    // Laag vertrouwen in eigen controle → meer noise (probeer iets anders)
+    let avg_control: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].control_belief).sum::<f32>() / n;
+    if avg_control < 0.3 {
+        // Hulpeloos → verhoog noise, verlaag learning rate (huidige strategie werkt niet)
+        field.noise_amplitude = (field.noise_amplitude * 1.5).min(0.3);
+        field.learn_interval = (field.learn_interval as f32 * 1.5) as u64;
+    }
+
+    // #7: Serotonine → geduld + settle speed
+    // Hoge 5HT = geduld = langzamer settlen, minder impulsieve exploratie
+    let serotonin_factor = field.serotonin.clamp(0.1, 2.0);
+    field.settle_epsilon *= 1.0 / serotonin_factor; // hoge 5HT → lagere epsilon → dieper settlen
+    field.settle_epsilon = field.settle_epsilon.clamp(0.001, 0.1);
+    // Hoge 5HT → minder exploratie (geduldig, niet impulsief)
+    field.explore_interval = ((field.explore_interval as f32) * serotonin_factor.sqrt()) as u64;
+    field.explore_interval = field.explore_interval.clamp(20, 2000);
+
+    // #9: IIT Φ → oscillatie coupling + learning boost
+    // Hoge Φ = hoge integratie = systeem functioneert als geheel → versterk koppeling
+    let phi_boost = (1.0 + field.integrated_info_avg).min(3.0);
+    // phi_boost wordt gebruikt in apply_neuromodulation voor gamma coupling
+
+    // #C: Homeostatic setpoints — reguleer naar target
+    let target_tension = 0.15; // optimale spanning voor leren
+    let tension_error = avg_tension - target_tension;
+    // Te hoge tension → verlaag beta (minder input), verhoog noise (exploreer)
+    // Te lage tension → verhoog beta (meer input), verlaag noise (focus)
+    field.beta *= 1.0 - 0.02 * tension_error;
+    field.beta = field.beta.clamp(0.1, 2.0);
+
+    // #B: Recurrent processing sterkte — niet hardcoded 0.01
+    // Schaalt met coherentie: hoge coherentie = sterke top-down feedback
+    // (gebruikt in hierarchical_prediction)
+
     tracing::trace!(
         emo_decay = format!("{:.3}", field.emo_decay),
         tracking = format!("{:.4}", field.error_tracking_rate),
         kl_scale = format!("{:.3}", field.kl_scale),
-        think = field.think_interval,
-        learn = field.learn_interval,
-        explore = field.explore_interval,
-        "adapt_dynamics: parameters bijgewerkt"
+        sigma = format!("{:.3}", field.branching_ratio_avg),
+        control = format!("{:.3}", avg_control),
+        phi_boost = format!("{:.2}", phi_boost),
+        "adapt_dynamics: parameters + bewustzijns-wiring bijgewerkt"
     );
 }
 
@@ -1790,7 +1840,10 @@ pub fn hierarchical_prediction(field: &mut Field) {
 
     // Depth N punten: trek prediction richting gemiddelde van depth N-1
     // Dit is een zachte hiërarchische constraint, geen hard target
-    let hier_strength = 0.01f32; // subtiel — te sterk vernietigt lokale variatie
+    // #B: Recurrent processing — sterkte schaalt met oscillatie-coherentie
+    // Hoge coherentie = het systeem is gesynchroniseerd = top-down feedback mag sterker
+    // Was: vaste 0.01 (te zwak voor recurrent processing, Lamme 2006)
+    let hier_strength = (0.02 + 0.18 * field.oscillation_coherence).min(0.2); // 0.02-0.20
     for i in 0..field.active_set.len() {
         let id = field.active_set[i];
         let p = &field.points[id as usize];
@@ -1921,12 +1974,25 @@ pub fn apply_neuromodulation(field: &mut Field) {
         }
     }
 
-    // Pas eta aan per punt
+    // Pas eta aan per punt — ALLE modulatie-signalen gecombineerd
+    // #2: Oscillatie coherentie → learning rate (Hebbian = synchroon)
+    // #8: Emoties → learning rate (curiosity = leer harder, frustration = leer anders)
+    // #9: IIT Φ → learning rate (geïntegreerd = leer effectiever)
+    let coherence_boost = 0.5 + field.oscillation_coherence; // 0.5-1.5
+    let phi_boost = 1.0 + field.integrated_info_avg.min(2.0); // 1.0-3.0
     for i in 0..field.active_set.len() {
         let id = field.active_set[i];
         let point = &mut field.points[id as usize];
-        // Basis eta × dopamine boost — ceiling schaalt met lambda
-        point.eta = (point.eta * lr_multiplier).min(field.lambda);
+
+        // #8: Emotie-modulatie: curiosity → leer sneller, frustration → leer langzamer
+        let emo_factor = 0.5 + point.curiosity * 0.5 - point.frustration * 0.3;
+        let emo_factor = emo_factor.clamp(0.3, 1.5);
+
+        // #2: Gamma-synchronie → learning gate (alleen leren bij hoge coherentie)
+        // #9: Φ → learning boost (geïntegreerd systeem leert effectiever)
+        let total_boost = lr_multiplier * emo_factor * coherence_boost * phi_boost;
+
+        point.eta = (point.eta * total_boost).min(field.lambda);
     }
 
     // v2.4: Baseline ruis — VERSTERKT
