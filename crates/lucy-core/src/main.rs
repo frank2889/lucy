@@ -721,6 +721,12 @@ async fn main() {
                     compute::anti_hebbian_decorrelation(&mut field);
                 }
 
+                // v2.6: Synaptic homeostasis — intelligent vergeten (Tononi & Cirelli 2006)
+                // Elke 1000 ticks: schaal alle weights omlaag, prune zwakke verbindingen
+                if tick % 1000 == 0 {
+                    compute::synaptic_homeostasis(&mut field);
+                }
+
                 if tick % 500 == 0 {
                     compute::record_temporal_snapshot(&mut field);
                 }

@@ -261,7 +261,13 @@ pub fn update_weights(field: &mut Field, id: u32) {
         // v1.0: Broadcast couplings krijgen 2× learning rate (dragen bewust signaal)
         let lr = if coupling.broadcast { eta * 2.0 } else { eta };
         coupling.weight -= lr * dw + mu * coupling.momentum + lr * ewc_pen;
-        // Weight clamp schaalt met veldactiviteit (clamp_range / 2 voor weights)
+
+        // v2.6: Free Energy-gebaseerd vergeten (Friston precision weighting op synapsen)
+        // decay ∝ avg_F / importance — onbelangrijke weights vervagen, belangrijke overleven
+        let fe_decay = field.avg_free_energy / (coupling.importance + 0.001) * 0.0005;
+        let fe_decay = fe_decay.min(0.01); // max 1% decay per update
+        coupling.weight *= 1.0 - fe_decay;
+
         let w_clamp = field.clamp_range / 2.0;
         coupling.weight = coupling.weight.clamp(-w_clamp, w_clamp);
     }
@@ -2446,6 +2452,54 @@ pub fn compute_criticality(field: &mut Field) {
     // Lambda wordt NIET hier aangepast — dat doet measure_spectral_radius() al.
     // Twee bronnen die lambda trekken veroorzaakt oscillatie en dood veld.
     // Branching ratio informeert; spectral radius stuurt.
+}
+
+/// Synaptic Homeostasis (Tononi & Cirelli 2006) — intelligent vergeten
+///
+/// Tijdens "rust" schalen ALLE synapsen omlaag met factor α.
+/// Sterke verbindingen overleven, zwakke sterven.
+/// α schaalt met serotonine: meer geduld = diepere "slaap" = meer vergeten.
+///
+/// Dit IS hoe het brein opruimt: niet door selectief te wissen,
+/// maar door ALLES een beetje te verzwakken. Wat sterk is, overleeft.
+/// Wat zwak is, verdwijnt onder de prune-drempel.
+///
+/// Gecombineerd met Free Energy decay in update_weights():
+/// - Homeostasis = globale schaling (alles omlaag)
+/// - FE decay = selectieve schaling (onbelangrijk sneller omlaag)
+/// Samen = biologisch correct geheugenmanagement.
+pub fn synaptic_homeostasis(field: &mut Field) {
+    // α = basisrate × serotonine-modulatie
+    // Hoge 5HT = "diepe slaap" = meer opschoning
+    let alpha = 0.005 * (1.0 + field.serotonin.clamp(0.0, 2.0));
+    let prune_threshold = field.error_tracking_rate * 0.1;
+
+    let mut total_pruned = 0u32;
+    let n_points = field.points.len();
+
+    for point in &mut field.points {
+        // Schaal alle weights omlaag met α
+        for coupling in &mut point.couplings {
+            coupling.weight *= 1.0 - alpha;
+            // Momentum ook laten vervagen (voorkomt ghost gradients)
+            coupling.momentum *= 1.0 - alpha * 2.0;
+        }
+
+        // Prune wat onder threshold valt (automatisch door homeostasis)
+        let before = point.couplings.len();
+        point.couplings.retain(|c| {
+            (c.target as usize) < n_points && c.weight.abs() > prune_threshold
+        });
+        total_pruned += (before - point.couplings.len()) as u32;
+    }
+
+    if total_pruned > 0 {
+        tracing::info!(
+            pruned = total_pruned,
+            alpha = format!("{:.4}", alpha),
+            "Synaptic homeostasis: {} zwakke koppelingen verwijderd", total_pruned
+        );
+    }
 }
 
 /// Anti-Hebbian decorrelatie — voorkomt dat Lucy steeds hetzelfde denkt.
