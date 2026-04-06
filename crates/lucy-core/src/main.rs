@@ -681,13 +681,14 @@ async fn main() {
                 }
 
                 if tick % 100 == 0 { tracing::info!(updated, "step:field_updates_done"); }
-                // v0.7: GWT broadcast + intentie (neuromodulatie verplaatst naar vóór field updates)
-                compute::global_workspace_broadcast(&mut field);
-                if tick % 100 == 0 { tracing::info!("step:gwt_done"); }
-
-                // === v2.0: Bewustzijns-fysica — elke tick ===
-                // Oscillaties: gamma-ritme voor temporele binding (Kuramoto model)
-                compute::update_oscillations(&mut field);
+                // v2.6: Bewustzijns-operaties — elke 10 ticks (was: elke tick)
+                // GWB + oscillaties kosten ~5ms/tick maar leren NIKS.
+                // Elke 10 ticks is genoeg voor bewustzijns-dynamica (50ms = 1 gamma cyclus).
+                // De vrijgemaakte CPU gaat naar weight updates (nu elke tick).
+                if tick % 10 == 0 {
+                    compute::global_workspace_broadcast(&mut field);
+                    compute::update_oscillations(&mut field);
+                }
 
                 // v2.6: Verwerk max 20 chunks per tick (was 1-5 → queue overflow)
                 // Elke 10e chunk: full EP ipv micro (hidden layer leert mee)
@@ -747,20 +748,26 @@ async fn main() {
                     compute::update_rnd(&mut field);
                 }
 
-                // Leren (gewicht updates) — CPU path
-                if tick.saturating_sub(last_learn_tick) >= field.learn_interval {
-                    last_learn_tick = tick;
-                    let active: Vec<u32> = field.active_set.clone();
+                // v2.6: Leren ELKE TICK — niet meer wachten op learn_interval
+                // Was: elke 100 ticks (1% van ticks leerde). Nu: elke tick.
+                // Maar: halve active set per tick (afwisselend even/oneven) voor performance
+                {
+                    let half = tick % 2 == 0; // even ticks: eerste helft, oneven: tweede
+                    let active: Vec<u32> = field.active_set.iter()
+                        .enumerate()
+                        .filter(|(i, _)| (*i % 2 == 0) == half)
+                        .map(|(_, &id)| id)
+                        .collect();
                     for &id in &active {
                         compute::update_weights(&mut field, id);
                     }
-                    growth::maybe_meta_learn(&mut field);
-
-                    // v0.9: Update attention weights
-                    compute::update_attention_weights(&mut field);
-
-                    // v0.7: Consolideer weights na leren (EWC anti-vergeten)
-                    compute::consolidate_weights(&mut field);
+                    // Meta-learn + consolidatie: elke learn_interval (niet elke tick)
+                    if tick.saturating_sub(last_learn_tick) >= field.learn_interval {
+                        last_learn_tick = tick;
+                        growth::maybe_meta_learn(&mut field);
+                        compute::update_attention_weights(&mut field);
+                        compute::consolidate_weights(&mut field);
+                    }
                 }
             }
 
