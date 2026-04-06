@@ -14,7 +14,7 @@
 //! ## Vocabulaire
 //!
 //! Groeit incrementeel vanuit wat Lucy leest:
-//! - Maximaal 32768 tokens (past in ~32MB bij DIM=256)
+//! - Dynamische vocab limiet (default 32768, Lucy kan verhogen)
 //! - LRU eviction: als vol, wordt het minst gebruikte token vervangen
 //! - Elke token heeft een geleerde 256-dimensionale embedding
 //!
@@ -33,8 +33,9 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use std::collections::HashMap;
 
-/// Maximale vocabulaire grootte. 32K tokens × 256 floats × 4 bytes = 32MB.
-const MAX_VOCAB: usize = 32768;
+/// v2.5: Geen hardcoded MAX_VOCAB meer — Lucy bepaalt zelf haar woordenschat-limiet.
+/// Default: 32768 (32MB bij DIM=256). Lucy kan dit verhogen via self-modify.
+const DEFAULT_MAX_VOCAB: usize = 32768;
 
 /// Aantal gereserveerde byte-level tokens (0-255 = individuele bytes)
 const BYTE_TOKENS: usize = 256;
@@ -57,7 +58,13 @@ pub struct Vocabulary {
     /// Lucy leert deze zelf uit tekst die ze leest
     #[serde(default)]
     pub merges: Vec<(String, String)>,
+    /// v2.5: Dynamische vocab limiet — Lucy bepaalt zelf hoeveel tokens ze wil
+    /// Default: 32768, maar groeit als Lucy meer nodig heeft
+    #[serde(default = "default_max_vocab")]
+    pub max_vocab: usize,
 }
+
+fn default_max_vocab() -> usize { DEFAULT_MAX_VOCAB }
 
 /// Wrapper voor [f32; DIM] met serde support
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,6 +81,7 @@ impl Vocabulary {
             embeddings: Vec::new(),
             counts: Vec::new(),
             merges: Vec::new(),
+            max_vocab: DEFAULT_MAX_VOCAB,
         };
 
         // Byte-level tokens (0-255): elk mogelijk byte als fallback
@@ -108,8 +116,8 @@ impl Vocabulary {
             return id;
         }
 
-        // Als vol, verwijder het minst gebruikte token (niet speciale tokens)
-        if self.id_to_token.len() >= MAX_VOCAB {
+        // v2.5: Eviction op basis van dynamische limiet (Lucy kan self.max_vocab verhogen)
+        if self.id_to_token.len() >= self.max_vocab {
             self.evict_least_used();
         }
 
@@ -233,7 +241,7 @@ impl Vocabulary {
             .collect();
 
         for _ in 0..num_merges {
-            if self.id_to_token.len() >= MAX_VOCAB { break; }
+            if self.id_to_token.len() >= self.max_vocab { break; }
 
             // Tel alle aangrenzende paren
             let mut pair_counts: HashMap<(String, String), u32> = HashMap::new();

@@ -589,12 +589,31 @@ pub struct Field {
     pub goal_history: Vec<GoalOutcome>,
 
     // v2.5: Explorer stats in Field (lock-free access via ArcSwap snapshot)
-    // Bijgewerkt vanuit main.rs tick loop na elke exploration
     #[serde(default)]
     pub pages_read: u64,
     #[serde(default)]
     pub tokens_processed: u64,
+
+    // v2.5: Architectuur-metadata — Lucy kent haar eigen brein
+    // Default 0 = oude snapshot, wordt bijgewerkt bij bootstrap/laden
+    /// Snapshot versie voor migratie (0 = pre-v2.5)
+    #[serde(default)]
+    pub snapshot_version: u32,
+    /// Dimensionaliteit (altijd DIM voor nu, maar klaar voor groei)
+    #[serde(default = "default_dim")]
+    pub field_dim: usize,
+    /// Aantal input-punten (bijgewerkt bij bootstrap + groei)
+    #[serde(default)]
+    pub n_input: usize,
+    /// Aantal hidden-punten
+    #[serde(default)]
+    pub n_hidden: usize,
+    /// Aantal output-punten
+    #[serde(default)]
+    pub n_output: usize,
 }
+
+fn default_dim() -> usize { DIM }
 
 /// v1.0: Parameters die Lucy zelf aanpast — geen hardcoded magic numbers meer.
 /// Defaults komen overeen met de oude hardcoded waarden zodat bestaande snapshots
@@ -938,6 +957,11 @@ impl Field {
             goal_history: Vec::new(),
             pages_read: 0,
             tokens_processed: 0,
+            snapshot_version: 1, // v2.5+
+            field_dim: DIM,
+            n_input: 0,  // wordt gezet door bootstrap_field
+            n_hidden: 0,
+            n_output: 0,
         }
     }
 

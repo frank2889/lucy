@@ -384,6 +384,21 @@ pub fn reflect(
             &format!("Reflectie: actieve doelen — {}", summaries.join(", ")));
     }
 
+    // v2.5: Zelf-groei check — Lucy breidt haar brein uit als dat nodig is
+    let active_ratio = field.active_set.len() as f32 / field.points.len().max(1) as f32;
+    let avg_tension: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension).sum::<f32>()
+        / field.active_set.len().max(1) as f32;
+
+    // Als >90% van punten actief EN hoge tension → brein is vol, groei!
+    if active_ratio > 0.9 && avg_tension > field.growth_threshold * 2.0 {
+        let growth_amount = (field.points.len() / 20).max(50); // 5% groei, min 50
+        crate::growth::grow_hidden(field, growth_amount);
+        journal_thought(journal, field.tick,
+            &format!("Zelf-groei: {} nieuwe punten (totaal {})",
+                growth_amount, field.points.len()));
+    }
+
     field.last_reflect_tick = field.tick;
 }
 

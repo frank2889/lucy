@@ -125,6 +125,46 @@ pub fn maybe_grow(field: &mut Field) {
     field.rebuild_active_set();
 }
 
+/// v2.5: Voeg N nieuwe hidden-punten toe aan het veld.
+/// Anders dan split (maybe_grow): dit zijn VOLLEDIG NIEUWE punten
+/// met random initialisatie en koppelingen naar bestaande buren.
+/// Lucy triggert dit zelf als haar capaciteit vol zit.
+pub fn grow_hidden(field: &mut Field, n: usize) {
+    let mut rng = rand::rng();
+    let existing_count = field.points.len();
+    let coupling_range = field.clamp_range / 10.0;
+
+    for _ in 0..n {
+        let mut p = FieldPoint::new();
+        p.flags = FLAG_ACTIVE;
+        p.energy = 1.0;
+
+        // Random phi initialisatie
+        for d in 0..DIM {
+            p.phi[d] = rng.random_range(-0.1f32..0.1f32);
+        }
+
+        // Koppel aan ~8 willekeurige bestaande punten
+        let n_couplings = 8.min(existing_count);
+        for _ in 0..n_couplings {
+            let target = rng.random_range(0..existing_count) as u32;
+            p.couplings.push(Coupling {
+                target,
+                weight: rng.random_range(-coupling_range..coupling_range),
+                momentum: 0.0,
+                ..Default::default()
+            });
+        }
+
+        field.points.push(p);
+    }
+
+    field.n_hidden += n;
+    field.rebuild_active_set();
+    field.cache_io_ids();
+    tracing::info!(added = n, total = field.points.len(), "Hidden punten toegevoegd");
+}
+
 /// Meta-leren: pas η aan als spanning niet daalt.
 /// η-aanpassingen zijn proportioneel aan het punt's eigen eta en de globale error_tracking_rate.
 /// Dit voorkomt dat punten met kleine η te hard springen, en dat punten met grote η te weinig bewegen.
