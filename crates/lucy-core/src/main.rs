@@ -689,16 +689,27 @@ async fn main() {
                 // Oscillaties: gamma-ritme voor temporele binding (Kuramoto model)
                 compute::update_oscillations(&mut field);
 
-                // v2.5: Micro-EP training — batch bij volle queue, 1 bij rustig
+                // v2.6: Verwerk max 20 chunks per tick (was 1-5 → queue overflow)
+                // Elke 10e chunk: full EP ipv micro (hidden layer leert mee)
                 {
-                    let batch = if training_queue.len() > 500 { 5 } else { 1 };
+                    let batch = training_queue.len().min(20);
+                    let ep_beta = field.adaptive.ep_beta; // kopieer voor borrow checker
+                    let mut chunk_count = 0u32;
                     for _ in 0..batch {
                         if let Some(chunk) = training_queue.pop() {
-                            let delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
-                            if delta > 0.001 && tick % 1000 == 0 {
-                                tracing::info!(delta = format!("{:.4}", delta), queue = training_queue.len(), "Micro-EP batch");
+                            chunk_count += 1;
+                            if chunk_count % 10 == 0 && chunk.input_embs.len() >= 4 {
+                                let _delta = compute::equilibrium_propagation(
+                                    &mut field, &chunk.input_embs, &chunk.target_embs,
+                                    1, 10, ep_beta,
+                                );
+                            } else {
+                                let _delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
                             }
                         } else { break; }
+                    }
+                    if chunk_count > 0 && tick % 1000 == 0 {
+                        tracing::info!(chunks = chunk_count, queue = training_queue.len(), "Training batch");
                     }
                 }
 
@@ -960,15 +971,16 @@ async fn main() {
 
                     let text = learner::extract_readable_text(&body);
                     if text.len() >= 20 {
-                        let capped: String = text.chars().take(2000).collect();
+                        // v2.6: Text cap 2000→8000 (was: 60% van pagina weggegooid)
+                        let capped: String = text.chars().take(8000).collect();
                         if let Some(clean) = learner::filter_content(&capped) {
                             explorer.absorb_interests(&clean);
                             let token_ids = vocab.tokenize(&clean);
                             explorer.tokens_processed += token_ids.len() as u64;
 
-                            // Stuur chunks naar training thread (non-blocking)
-                            let chunk_size = 16;
-                            for chunk in token_ids.windows(chunk_size).step_by(chunk_size) {
+                            // v2.6: Chunk size 16→32, overlap 50% (was: elk token 1× gezien)
+                            let chunk_size = 32;
+                            for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) {
                                 if chunk.len() < 4 { continue; }
                                 let mid = chunk.len() / 2;
                                 let input_embs: Vec<[f32; DIM]> = chunk[..mid].iter()
@@ -1025,6 +1037,22 @@ async fn main() {
             }
           }
           // v2.1: Geen continue meer — tick loop moet altijd doorlopen
+        }
+
+        // v2.6: BPE periodiek bijleren — vocab groeit met nieuwe domeinen
+        // Was: alleen bij bootstrap (vocab bevroren op source code)
+        // Nu: elke 50K ticks, leer nieuwe BPE merges van recent gelezen tekst
+        if tick % 50_000 == 0 && tick > 0 {
+            let recent_text = fs.read_own_source().unwrap_or_default()
+                .into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(" ");
+            if recent_text.len() > 100 {
+                let old_size = vocab.vocab_size();
+                vocab.learn_bpe(&recent_text, 500); // 500 nieuwe merges per cyclus
+                let new_size = vocab.vocab_size();
+                if new_size > old_size {
+                    tracing::info!(old = old_size, new = new_size, "BPE bijgeleerd: {} nieuwe tokens", new_size - old_size);
+                }
+            }
         }
 
         // 9b. AI Teacher — verwijderd

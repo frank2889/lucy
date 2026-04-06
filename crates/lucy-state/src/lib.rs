@@ -754,8 +754,8 @@ impl TrainingQueue {
 
     pub fn push(&mut self, chunk: TrainingChunk) {
         self.chunks.push_back(chunk);
-        // Max 2000 chunks in queue — oudste eruit als vol
-        while self.chunks.len() > 2000 {
+        // v2.6: Queue vergroot 2000→5000 (was: constant overflow bij exploration)
+        while self.chunks.len() > 5000 {
             self.chunks.pop_front();
         }
     }
