@@ -307,13 +307,21 @@ pub fn process_query(
         let unique_tokens: std::collections::HashSet<u32> = output_ids.iter().copied().collect();
         let repeat_ratio = 1.0 - (unique_tokens.len() as f32 / output_ids.len() as f32);
 
-        // v2.5: Check of output leesbaar is
+        // v2.5: Check of output leesbaar is voor een mens
         let attempt = decoding::tokens_to_text(&output_ids, vocab);
-        let alpha_count = attempt.chars().filter(|c| c.is_alphabetic()).count();
-        let unique_chars: std::collections::HashSet<char> = attempt.chars().collect();
-        let is_byte_soup = alpha_count < 5; // minder dan 5 letters = geen woorden
-        let is_monotone = unique_chars.len() < 4; // minder dan 4 unieke chars = herhaling
-        let is_garbage = repeat_ratio > 0.5 || output_ids.len() < 3 || is_byte_soup || is_monotone;
+
+        // Echte woorden: minstens 3 woorden van 3+ letters zonder < > tokens
+        let real_words = attempt.split_whitespace()
+            .filter(|w| w.len() >= 3 && !w.starts_with('<') && !w.ends_with('>') && !w.starts_with('.'))
+            .count();
+        let has_byte_tokens = attempt.contains("<") && attempt.contains(">");
+        let is_all_dots = attempt.chars().filter(|c| *c != '.' && *c != ' ' && *c != '-').count() < 5;
+
+        let is_garbage = repeat_ratio > 0.5
+            || output_ids.len() < 3
+            || real_words < 3          // minder dan 3 echte woorden
+            || has_byte_tokens         // byte-tokens als <4e> <2a>
+            || is_all_dots;            // alleen puntjes
 
         if is_garbage {
             // Lucy weet dat ze het niet weet — DAT is intelligentie
@@ -349,22 +357,31 @@ pub fn process_query(
                 }
             }
 
-            // v2.5: RAG-fallback — als het veld-antwoord onzin is, gebruik opgehaalde feiten
-            // Lucy is EERLIJK: ze geeft toe dat haar veld nog leert, maar deelt wat ze WEL weet
+            // v2.5: RAG-fallback — gebruik opgehaalde feiten als ze leesbaar zijn
             if !facts.is_empty() {
-                // Gebruik de beste RAG-match als antwoord
-                let rag_answer = facts.iter()
-                    .max_by_key(|f| (f.len() as f32 * 100.0) as i32) // langste = meest informatief
-                    .map(|f| {
-                        // Trim tot ~200 chars voor beknopt antwoord
-                        if f.len() > 200 { format!("{}...", &f[..200]) } else { f.clone() }
+                // Zoek het beste LEESBARE feit (minimaal 3 echte woorden)
+                let best_fact = facts.iter()
+                    .filter(|f| {
+                        let words = f.split_whitespace()
+                            .filter(|w| w.len() >= 3 && w.chars().all(|c| c.is_alphanumeric()))
+                            .count();
+                        words >= 3 // minimaal 3 echte woorden
                     })
-                    .unwrap_or_else(|| "...".to_string());
-                rag_answer
-            } else if attempt.len() > 3 {
-                attempt
+                    .max_by_key(|f| f.len());
+
+                if let Some(fact) = best_fact {
+                    let answer = if fact.len() > 300 { format!("{}...", &fact[..300]) } else { fact.clone() };
+                    tracing::info!(len = answer.len(), "RAG fallback: leesbaar feit gevonden");
+                    answer
+                } else {
+                    // Geen leesbare feiten — eerlijk antwoord
+                    format!("[Ik leer nog — ik heb je vraag '{}' opgeslagen als leerdoel]",
+                        question.chars().take(50).collect::<String>())
+                }
             } else {
-                "...".to_string()
+                // Geen feiten beschikbaar — eerlijk antwoord
+                format!("[Ik leer nog — ik heb je vraag '{}' opgeslagen als leerdoel]",
+                    question.chars().take(50).collect::<String>())
             }
         } else {
             answer
