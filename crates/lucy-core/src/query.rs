@@ -374,14 +374,10 @@ pub fn process_query(
                     tracing::info!(len = answer.len(), "RAG fallback: leesbaar feit gevonden");
                     answer
                 } else {
-                    // Geen leesbare feiten — eerlijk antwoord
-                    format!("[Ik leer nog — ik heb je vraag '{}' opgeslagen als leerdoel]",
-                        question.chars().take(50).collect::<String>())
+                    fallback_from_state(field, question)
                 }
             } else {
-                // Geen feiten beschikbaar — eerlijk antwoord
-                format!("[Ik leer nog — ik heb je vraag '{}' opgeslagen als leerdoel]",
-                    question.chars().take(50).collect::<String>())
+                fallback_from_state(field, question)
             }
         } else {
             answer
@@ -511,4 +507,25 @@ pub struct QueryResult {
     pub verified: bool,
     /// v2.0: Bronnen die het antwoord ondersteunen
     pub sources: Vec<String>,
+}
+
+/// Genereer een fallback-antwoord vanuit Lucy's eigen staat.
+/// Geen hardcoded tekst — puur afgeleid van haar metrieken.
+/// Verdwijnt vanzelf zodra de decoder echte woorden produceert.
+fn fallback_from_state(field: &Field, question: &str) -> String {
+    let n = field.active_set.len() as f32;
+    let avg_curiosity = if n > 0.0 {
+        field.active_set.iter().map(|&id| field.points[id as usize].curiosity).sum::<f32>() / n
+    } else { 0.0 };
+
+    let vocab_hint = if field.pages_read > 100 {
+        format!("pages:{}", field.pages_read)
+    } else {
+        format!("learning")
+    };
+
+    // Het antwoord is een snapshot van Lucy's interne staat — geen vaste tekst
+    // Zodra de decoder beter wordt, wordt deze functie nooit meer aangeroepen
+    let q_short: String = question.chars().take(40).collect();
+    format!("[?{} | curiosity:{:.0}% | {}]", q_short, avg_curiosity * 100.0, vocab_hint)
 }
