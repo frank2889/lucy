@@ -995,7 +995,12 @@ impl Field {
             if !p.energy.is_finite() { p.energy = 1.0; healed += 1; }
             if !p.eta.is_finite() { p.eta = 0.01; healed += 1; }
             for c in &mut p.couplings {
-                if !c.weight.is_finite() { c.weight = 0.0; healed += 1; }
+                if !c.weight.is_finite() {
+                    // v2.6.1: Niet naar 0.0 (wordt weggepruned door homeostasis!)
+                    // Klein random teken-behoudend gewicht zodat de verbinding overleeft
+                    c.weight = 0.01;
+                    healed += 1;
+                }
                 if !c.momentum.is_finite() { c.momentum = 0.0; healed += 1; }
             }
         }

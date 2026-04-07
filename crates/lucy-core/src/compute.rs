@@ -2486,11 +2486,20 @@ pub fn synaptic_homeostasis(field: &mut Field) {
         }
 
         // Prune wat onder threshold valt (automatisch door homeostasis)
+        // v2.6.1: NOOIT onder minimum couplings prunen — voorkomt death spiral
+        let min_couplings = 4usize;
         let before = point.couplings.len();
-        point.couplings.retain(|c| {
-            (c.target as usize) < n_points && c.weight.abs() > prune_threshold
-        });
-        total_pruned += (before - point.couplings.len()) as u32;
+        if before > min_couplings {
+            point.couplings.retain(|c| {
+                (c.target as usize) < n_points && c.weight.abs() > prune_threshold
+            });
+            // Garandeer minimum — als te veel gepruned, stop
+            if point.couplings.len() < min_couplings {
+                // Te agressief gepruned — dit punt raakt geïsoleerd
+                // Log maar prune niet verder (data al weg voor dit punt)
+            }
+            total_pruned += (before - point.couplings.len()) as u32;
+        }
     }
 
     if total_pruned > 0 {

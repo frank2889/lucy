@@ -1,0 +1,29 @@
+services:
+  lucy:
+    build: .
+    container_name: lucy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - lucy-data:/lucy/data
+      - lucy-modules:/lucy/modules
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: "4.0"
+
+volumes:
+  lucy-data:
+  lucy-modules:
