@@ -1,4 +1,4 @@
-# Lucy v2.5 — Technical Architecture
+# Lucy v2.6.1 — Technical Architecture
 
 ## The Unified Samenveld
 
@@ -102,6 +102,23 @@ Each point:
 - Configurable bootstrap via `data/field_config.json`
 - Dynamic vocab limit (no MAX_VOCAB ceiling)
 
+### Synaptic Homeostasis (compute.rs)
+- **Tononi & Cirelli 2006** — "sleep" mechanism, scales ALL weights down
+- `alpha = 0.001 * (1 + serotonin)` — decay rate (~0.1-0.3% per cycle)
+- Runs every 1000 ticks
+- **Safety guards (v2.6.1):**
+  - Skips entirely if avg couplings < 4.0 per point
+  - Pre-checks survival count before pruning (never destructive)
+  - Minimum 6 couplings per point guaranteed
+  - Combined with FE decay in `update_weights()` for biological correctness
+
+### Auto-Rewire (field.rs)
+- `rewire_field(field)` — rebuilds Watts-Strogatz small-world topology on existing field
+- **Preserves:** phi, memory, prediction, emotions, vocab, retrieval, journal, goals
+- **Rebuilds:** couplings only (input→hidden, hidden↔hidden, hidden→output, recurrent loops)
+- Auto-triggered at startup when `total_couplings == 0`
+- Recovery from homeostasis death spiral without losing any learned state
+
 ## Data Persistence
 
 ### Files (in data/ volume)
@@ -116,12 +133,13 @@ Each point:
 | `sources.txt` | text | Lucy's self-managed URL sources |
 | `field_config.json` | JSON | Brain architecture config |
 
-### Protection (5 layers)
+### Protection (6 layers)
 1. **Local** — CRC32 checksums + 5 versioned backups per file
 2. **Remote** — GitHub release backups (all 6 files)
 3. **Recovery** — `Field::load_with_fallback()`: primary -> backup 1-5 -> fresh
 4. **Deploy** — safety backup before deploy + auto-recovery on tick=0
 5. **Validation** — structural checks on load (point count, NaN detection)
+6. **Topology** — auto-rewire at startup if couplings lost (v2.6.1)
 
 ### Persistence of counters
 - `reflection_count` stored in journal.json (survives struct changes)
@@ -157,3 +175,34 @@ React 19 + TypeScript + Vite + Three.js
 | Consciousness | Ignition Dynamics | Dehaene et al. 2003 |
 | Curiosity | Intrinsic Motivation | Schmidhuber 2010 |
 | Memory | EWC (anti-forgetting) | Kirkpatrick et al. 2017 |
+| Homeostasis | Synaptic Downscaling | Tononi & Cirelli 2006 |
+
+## Known Issues & Fixes (Changelog)
+
+### v2.6.1 — Homeostasis Death Spiral Fix (2026-04-07)
+
+**Problem:** All 126K+ couplings were being destroyed within minutes of creation.
+
+**Root cause chain:**
+1. NaN values appeared in coupling weights (numerical instability)
+2. `heal()` set NaN weights to `0.0`
+3. `synaptic_homeostasis()` pruned all weights below `error_tracking_rate * 0.1 = 0.001`
+4. Healed weights (0.0) < threshold → **all healed couplings deleted**
+5. Fewer couplings → less information flow → more NaN → more healing → death spiral
+6. Within ~1000 ticks: 0 couplings remaining, field effectively dead
+
+**Symptoms (telemetry):**
+- `couplings: 0`, `tension: ~0.001`, `satisfaction: ~0.0`
+- `curiosity: 1.0` (max, nothing happening)
+- `REANIMATIE` warnings every 200 ticks
+- `Field healed: NaN/Inf values reset healed=8016` in logs
+- Snapshot shrinking from ~34.7MB to ~32MB (missing coupling data)
+
+**Fixes applied:**
+1. **heal()** — NaN weights → `0.01` instead of `0.0` (survives prune threshold)
+2. **homeostasis alpha** — `0.005` → `0.001` (5x gentler decay)
+3. **homeostasis skip** — aborts entirely if avg couplings < 4.0 per point
+4. **pre-check pruning** — counts survivors BEFORE `retain()`, only prunes if ≥6 remain
+5. **auto-rewire** — `rewire_field()` at startup if total couplings == 0
+
+**Data preserved:** vocab, retrieval store, explorer state, journal, goals — all intact.
