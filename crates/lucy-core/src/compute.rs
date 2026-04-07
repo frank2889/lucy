@@ -2486,6 +2486,8 @@ pub fn synaptic_homeostasis(field: &mut Field) {
     let mut total_pruned = 0u32;
     let n_points = field.points.len();
 
+    // v2.6.1: Alleen punten met voldoende couplings verwerken
+    // en sorteer op |weight| zodat we de zwakste prunen maar minimum behouden
     for point in &mut field.points {
         // Schaal alle weights omlaag met α
         for coupling in &mut point.couplings {
@@ -2494,20 +2496,21 @@ pub fn synaptic_homeostasis(field: &mut Field) {
             coupling.momentum *= 1.0 - alpha * 2.0;
         }
 
-        // Prune wat onder threshold valt (automatisch door homeostasis)
-        // v2.6.1: NOOIT onder minimum couplings prunen — voorkomt death spiral
-        let min_couplings = 4usize;
+        // v2.6.1: Prune alleen als er genoeg overblijven
+        let min_couplings = 6usize;
         let before = point.couplings.len();
         if before > min_couplings {
-            point.couplings.retain(|c| {
-                (c.target as usize) < n_points && c.weight.abs() > prune_threshold
-            });
-            // Garandeer minimum — als te veel gepruned, stop
-            if point.couplings.len() < min_couplings {
-                // Te agressief gepruned — dit punt raakt geïsoleerd
-                // Log maar prune niet verder (data al weg voor dit punt)
+            // Tel hoeveel er onder threshold vallen
+            let would_survive = point.couplings.iter()
+                .filter(|c| (c.target as usize) < n_points && c.weight.abs() > prune_threshold)
+                .count();
+            // Alleen prunen als er genoeg overblijven
+            if would_survive >= min_couplings {
+                point.couplings.retain(|c| {
+                    (c.target as usize) < n_points && c.weight.abs() > prune_threshold
+                });
+                total_pruned += (before - point.couplings.len()) as u32;
             }
-            total_pruned += (before - point.couplings.len()) as u32;
         }
     }
 
