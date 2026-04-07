@@ -2469,9 +2469,18 @@ pub fn compute_criticality(field: &mut Field) {
 /// - FE decay = selectieve schaling (onbelangrijk sneller omlaag)
 /// Samen = biologisch correct geheugenmanagement.
 pub fn synaptic_homeostasis(field: &mut Field) {
+    // v2.6.1: Eerst checken of er genoeg couplings zijn — niet prunen op een kaal veld
+    let total_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    let avg_couplings = total_couplings as f32 / field.points.len().max(1) as f32;
+    if avg_couplings < 4.0 {
+        tracing::warn!(avg_couplings = %format!("{:.1}", avg_couplings),
+            "Homeostasis OVERGESLAGEN — te weinig couplings");
+        return;
+    }
+
     // α = basisrate × serotonine-modulatie
-    // Hoge 5HT = "diepe slaap" = meer opschoning
-    let alpha = 0.005 * (1.0 + field.serotonin.clamp(0.0, 2.0));
+    // v2.6.1: Verlaagd van 0.005 naar 0.001 — was te agressief
+    let alpha = 0.001 * (1.0 + field.serotonin.clamp(0.0, 2.0));
     let prune_threshold = field.error_tracking_rate * 0.1;
 
     let mut total_pruned = 0u32;

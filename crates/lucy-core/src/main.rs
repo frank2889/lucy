@@ -155,6 +155,13 @@ async fn main() {
         tracing::info!(healed, "Post-bootstrap healing complete");
     }
 
+    // v2.6.1: Auto-rewire als couplings verloren zijn (homeostasis death spiral recovery)
+    let total_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    if total_couplings == 0 && !field.points.is_empty() {
+        tracing::warn!("GEEN COUPLINGS GEVONDEN — rewire field (phi/memory/vocab intact)");
+        field::rewire_field(&mut field);
+    }
+
     // === Laad vocabulaire ===
     let vocab_path = Path::new(VOCAB_PATH);
     let mut vocab = if vocab_path.exists() {

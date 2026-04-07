@@ -261,3 +261,115 @@ pub fn bootstrap_field_with_config(config: &FieldConfig) -> Field {
 
     field
 }
+
+/// Herbedrading van een bestaand veld — alleen couplings worden opnieuw aangemaakt.
+/// Phi, memory, prediction, emoties, vocab, retrieval etc. blijven INTACT.
+/// Wordt aangeroepen als couplings verloren zijn (bijv. door homeostasis death spiral).
+pub fn rewire_field(field: &mut Field) {
+    let config = FieldConfig::load_or_default();
+    let mut rng = rand::rng();
+
+    let n_input = config.n_input.min(field.n_input);
+    let n_hidden = config.n_hidden.min(field.n_hidden);
+    let n_output = config.n_output.min(field.n_output);
+    let hidden_start = n_input;
+    let output_start = n_input + n_hidden;
+    let local_k = config.local_k;
+    let long_range_p = config.long_range_p;
+
+    // Wis alle bestaande (lege) couplings
+    for p in &mut field.points {
+        p.couplings.clear();
+    }
+
+    // Input → eerste kwart hidden
+    for i in 0..n_input {
+        for _ in 0..32 {
+            let target = hidden_start + rng_usize(&mut rng, 0, n_hidden / 4);
+            field.points[i].couplings.push(Coupling {
+                target: target as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Hidden: Watts-Strogatz small-world
+    for i in 0..n_hidden {
+        let idx = hidden_start + i;
+        let is_inhib = field.points[idx].is_inhibitory();
+
+        for k in 1..=local_k / 2 {
+            let left = hidden_start + (i + n_hidden - k) % n_hidden;
+            let right = hidden_start + (i + k) % n_hidden;
+            let w = if is_inhib {
+                rng_range(&mut rng, -0.5, -0.1)
+            } else {
+                rng_range(&mut rng, 0.1, 0.5)
+            };
+            field.points[idx].couplings.push(Coupling {
+                target: left as u32, weight: w, momentum: 0.0, ..Default::default()
+            });
+            field.points[idx].couplings.push(Coupling {
+                target: right as u32, weight: w * 0.8, momentum: 0.0, ..Default::default()
+            });
+        }
+
+        for _ in 0..4 {
+            if rng_f32(&mut rng) < long_range_p {
+                let far = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+                if far != idx {
+                    field.points[idx].couplings.push(Coupling {
+                        target: far as u32,
+                        weight: rng_range(&mut rng, -0.2, 0.2),
+                        momentum: 0.0,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    // Laatste kwart hidden → Output
+    let last_q = hidden_start + n_hidden * 3 / 4;
+    for i in 0..n_output {
+        let oidx = output_start + i;
+        for _ in 0..32 {
+            let source = last_q + rng_usize(&mut rng, 0, n_hidden / 4);
+            field.points[oidx].couplings.push(Coupling {
+                target: source as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+                ..Default::default()
+            });
+            field.points[source].couplings.push(Coupling {
+                target: oidx as u32,
+                weight: rng_range(&mut rng, -0.15, 0.15),
+                momentum: 0.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Recurrente feedback loops
+    for _ in 0..n_hidden / 10 {
+        let a = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+        let b = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+        if a != b {
+            let w = rng_range(&mut rng, -0.1, 0.1);
+            field.points[a].couplings.push(Coupling {
+                target: b as u32, weight: w, momentum: 0.0, ..Default::default()
+            });
+            field.points[b].couplings.push(Coupling {
+                target: a as u32, weight: w * 0.5, momentum: 0.0, ..Default::default()
+            });
+        }
+    }
+
+    let n_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    tracing::info!(
+        couplings = n_couplings,
+        "Field rewired — couplings hersteld, phi/memory intact"
+    );
+}
