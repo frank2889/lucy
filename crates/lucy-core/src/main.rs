@@ -268,32 +268,17 @@ async fn main() {
     compute::init_rnd(&mut field);
     compute::assign_depths(&mut field);
 
-    // v2.6.5: Verwijder cross-depth random couplings (v2.6.5 bug — verniettigde hiërarchie)
+    // v2.6.5: Volledige rewire — herstel hiërarchie (oude weights waren noise, 42:1 ratio)
+    // Phi, memory, prediction, emoties, vocab, retrieval etc. blijven INTACT.
     {
-        let depths: Vec<u8> = field.points.iter().map(|p| p.depth).collect();
-        let n = depths.len();
-        let mut removed = 0usize;
-        for i in 0..n {
-            let my_depth = depths[i];
-            let before = field.points[i].couplings.len();
-            field.points[i].couplings.retain(|c| {
-                let t = c.target as usize;
-                if t >= n { return false; }
-                // Behoud: zelfde depth, OF belangrijke coupling (geleerd, niet random seed)
-                depths[t] == my_depth
-                    || c.importance > 0.001
-                    || c.weight.abs() > 0.02
-                    || c.broadcast
-            });
-            removed += before - field.points[i].couplings.len();
-        }
-        if removed > 0 {
-            tracing::info!(removed, "Cross-depth garbage couplings opgeruimd");
-        }
+        let old_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+        field::rewire_field(&mut field);
+        let new_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+        tracing::info!(old_couplings, new_couplings, "Topologie hersteld met K=20");
     }
-    // Nu veilig verdichten binnen depth-lagen
+    compute::assign_depths(&mut field);
+    // Verdicht binnen depth-lagen
     field::densify_couplings(&mut field, 20);
-    // Re-assign depths
     compute::assign_depths(&mut field);
 
     tracing::info!(
