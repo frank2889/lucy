@@ -981,31 +981,154 @@ impl Field {
     /// Dit is Lucy's immuunsysteem — beschermt tegen numerieke corruptie.
     pub fn heal(&mut self) -> u32 {
         let mut healed = 0u32;
+        let mut nan_phi = 0u32;
+        let mut nan_pred = 0u32;
+        let mut nan_mem = 0u32;
+        let mut nan_weight = 0u32;
+        let mut nan_momentum = 0u32;
+        let mut nan_importance = 0u32;
+        let mut nan_consolidated = 0u32;
+        let mut nan_fe = 0u32;
+        let mut nan_other = 0u32;
         for p in &mut self.points {
             for v in p.phi.iter_mut() {
-                if !v.is_finite() { *v = 0.0; healed += 1; }
+                if !v.is_finite() { *v = 0.0; healed += 1; nan_phi += 1; }
             }
             for v in p.prediction.iter_mut() {
-                if !v.is_finite() { *v = 0.0; healed += 1; }
+                if !v.is_finite() { *v = 0.0; healed += 1; nan_pred += 1; }
             }
             for v in p.memory.iter_mut() {
-                if !v.is_finite() { *v = 0.0; healed += 1; }
+                if !v.is_finite() { *v = 0.0; healed += 1; nan_mem += 1; }
             }
-            if !p.tension.is_finite() { p.tension = 0.0; healed += 1; }
-            if !p.energy.is_finite() { p.energy = 1.0; healed += 1; }
-            if !p.eta.is_finite() { p.eta = 0.01; healed += 1; }
+            if !p.tension.is_finite() { p.tension = 0.0; healed += 1; nan_other += 1; }
+            if !p.tension_ema.is_finite() { p.tension_ema = 0.0; healed += 1; nan_other += 1; }
+            if !p.energy.is_finite() { p.energy = 1.0; healed += 1; nan_other += 1; }
+            if !p.eta.is_finite() { p.eta = 0.01; healed += 1; nan_other += 1; }
+            if !p.free_energy.is_finite() { p.free_energy = 0.0; healed += 1; nan_fe += 1; }
+            if !p.free_energy_rate.is_finite() { p.free_energy_rate = 0.0; healed += 1; nan_other += 1; }
+            if !p.error_var.is_finite() { p.error_var = 1.0; healed += 1; nan_other += 1; }
+            if !p.precision.is_finite() { p.precision = 1.0; healed += 1; nan_other += 1; }
+            if !p.kl_divergence.is_finite() { p.kl_divergence = 0.0; healed += 1; nan_other += 1; }
+            if !p.blanket_surprise.is_finite() { p.blanket_surprise = 0.0; healed += 1; nan_other += 1; }
+            if !p.curiosity.is_finite() { p.curiosity = 0.0; healed += 1; nan_other += 1; }
+            if !p.satisfaction.is_finite() { p.satisfaction = 0.0; healed += 1; nan_other += 1; }
+            if !p.frustration.is_finite() { p.frustration = 0.0; healed += 1; nan_other += 1; }
+            if !p.expected_free_energy.is_finite() { p.expected_free_energy = 0.0; healed += 1; nan_other += 1; }
+            if !p.phi_integrated.is_finite() { p.phi_integrated = 0.0; healed += 1; nan_other += 1; }
+            if !p.branching_ratio.is_finite() { p.branching_ratio = 0.0; healed += 1; nan_other += 1; }
+            if !p.irreducible_free_energy.is_finite() { p.irreducible_free_energy = 0.0; healed += 1; nan_other += 1; }
+            if !p.control_belief.is_finite() { p.control_belief = 0.5; healed += 1; nan_other += 1; }
+            if !p.causal_power.is_finite() { p.causal_power = 0.0; healed += 1; nan_other += 1; }
+            if !p.rnd_score.is_finite() { p.rnd_score = 0.0; healed += 1; nan_other += 1; }
+            for v in p.reward_quantiles.iter_mut() {
+                if !v.is_finite() { *v = 0.0; healed += 1; nan_other += 1; }
+            }
             for c in &mut p.couplings {
                 if !c.weight.is_finite() {
-                    // v2.6.1: Niet naar 0.0 (wordt weggepruned door homeostasis!)
-                    // Klein random teken-behoudend gewicht zodat de verbinding overleeft
                     c.weight = 0.01;
-                    healed += 1;
+                    healed += 1; nan_weight += 1;
                 }
-                if !c.momentum.is_finite() { c.momentum = 0.0; healed += 1; }
+                if !c.momentum.is_finite() { c.momentum = 0.0; healed += 1; nan_momentum += 1; }
+                if !c.importance.is_finite() { c.importance = 0.0; healed += 1; nan_importance += 1; }
+                if !c.consolidated.is_finite() { c.consolidated = c.weight; healed += 1; nan_consolidated += 1; }
             }
         }
+        // v2.6.2: Heal veld-level statistieken
+        if !self.avg_free_energy.is_finite() { self.avg_free_energy = 0.0; healed += 1; }
+        if !self.avg_expected_free_energy.is_finite() { self.avg_expected_free_energy = 0.0; healed += 1; }
+        if !self.dopamine.is_finite() { self.dopamine = 0.0; healed += 1; }
+        if !self.norepinephrine.is_finite() { self.norepinephrine = 0.0; healed += 1; }
+        if !self.serotonin.is_finite() { self.serotonin = 0.0; healed += 1; }
+        if !self.acetylcholine.is_finite() { self.acetylcholine = 0.0; healed += 1; }
+        if !self.spectral_radius.is_finite() { self.spectral_radius = 1.0; healed += 1; }
+        if !self.oscillation_coherence.is_finite() { self.oscillation_coherence = 0.0; healed += 1; }
+        if !self.branching_ratio_avg.is_finite() { self.branching_ratio_avg = 0.0; healed += 1; }
+        // v2.6.2: integrated_info_avg was NIET geheald → NaN → phi_boost NaN → eta NaN → alles NaN
+        if !self.integrated_info_avg.is_finite() { self.integrated_info_avg = 0.0; healed += 1; }
+        if !self.ignition_strength.is_finite() { self.ignition_strength = 0.0; healed += 1; }
+        if !self.power_law_exponent.is_finite() { self.power_law_exponent = 1.5; healed += 1; }
+        if !self.theta_gamma_coupling.is_finite() { self.theta_gamma_coupling = 0.0; healed += 1; }
+        if !self.intention_strength.is_finite() { self.intention_strength = 0.0; healed += 1; }
+        if !self.total_energy.is_finite() { self.total_energy = 8704.0; healed += 1; }
+
+        // v2.6.3: Heal AdaptiveParams — deze werden NOOIT geheald!
+        // Als emotion_decay NaN is → dopamine NaN → coherence_boost NaN → total_boost NaN → eta NaN → ALLES NaN
+        let defaults = AdaptiveParams::default();
+        for i in 0..4 {
+            if !self.adaptive.emotion_decay[i].is_finite() {
+                tracing::error!(i, val = %self.adaptive.emotion_decay[i], "NaN in adaptive.emotion_decay — ROOT CAUSE!");
+                self.adaptive.emotion_decay[i] = defaults.emotion_decay[i];
+                healed += 1;
+            }
+        }
+        if !self.adaptive.dopamine_baseline.is_finite() { self.adaptive.dopamine_baseline = defaults.dopamine_baseline; healed += 1; }
+        if !self.adaptive.ne_noise_scale.is_finite() { self.adaptive.ne_noise_scale = defaults.ne_noise_scale; healed += 1; }
+        if !self.adaptive.ne_perturb_frac.is_finite() { self.adaptive.ne_perturb_frac = defaults.ne_perturb_frac; healed += 1; }
+        if !self.adaptive.ep_beta.is_finite() {
+            tracing::error!(val = %self.adaptive.ep_beta, "NaN in adaptive.ep_beta!");
+            self.adaptive.ep_beta = defaults.ep_beta; healed += 1;
+        }
+        if !self.adaptive.goal_completion_thresh.is_finite() { self.adaptive.goal_completion_thresh = defaults.goal_completion_thresh; healed += 1; }
+        if !self.adaptive.escalation_tension_low.is_finite() { self.adaptive.escalation_tension_low = defaults.escalation_tension_low; healed += 1; }
+        if !self.adaptive.escalation_frust_thresh.is_finite() { self.adaptive.escalation_frust_thresh = defaults.escalation_frust_thresh; healed += 1; }
+        for i in 0..4 {
+            for j in 0..4 {
+                if !self.adaptive.neuromod_interactions[i][j].is_finite() {
+                    tracing::error!(i, j, val = %self.adaptive.neuromod_interactions[i][j], "NaN in neuromod_interactions!");
+                    self.adaptive.neuromod_interactions[i][j] = defaults.neuromod_interactions[i][j];
+                    healed += 1;
+                }
+            }
+        }
+
+        // v2.6.3: Heal core hyperparameters
+        if !self.lambda.is_finite() { self.lambda = 0.01; healed += 1; }
+        if !self.beta.is_finite() { self.beta = 0.1; healed += 1; }
+        if !self.alpha.is_finite() { self.alpha = 0.001; healed += 1; }
+        if !self.rho.is_finite() { self.rho = 0.95; healed += 1; }
+        if !self.mu.is_finite() { self.mu = 0.9; healed += 1; }
+        if !self.kappa.is_finite() { self.kappa = 0.01; healed += 1; }
+        if !self.omega.is_finite() { self.omega = 0.01; healed += 1; }
+        if !self.growth_threshold.is_finite() { self.growth_threshold = 0.5; healed += 1; }
+        if !self.ema_decay.is_finite() { self.ema_decay = 0.99; healed += 1; }
+        if !self.clamp_range.is_finite() { self.clamp_range = 10.0; healed += 1; }
+        if !self.settle_epsilon.is_finite() { self.settle_epsilon = 0.01; healed += 1; }
+        if !self.noise_amplitude.is_finite() { self.noise_amplitude = 0.1; healed += 1; }
+        if !self.emo_decay.is_finite() { self.emo_decay = 0.95; healed += 1; }
+        if !self.error_tracking_rate.is_finite() { self.error_tracking_rate = 0.05; healed += 1; }
+        if !self.fe_tracking_rate.is_finite() { self.fe_tracking_rate = 0.05; healed += 1; }
+        if !self.kl_scale.is_finite() { self.kl_scale = 0.5; healed += 1; }
+        if !self.sampling_temperature.is_finite() { self.sampling_temperature = 0.8; healed += 1; }
+        if !self.sampling_top_p.is_finite() { self.sampling_top_p = 0.9; healed += 1; }
+        if !self.repetition_penalty.is_finite() { self.repetition_penalty = 1.2; healed += 1; }
+        if !self.global_oscillation_phase.is_finite() { self.global_oscillation_phase = 0.0; healed += 1; }
+
+        // v2.6.3: Heal attn_weights — THE ROOT CAUSE
+        // attn_weights is serialized in snapshot but NEVER healed.
+        // If ANY attn_weight is NaN → attention_gate produces NaN attn_context
+        // → update_phi adds ATTN_GAMMA * NaN to phi → ALL phi become NaN every tick.
+        if let Some(ref mut weights) = self.attn_weights {
+            let mut nan_attn = 0u32;
+            for w in weights.iter_mut() {
+                if !w.is_finite() {
+                    *w = 0.0;
+                    nan_attn += 1;
+                    healed += 1;
+                }
+            }
+            if nan_attn > 0 {
+                tracing::error!(nan_attn, total = weights.len(), "NaN in attn_weights — THIS IS THE ROOT CAUSE!");
+            }
+        }
+        // Also clear attn_context (runtime buffer, not serialized) to remove stale NaN
+        for ctx in &mut self.attn_context {
+            for v in ctx.iter_mut() {
+                if !v.is_finite() { *v = 0.0; healed += 1; }
+            }
+        }
+
         if healed > 0 {
-            tracing::warn!(healed, "Field healed: NaN/Inf values reset");
+            tracing::warn!(healed, nan_phi, nan_pred, nan_mem, nan_weight, nan_momentum, nan_importance, nan_consolidated, nan_fe, nan_other, "Field healed: NaN/Inf values reset");
         }
         healed
     }

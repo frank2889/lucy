@@ -152,7 +152,7 @@ async fn main() {
     // v2.5: Onmiddellijk healen na laden/bootstrap — voorkomt inf bij tick 0
     let healed = field.heal();
     if healed > 0 {
-        tracing::info!(healed, "Post-bootstrap healing complete");
+        tracing::info!(healed, "Post-bootstrap healing complete v2.6.2 — NaN-safe EMA");
     }
 
     // v2.6.1: Auto-rewire als couplings verloren zijn (homeostasis death spiral recovery)
@@ -576,6 +576,31 @@ async fn main() {
         // v2.3: adapt_dynamics — update ALLE dynamische parameters op basis van veldstaat
         if tick == 0 || tick % 50 == 0 {
             compute::adapt_dynamics(&mut field);
+            // v2.6.2: Check critical field-level params after adapt_dynamics
+            if !field.clamp_range.is_finite() {
+                tracing::error!(clamp_range = %field.clamp_range, "NaN in clamp_range after adapt_dynamics!");
+                field.clamp_range = 5.0;
+            }
+            if !field.lambda.is_finite() {
+                tracing::error!(lambda = %field.lambda, "NaN in lambda after adapt_dynamics!");
+                field.lambda = 0.01;
+            }
+            if !field.alpha.is_finite() {
+                tracing::error!(alpha = %field.alpha, "NaN in alpha after adapt_dynamics!");
+                field.alpha = 0.001;
+            }
+            if !field.noise_amplitude.is_finite() {
+                tracing::error!(noise = %field.noise_amplitude, "NaN in noise_amplitude after adapt_dynamics!");
+                field.noise_amplitude = 0.1;
+            }
+            if !field.settle_epsilon.is_finite() {
+                tracing::error!("NaN in settle_epsilon after adapt_dynamics!");
+                field.settle_epsilon = 0.01;
+            }
+            if !field.adaptive.ep_beta.is_finite() {
+                tracing::error!(ep_beta = %field.adaptive.ep_beta, "NaN in ep_beta after adapt_dynamics!");
+                field.adaptive.ep_beta = 1.0;
+            }
             // v2.5: Sync explorer stats naar field (lock-free access voor dashboard)
             if let Ok(exp) = shared.explorer.try_read() {
                 field.pages_read = exp.pages_read;
@@ -601,6 +626,18 @@ async fn main() {
         if tick % 1000 == 0 {
             tracing::info!(phase = ?field.phase, gpu_remote = remote_gpu.is_some(), gpu_local = local_gpu.is_some(), "tick_loop_debug");
         }
+
+        // v2.6.2: NaN canary — detect WHICH step introduces NaN
+        let nan_check = |f: &lucy_state::Field, label: &str| {
+            let nan_count: u32 = f.active_set.iter()
+                .take(100) // sample first 100 points
+                .map(|&id| f.points[id as usize].phi.iter().filter(|v| !v.is_finite()).count() as u32)
+                .sum();
+            if nan_count > 0 {
+                tracing::error!(nan_count, step = label, tick = f.tick, "NaN DETECTED in phi");
+            }
+        };
+
         if field.phase == FieldPhase::Idle {
             // 1. Veldberekeningen — Remote GPU → Local GPU → CPU
             if let Some(ref mut rg) = remote_gpu {
@@ -660,6 +697,28 @@ async fn main() {
                 compute::apply_neuromodulation(&mut field);
                 if tick % 100 == 0 { tracing::info!("step:neuromod_done"); }
 
+                nan_check(&field, "after_neuromod");
+
+                // v2.6.3: Targeted NaN diagnostic — check FIRST active point
+                if tick % 1000 == 0 {
+                    let first_id = field.active_set[0] as usize;
+                    let first_phi0 = field.points[first_id].phi[0];
+                    let first_w0 = field.points[first_id].couplings.first().map(|c| c.weight).unwrap_or(0.0);
+                    if !first_phi0.is_finite() || !first_w0.is_finite() {
+                        tracing::error!(
+                            phi0 = %first_phi0,
+                            w0 = %first_w0,
+                            lambda = %field.lambda,
+                            beta = %field.beta,
+                            alpha = %field.alpha,
+                            noise_amp = %field.noise_amplitude,
+                            clamp = %field.clamp_range,
+                            tick,
+                            "PRE-UPDATE NaN in first point!"
+                        );
+                    }
+                }
+
                 let self_input = compute::self_state_input(&field);
 
                 // v1.2: Skip punten met near-zero tension (efficiëntie)
@@ -685,6 +744,58 @@ async fn main() {
                     compute::update_memory(&mut field, id);
                     compute::compute_tension(&mut field, id);
                     updated += 1;
+                    // v2.6.3: catch first NaN point
+                    if updated <= 3 || (updated % 1000 == 0) {
+                        if !field.points[id as usize].phi[0].is_finite() {
+                            let is_sens = field.points[id as usize].is_sensory();
+                            let is_out = field.points[id as usize].is_output();
+                            let n_coup = field.points[id as usize].couplings.len();
+                            let any_nan_w: bool = field.points[id as usize].couplings.iter().any(|c| !c.weight.is_finite());
+                            tracing::error!(
+                                id, updated, is_sens, is_out, n_coup, any_nan_w,
+                                phi0 = %field.points[id as usize].phi[0],
+                                tick,
+                                "FIRST NaN POINT after update_phi!"
+                            );
+                        }
+                    }
+                }
+
+                nan_check(&field, "after_field_updates");
+
+                // v2.6.3: Emergency sanitize — prevent phi/weight blowup
+                // NaN.clamp() returns NaN, so we must handle NaN separately.
+                {
+                    let cr = 5.0f32; // hardcoded veilige limiet — adapt_dynamics mag dit niet overrulen
+                    let wr = cr / 2.0;
+                    for &id in &field.active_set {
+                        let p = &mut field.points[id as usize];
+                        for d in 0..lucy_state::DIM {
+                            if p.phi[d].is_finite() {
+                                p.phi[d] = p.phi[d].clamp(-cr, cr);
+                            } else {
+                                p.phi[d] = 0.0;
+                            }
+                            if p.memory[d].is_finite() {
+                                p.memory[d] = p.memory[d].clamp(-cr, cr);
+                            } else {
+                                p.memory[d] = 0.0;
+                            }
+                        }
+                        for c in &mut p.couplings {
+                            if c.weight.is_finite() {
+                                c.weight = c.weight.clamp(-wr, wr);
+                            } else {
+                                c.weight = 0.01;
+                            }
+                        }
+                    }
+                }
+
+                // v2.6.4: Layer norm in main loop — voorkomt geleidelijke phi drift
+                // Settle loops hebben dit elke 10 ticks; main loop had het niet.
+                if tick % 10 == 0 {
+                    compute::apply_layer_norm(&mut field);
                 }
 
                 if tick % 100 == 0 { tracing::info!(updated, "step:field_updates_done"); }
@@ -695,6 +806,7 @@ async fn main() {
                 if tick % 10 == 0 {
                     compute::global_workspace_broadcast(&mut field);
                     compute::update_oscillations(&mut field);
+                    nan_check(&field, "after_consciousness");
                 }
 
                 // v2.6: Training — NOOIT lege ticks
@@ -724,6 +836,7 @@ async fn main() {
                         if chunk_count > 0 && tick % 1000 == 0 {
                             tracing::info!(chunks = chunk_count, queue = training_queue.len(), "Training: nieuwe data");
                         }
+                        nan_check(&field, "after_training");
                     } else {
                         // Queue leeg → replay oud voorbeeld via consolidatie
                         // Dit voorkomt nul-gradient ticks: Lucy leert ALTIJD
@@ -732,6 +845,7 @@ async fn main() {
                             if let Ok(mut replay) = shared.replay.try_write() {
                                 let _ = replay.replay_one(&mut field);
                             }
+                            nan_check(&field, "after_replay");
                         }
                     }
                 }
@@ -742,6 +856,7 @@ async fn main() {
                     compute::compute_criticality(&mut field);             // Branching ratio σ
                     compute::compute_expected_free_energy(&mut field);    // Active Inference EFE
                     compute::anti_hebbian_decorrelation(&mut field);
+                    nan_check(&field, "after_consciousness_metrics");
                 }
 
                 // v2.6: Synaptic homeostasis — intelligent vergeten (Tononi & Cirelli 2006)
@@ -790,17 +905,20 @@ async fn main() {
                         compute::update_attention_weights(&mut field);
                         compute::consolidate_weights(&mut field);
                     }
+                    nan_check(&field, "after_update_weights");
                 }
             }
 
             // 2. Reflectie: Lucy herkauwt haar laatste gedachte (continuous thought)
             if tick % 100 == 0 && field.last_thought.is_some() {
                 compute::reflect_tick(&mut field);
+                nan_check(&field, "after_reflect");
             }
 
             // 2b. Exploratie-ruis
             if tick % 10 == 0 {
                 compute::maybe_perturb(&mut field);
+                nan_check(&field, "after_perturb");
             }
 
             // v2.4: Edge of chaos monitoring — vaker bij laag spectral radius
@@ -1055,7 +1173,10 @@ async fn main() {
         while let Ok(deltas) = weight_delta_rx.try_recv() {
             for wd in &deltas {
                 if wd.point_id < field.points.len() && wd.coupling_idx < field.points[wd.point_id].couplings.len() {
-                    field.points[wd.point_id].couplings[wd.coupling_idx].weight = wd.delta;
+                    // v2.6.2: NaN-guard — training thread kan NaN produceren via micro_ep
+                    if wd.delta.is_finite() {
+                        field.points[wd.point_id].couplings[wd.coupling_idx].weight = wd.delta;
+                    }
                 }
             }
         }

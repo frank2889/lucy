@@ -152,7 +152,14 @@ async fn main() {
     // v2.5: Onmiddellijk healen na laden/bootstrap — voorkomt inf bij tick 0
     let healed = field.heal();
     if healed > 0 {
-        tracing::info!(healed, "Post-bootstrap healing complete");
+        tracing::info!(healed, "Post-bootstrap healing complete v2.6.2 — NaN-safe EMA");
+    }
+
+    // v2.6.1: Auto-rewire als couplings verloren zijn (homeostasis death spiral recovery)
+    let total_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    if total_couplings == 0 && !field.points.is_empty() {
+        tracing::warn!("GEEN COUPLINGS GEVONDEN — rewire field (phi/memory/vocab intact)");
+        field::rewire_field(&mut field);
     }
 
     // === Laad vocabulaire ===
@@ -249,11 +256,12 @@ async fn main() {
         let _ = std::fs::write(bootstrap_marker, b"done");
     }
 
-    // Seed API discovery — Lucy vindt zelf welke APIs en data er bestaan
-    explorer.seed_api_discovery();
-    // Laad APIs die Lucy zelf eerder heeft ontdekt en opgeslagen
+    // v2.5: Seed diverse bronnen (uit data/sources.txt) + diversifieer frontier
+    explorer.seed_api_discovery(); // leest uit sources.txt (niet meer hardcoded)
     explorer.load_self_managed_apis();
-    tracing::info!(frontier = explorer.frontier.len(), "API discovery sources seeded");
+    // Schoon de frontier op: max 20% per domein (breekt API-monoculture)
+    explorer.diversify_frontier();
+    tracing::info!(frontier = explorer.frontier.len(), interests = explorer.interests.len(), "Exploration bronnen geladen + gediversifieerd");
 
     // === v0.7: Initialiseer bewustzijns-systemen ===
     compute::init_rnd(&mut field);
@@ -269,11 +277,26 @@ async fn main() {
 
     // === Dagboek ===
     let journal_path = Path::new("data/journal.json");
-    let journal = if journal_path.exists() {
+    let mut journal = if journal_path.exists() {
         journal::Journal::load(journal_path).unwrap_or_else(|_| journal::Journal::new())
     } else {
         journal::Journal::new()
     };
+
+    // v2.5: Herstel verloren tellers vanuit journal (overleeft struct-wijzigingen)
+    if field.reflection_count == 0 && journal.reflection_count > 0 {
+        tracing::info!(
+            journal_reflections = journal.reflection_count,
+            "Reflection count hersteld vanuit journal"
+        );
+        field.reflection_count = journal.reflection_count;
+    }
+    // Sync journal → field voor pages/tokens (als field ze kwijt is)
+    if field.pages_read == 0 && journal.total_pages_read > 0 {
+        field.pages_read = journal.total_pages_read;
+        field.tokens_processed = journal.total_tokens_processed;
+        tracing::info!(pages = journal.total_pages_read, "Explorer stats hersteld vanuit journal");
+    }
 
     // === GPU initialisatie: remote GPU (Vast.ai) → lokale GPU → CPU ===
     let gpu_url = std::env::var("GPU_URL").ok();
@@ -553,6 +576,42 @@ async fn main() {
         // v2.3: adapt_dynamics — update ALLE dynamische parameters op basis van veldstaat
         if tick == 0 || tick % 50 == 0 {
             compute::adapt_dynamics(&mut field);
+            // v2.6.2: Check critical field-level params after adapt_dynamics
+            if !field.clamp_range.is_finite() {
+                tracing::error!(clamp_range = %field.clamp_range, "NaN in clamp_range after adapt_dynamics!");
+                field.clamp_range = 5.0;
+            }
+            if !field.lambda.is_finite() {
+                tracing::error!(lambda = %field.lambda, "NaN in lambda after adapt_dynamics!");
+                field.lambda = 0.01;
+            }
+            if !field.alpha.is_finite() {
+                tracing::error!(alpha = %field.alpha, "NaN in alpha after adapt_dynamics!");
+                field.alpha = 0.001;
+            }
+            if !field.noise_amplitude.is_finite() {
+                tracing::error!(noise = %field.noise_amplitude, "NaN in noise_amplitude after adapt_dynamics!");
+                field.noise_amplitude = 0.1;
+            }
+            if !field.settle_epsilon.is_finite() {
+                tracing::error!("NaN in settle_epsilon after adapt_dynamics!");
+                field.settle_epsilon = 0.01;
+            }
+            if !field.adaptive.ep_beta.is_finite() {
+                tracing::error!(ep_beta = %field.adaptive.ep_beta, "NaN in ep_beta after adapt_dynamics!");
+                field.adaptive.ep_beta = 1.0;
+            }
+            // v2.5: Sync explorer stats naar field (lock-free access voor dashboard)
+            if let Ok(exp) = shared.explorer.try_read() {
+                field.pages_read = exp.pages_read;
+                field.tokens_processed = exp.tokens_processed;
+            }
+            // v2.5: Sync tellers naar journal (overleeft struct-wijzigingen)
+            if let Ok(mut j) = shared.journal.try_write() {
+                j.reflection_count = field.reflection_count;
+                j.total_pages_read = field.pages_read;
+                j.total_tokens_processed = field.tokens_processed;
+            }
             // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
             field_snapshot.store(Arc::new(field.clone()));
             vocab_snapshot.store(Arc::new(vocab.clone()));
@@ -567,6 +626,18 @@ async fn main() {
         if tick % 1000 == 0 {
             tracing::info!(phase = ?field.phase, gpu_remote = remote_gpu.is_some(), gpu_local = local_gpu.is_some(), "tick_loop_debug");
         }
+
+        // v2.6.2: NaN canary — detect WHICH step introduces NaN
+        let nan_check = |f: &lucy_state::Field, label: &str| {
+            let nan_count: u32 = f.active_set.iter()
+                .take(100) // sample first 100 points
+                .map(|&id| f.points[id as usize].phi.iter().filter(|v| !v.is_finite()).count() as u32)
+                .sum();
+            if nan_count > 0 {
+                tracing::error!(nan_count, step = label, tick = f.tick, "NaN DETECTED in phi");
+            }
+        };
+
         if field.phase == FieldPhase::Idle {
             // 1. Veldberekeningen — Remote GPU → Local GPU → CPU
             if let Some(ref mut rg) = remote_gpu {
@@ -626,6 +697,28 @@ async fn main() {
                 compute::apply_neuromodulation(&mut field);
                 if tick % 100 == 0 { tracing::info!("step:neuromod_done"); }
 
+                nan_check(&field, "after_neuromod");
+
+                // v2.6.3: Targeted NaN diagnostic — check FIRST active point
+                if tick % 1000 == 0 {
+                    let first_id = field.active_set[0] as usize;
+                    let first_phi0 = field.points[first_id].phi[0];
+                    let first_w0 = field.points[first_id].couplings.first().map(|c| c.weight).unwrap_or(0.0);
+                    if !first_phi0.is_finite() || !first_w0.is_finite() {
+                        tracing::error!(
+                            phi0 = %first_phi0,
+                            w0 = %first_w0,
+                            lambda = %field.lambda,
+                            beta = %field.beta,
+                            alpha = %field.alpha,
+                            noise_amp = %field.noise_amplitude,
+                            clamp = %field.clamp_range,
+                            tick,
+                            "PRE-UPDATE NaN in first point!"
+                        );
+                    }
+                }
+
                 let self_input = compute::self_state_input(&field);
 
                 // v1.2: Skip punten met near-zero tension (efficiëntie)
@@ -651,27 +744,109 @@ async fn main() {
                     compute::update_memory(&mut field, id);
                     compute::compute_tension(&mut field, id);
                     updated += 1;
+                    // v2.6.3: catch first NaN point
+                    if updated <= 3 || (updated % 1000 == 0) {
+                        if !field.points[id as usize].phi[0].is_finite() {
+                            let is_sens = field.points[id as usize].is_sensory();
+                            let is_out = field.points[id as usize].is_output();
+                            let n_coup = field.points[id as usize].couplings.len();
+                            let any_nan_w: bool = field.points[id as usize].couplings.iter().any(|c| !c.weight.is_finite());
+                            tracing::error!(
+                                id, updated, is_sens, is_out, n_coup, any_nan_w,
+                                phi0 = %field.points[id as usize].phi[0],
+                                tick,
+                                "FIRST NaN POINT after update_phi!"
+                            );
+                        }
+                    }
+                }
+
+                nan_check(&field, "after_field_updates");
+
+                // v2.6.3: Emergency sanitize — prevent phi/weight blowup
+                // NaN.clamp() returns NaN, so we must handle NaN separately.
+                {
+                    let cr = 5.0f32; // hardcoded veilige limiet — adapt_dynamics mag dit niet overrulen
+                    let wr = cr / 2.0;
+                    for &id in &field.active_set {
+                        let p = &mut field.points[id as usize];
+                        for d in 0..lucy_state::DIM {
+                            if p.phi[d].is_finite() {
+                                p.phi[d] = p.phi[d].clamp(-cr, cr);
+                            } else {
+                                p.phi[d] = 0.0;
+                            }
+                            if p.memory[d].is_finite() {
+                                p.memory[d] = p.memory[d].clamp(-cr, cr);
+                            } else {
+                                p.memory[d] = 0.0;
+                            }
+                        }
+                        for c in &mut p.couplings {
+                            if c.weight.is_finite() {
+                                c.weight = c.weight.clamp(-wr, wr);
+                            } else {
+                                c.weight = 0.01;
+                            }
+                        }
+                    }
+                }
+
+                // v2.6.4: Layer norm in main loop — voorkomt geleidelijke phi drift
+                // Settle loops hebben dit elke 10 ticks; main loop had het niet.
+                if tick % 10 == 0 {
+                    compute::apply_layer_norm(&mut field);
                 }
 
                 if tick % 100 == 0 { tracing::info!(updated, "step:field_updates_done"); }
-                // v0.7: GWT broadcast + intentie (neuromodulatie verplaatst naar vóór field updates)
-                compute::global_workspace_broadcast(&mut field);
-                if tick % 100 == 0 { tracing::info!("step:gwt_done"); }
+                // v2.6: Bewustzijns-operaties — elke 10 ticks (was: elke tick)
+                // GWB + oscillaties kosten ~5ms/tick maar leren NIKS.
+                // Elke 10 ticks is genoeg voor bewustzijns-dynamica (50ms = 1 gamma cyclus).
+                // De vrijgemaakte CPU gaat naar weight updates (nu elke tick).
+                if tick % 10 == 0 {
+                    compute::global_workspace_broadcast(&mut field);
+                    compute::update_oscillations(&mut field);
+                    nan_check(&field, "after_consciousness");
+                }
 
-                // === v2.0: Bewustzijns-fysica — elke tick ===
-                // Oscillaties: gamma-ritme voor temporele binding (Kuramoto model)
-                compute::update_oscillations(&mut field);
-
-                // v2.5: Micro-EP training — batch bij volle queue, 1 bij rustig
+                // v2.6: Training — NOOIT lege ticks
+                // Als queue items heeft: verwerk max 20 chunks
+                // Als queue LEEG is: replay oud voorbeeld (consolidatie)
+                // Effect: ELKE tick leert Lucy iets, nooit nul-gradient
                 {
-                    let batch = if training_queue.len() > 500 { 5 } else { 1 };
-                    for _ in 0..batch {
-                        if let Some(chunk) = training_queue.pop() {
-                            let delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
-                            if delta > 0.001 && tick % 1000 == 0 {
-                                tracing::info!(delta = format!("{:.4}", delta), queue = training_queue.len(), "Micro-EP batch");
+                    let queue_len = training_queue.len();
+                    if queue_len > 0 {
+                        // Verwerk nieuwe data
+                        let batch = queue_len.min(20);
+                        let ep_beta = field.adaptive.ep_beta;
+                        let mut chunk_count = 0u32;
+                        for _ in 0..batch {
+                            if let Some(chunk) = training_queue.pop() {
+                                chunk_count += 1;
+                                if chunk_count % 10 == 0 && chunk.input_embs.len() >= 4 {
+                                    let _delta = compute::equilibrium_propagation(
+                                        &mut field, &chunk.input_embs, &chunk.target_embs,
+                                        1, 10, ep_beta,
+                                    );
+                                } else {
+                                    let _delta = compute::micro_ep(&mut field, &chunk.input_embs, &chunk.target_embs);
+                                }
+                            } else { break; }
+                        }
+                        if chunk_count > 0 && tick % 1000 == 0 {
+                            tracing::info!(chunks = chunk_count, queue = training_queue.len(), "Training: nieuwe data");
+                        }
+                        nan_check(&field, "after_training");
+                    } else {
+                        // Queue leeg → replay oud voorbeeld via consolidatie
+                        // Dit voorkomt nul-gradient ticks: Lucy leert ALTIJD
+                        // Elke 5e lege tick: replay (niet elke tick, te duur)
+                        if tick % 5 == 0 {
+                            if let Ok(mut replay) = shared.replay.try_write() {
+                                let _ = replay.replay_one(&mut field);
                             }
-                        } else { break; }
+                            nan_check(&field, "after_replay");
+                        }
                     }
                 }
 
@@ -681,6 +856,13 @@ async fn main() {
                     compute::compute_criticality(&mut field);             // Branching ratio σ
                     compute::compute_expected_free_energy(&mut field);    // Active Inference EFE
                     compute::anti_hebbian_decorrelation(&mut field);
+                    nan_check(&field, "after_consciousness_metrics");
+                }
+
+                // v2.6: Synaptic homeostasis — intelligent vergeten (Tononi & Cirelli 2006)
+                // Elke 1000 ticks: schaal alle weights omlaag, prune zwakke verbindingen
+                if tick % 1000 == 0 {
+                    compute::synaptic_homeostasis(&mut field);
                 }
 
                 if tick % 500 == 0 {
@@ -703,31 +885,40 @@ async fn main() {
                     compute::update_rnd(&mut field);
                 }
 
-                // Leren (gewicht updates) — CPU path
-                if tick.saturating_sub(last_learn_tick) >= field.learn_interval {
-                    last_learn_tick = tick;
-                    let active: Vec<u32> = field.active_set.clone();
+                // v2.6: Leren ELKE TICK — niet meer wachten op learn_interval
+                // Was: elke 100 ticks (1% van ticks leerde). Nu: elke tick.
+                // Maar: halve active set per tick (afwisselend even/oneven) voor performance
+                {
+                    let half = tick % 2 == 0; // even ticks: eerste helft, oneven: tweede
+                    let active: Vec<u32> = field.active_set.iter()
+                        .enumerate()
+                        .filter(|(i, _)| (*i % 2 == 0) == half)
+                        .map(|(_, &id)| id)
+                        .collect();
                     for &id in &active {
                         compute::update_weights(&mut field, id);
                     }
-                    growth::maybe_meta_learn(&mut field);
-
-                    // v0.9: Update attention weights
-                    compute::update_attention_weights(&mut field);
-
-                    // v0.7: Consolideer weights na leren (EWC anti-vergeten)
-                    compute::consolidate_weights(&mut field);
+                    // Meta-learn + consolidatie: elke learn_interval (niet elke tick)
+                    if tick.saturating_sub(last_learn_tick) >= field.learn_interval {
+                        last_learn_tick = tick;
+                        growth::maybe_meta_learn(&mut field);
+                        compute::update_attention_weights(&mut field);
+                        compute::consolidate_weights(&mut field);
+                    }
+                    nan_check(&field, "after_update_weights");
                 }
             }
 
             // 2. Reflectie: Lucy herkauwt haar laatste gedachte (continuous thought)
             if tick % 100 == 0 && field.last_thought.is_some() {
                 compute::reflect_tick(&mut field);
+                nan_check(&field, "after_reflect");
             }
 
             // 2b. Exploratie-ruis
             if tick % 10 == 0 {
                 compute::maybe_perturb(&mut field);
+                nan_check(&field, "after_perturb");
             }
 
             // v2.4: Edge of chaos monitoring — vaker bij laag spectral radius
@@ -933,15 +1124,16 @@ async fn main() {
 
                     let text = learner::extract_readable_text(&body);
                     if text.len() >= 20 {
-                        let capped: String = text.chars().take(2000).collect();
+                        // v2.6: Text cap 2000→8000 (was: 60% van pagina weggegooid)
+                        let capped: String = text.chars().take(8000).collect();
                         if let Some(clean) = learner::filter_content(&capped) {
                             explorer.absorb_interests(&clean);
                             let token_ids = vocab.tokenize(&clean);
                             explorer.tokens_processed += token_ids.len() as u64;
 
-                            // Stuur chunks naar training thread (non-blocking)
-                            let chunk_size = 16;
-                            for chunk in token_ids.windows(chunk_size).step_by(chunk_size) {
+                            // v2.6: Chunk size 16→32, overlap 50% (was: elk token 1× gezien)
+                            let chunk_size = 32;
+                            for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) {
                                 if chunk.len() < 4 { continue; }
                                 let mid = chunk.len() / 2;
                                 let input_embs: Vec<[f32; DIM]> = chunk[..mid].iter()
@@ -981,7 +1173,10 @@ async fn main() {
         while let Ok(deltas) = weight_delta_rx.try_recv() {
             for wd in &deltas {
                 if wd.point_id < field.points.len() && wd.coupling_idx < field.points[wd.point_id].couplings.len() {
-                    field.points[wd.point_id].couplings[wd.coupling_idx].weight = wd.delta;
+                    // v2.6.2: NaN-guard — training thread kan NaN produceren via micro_ep
+                    if wd.delta.is_finite() {
+                        field.points[wd.point_id].couplings[wd.coupling_idx].weight = wd.delta;
+                    }
                 }
             }
         }
@@ -998,6 +1193,21 @@ async fn main() {
             }
           }
           // v2.1: Geen continue meer — tick loop moet altijd doorlopen
+        }
+
+        // v2.6: BPE periodiek bijleren — vocab groeit met nieuwe domeinen
+        // v2.6: BPE bijleren elke 10K ticks (was 50K — vocab groeide nooit)
+        if tick % 10_000 == 0 && tick > 0 {
+            let recent_text = fs.read_own_source().unwrap_or_default()
+                .into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(" ");
+            if recent_text.len() > 100 {
+                let old_size = vocab.vocab_size();
+                vocab.learn_bpe(&recent_text, 500); // 500 nieuwe merges per cyclus
+                let new_size = vocab.vocab_size();
+                if new_size > old_size {
+                    tracing::info!(old = old_size, new = new_size, "BPE bijgeleerd: {} nieuwe tokens", new_size - old_size);
+                }
+            }
         }
 
         // 9b. AI Teacher — verwijderd

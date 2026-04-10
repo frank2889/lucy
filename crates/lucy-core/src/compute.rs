@@ -114,6 +114,8 @@ pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
 
         for &(target, weight) in &coupling_data {
             if let Some(neighbor) = field.points.get(target as usize) {
+                // v2.6.4: skip NaN neighbors — voorkom cascade door heel het veld
+                if !neighbor.phi[0].is_finite() { continue; }
                 for d in 0..DIM {
                     grad[d] += weight * (phi_self[d] - neighbor.phi[d]);
                 }
@@ -152,8 +154,11 @@ pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
         }
 
         // Attention context injectie (v0.9)
+        // v2.6.3: NaN guard — attn_context can contain NaN from stale attention computations
         if let Some(ref ctx) = attn_ctx {
-            point.phi[d] += ATTN_GAMMA * ctx[d];
+            if ctx[d].is_finite() {
+                point.phi[d] += ATTN_GAMMA * ctx[d];
+            }
         }
 
         // Sparse penalty: L1 — v2.4: CONDITIONEEL
@@ -161,6 +166,11 @@ pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
         // Bij lage tension duwde dit alles naar nul → doodsspiraal.
         if point.phi[d].abs() > field.noise_amplitude {
             point.phi[d] -= alpha * point.phi[d].signum();
+        }
+
+        // v2.6.3: Hard clamp — prevent inf/NaN from accumulating
+        if !point.phi[d].is_finite() {
+            point.phi[d] = 0.0;
         }
     }
 
@@ -234,7 +244,7 @@ pub fn update_weights(field: &mut Field, id: u32) {
     let mu = field.mu;
     let point = &field.points[id as usize];
     let eps = prediction_error(point);
-    let eta = point.eta;
+    let eta = if point.eta.is_finite() { point.eta } else { 0.01 };
     let phi_self = point.phi;
 
     // Kopieer buur-phi's naar stack-buffer (SmallVec past op stack voor K≤16)
@@ -254,6 +264,9 @@ pub fn update_weights(field: &mut Field, id: u32) {
             dw += eps[d] * (phi_self[d] - neighbor_data[i][d]);
         }
         dw /= DIM as f32;
+        // Gradient clipping: voorkom explosive weight updates en NaN propagatie
+        if !dw.is_finite() { dw = 0.0; }
+        dw = dw.clamp(-1.0, 1.0);
 
         coupling.momentum = mu * coupling.momentum + (1.0 - mu) * dw;
         // EWC penalty: bescherm belangrijke weights — sterkte schaalt met kl_scale
@@ -264,11 +277,12 @@ pub fn update_weights(field: &mut Field, id: u32) {
 
         // v2.6: Free Energy-gebaseerd vergeten (Friston precision weighting op synapsen)
         // decay ∝ avg_F / importance — onbelangrijke weights vervagen, belangrijke overleven
-        let fe_decay = field.avg_free_energy / (coupling.importance + 0.001) * 0.0005;
-        let fe_decay = fe_decay.min(0.01); // max 1% decay per update
+        let avg_fe = if field.avg_free_energy.is_finite() { field.avg_free_energy } else { 0.0 };
+        let fe_decay = avg_fe / (coupling.importance + 0.001) * 0.0005;
+        let fe_decay = if fe_decay.is_finite() { fe_decay.min(0.01) } else { 0.0 }; // max 1% decay per update
         coupling.weight *= 1.0 - fe_decay;
 
-        let w_clamp = field.clamp_range / 2.0;
+        let w_clamp = 2.5f32; // vaste limiet, onafhankelijk van clamp_range
         coupling.weight = coupling.weight.clamp(-w_clamp, w_clamp);
     }
 }
@@ -328,8 +342,8 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     let pred_error = squared_norm(&eps);
     let n_couplings = point.couplings.len() as f32;
     let compute_cost = n_couplings * kappa;
-    let old_tension_ema = point.tension_ema;
-    let old_free_energy = point.free_energy;
+    let old_tension_ema = if point.tension_ema.is_finite() { point.tension_ema } else { 0.0 };
+    let old_free_energy = if point.free_energy.is_finite() { point.free_energy } else { 0.0 };
 
     let point = &mut field.points[id as usize];
 
@@ -338,8 +352,9 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     // │ Bayesian Mechanics: precision = inverse variance op de  │
     // │ Markov Blanket. Hoge precision = scherp signaal.        │
     // └─────────────────────────────────────────────────────────┘
-    let error_diff = pred_error - point.free_energy;
-    point.error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
+    let error_diff = pred_error - if point.free_energy.is_finite() { point.free_energy } else { 0.0 };
+    let old_ev = if point.error_var.is_finite() { point.error_var } else { 1.0 };
+    point.error_var = (1.0 - tracking) * old_ev + tracking * error_diff * error_diff;
     // v2.5: precision clamp max 10.0 — voorkomt inf bij error_var ≈ 0 (eerste ticks / na reset)
     point.precision = (1.0 / (point.error_var + tracking)).min(10.0);
 
@@ -353,7 +368,8 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     let ev = point.error_var.max(1e-6);
     let kl_divergence = kl_scale * 0.5 * (ev + phi_var - 1.0 - ev.ln());
     let kl_divergence = if kl_divergence.is_finite() { kl_divergence.max(0.0) } else { kl_scale * phi_var };
-    point.kl_divergence = (1.0 - tracking) * point.kl_divergence + tracking * kl_divergence;
+    let old_kl = if point.kl_divergence.is_finite() { point.kl_divergence } else { 0.0 };
+    point.kl_divergence = (1.0 - tracking) * old_kl + tracking * kl_divergence;
 
     // ┌─────────────────────────────────────────────────────────┐
     // │ STAP 3: BLANKET SURPRISE — S(η|b)                      │
@@ -363,7 +379,8 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     // └─────────────────────────────────────────────────────────┘
     let blanket_surprise = point.precision * pred_error;
     let blanket_surprise = if blanket_surprise.is_finite() { blanket_surprise } else { pred_error };
-    point.blanket_surprise = (1.0 - fe_rate) * point.blanket_surprise + fe_rate * blanket_surprise;
+    let old_bs = if point.blanket_surprise.is_finite() { point.blanket_surprise } else { 0.0 };
+    point.blanket_surprise = (1.0 - fe_rate) * old_bs + fe_rate * blanket_surprise;
 
     // ┌─────────────────────────────────────────────────────────┐
     // │ STAP 4: F = COMPLEXITEIT + SURPRISE                    │
@@ -390,7 +407,8 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     // └─────────────────────────────────────────────────────────┘
     let df_dt = point.free_energy - old_free_energy;
     let df_dt = if df_dt.is_finite() { df_dt } else { 0.0 };
-    point.free_energy_rate = (1.0 - fe_rate) * point.free_energy_rate + fe_rate * df_dt;
+    let old_fe_rate = if point.free_energy_rate.is_finite() { point.free_energy_rate } else { 0.0 };
+    point.free_energy_rate = (1.0 - fe_rate) * old_fe_rate + fe_rate * df_dt;
 
     // ┌─────────────────────────────────────────────────────────┐
     // │ STAP 7: EMOTIES ALS AFGELEIDEN VAN F                   │
@@ -563,8 +581,13 @@ pub fn adapt_dynamics(field: &mut Field) {
     let avg_tension: f32 = field.active_set.iter()
         .map(|&id| field.points[id as usize].tension).sum::<f32>() / n;
     // FIX: avg_free_energy was NOOIT geschreven — nu wel
-    field.avg_free_energy = field.active_set.iter()
-        .map(|&id| field.points[id as usize].free_energy).sum::<f32>() / n;
+    // v2.6.2: filter NaN-punten zodat één NaN niet het gemiddelde vergiftigt
+    let fe_sum: f32 = field.active_set.iter()
+        .map(|&id| {
+            let fe = field.points[id as usize].free_energy;
+            if fe.is_finite() { fe } else { 0.0 }
+        }).sum();
+    field.avg_free_energy = if n > 0.0 { fe_sum / n } else { 0.0 };
     let tension_var: f32 = field.active_set.iter()
         .map(|&id| {
             let d = field.points[id as usize].tension - avg_tension;
@@ -591,9 +614,12 @@ pub fn adapt_dynamics(field: &mut Field) {
     let is_dead = avg_tension < 0.0001 && avg_curiosity < 0.0001 && avg_pred_error < 0.0001;
 
     // SAFEGUARD LEVEL 2: TRAAG veld — niet dood maar functioneel bevroren
-    // Dit is het gat waar v2.3 in viel: tension=0.015 is "niet dood" maar WEL nutteloos.
-    // Drempels bewust hoog: als het veld niet actief denkt, moet het wakker geschud worden.
-    let is_sluggish = !is_dead && (avg_tension < 0.1 || avg_curiosity < 0.1 || avg_pred_error < 0.05);
+    // v2.6.4: Vereis minstens 2 van 3 signalen. Eén lage metric is normaal opereren
+    // (bv. lage pred_error = goede prediction, niet "traag"). Twee lage = echt vast.
+    let sluggish_signals = (avg_tension < 0.1) as u8
+        + (avg_curiosity < 0.1) as u8
+        + (avg_pred_error < 0.02) as u8;
+    let is_sluggish = !is_dead && sluggish_signals >= 2;
 
     // emo_decay: hoe snel emoties reageren
     let activity = avg_pred_error.sqrt().clamp(0.0, 1.0);
@@ -618,13 +644,13 @@ pub fn adapt_dynamics(field: &mut Field) {
         else { avg_phi_var.sqrt().clamp(0.01, 1.0) };
 
     // clamp_range
-    field.clamp_range = (max_phi * 2.0).clamp(1.0, 50.0);
+    field.clamp_range = (max_phi * 2.0).clamp(1.0, 5.0);
 
     // noise_amplitude: CRITICAL voor veld-activiteit
     // Sluggish veld krijgt flinke noise-boost (0.15) om eruit te breken
-    field.noise_amplitude = if is_dead { 0.2 }
-        else if is_sluggish { 0.15 } // 3× de normale minimum
-        else { (avg_tension * 0.5).clamp(0.05, 0.2) };
+    field.noise_amplitude = if is_dead { 0.03 }
+        else if is_sluggish { 0.02 }
+        else { (avg_tension * 0.5).clamp(0.005, 0.03) };
 
     if is_dead {
         field.learn_interval = 20;
@@ -687,17 +713,17 @@ pub fn adapt_dynamics(field: &mut Field) {
     if field.branching_ratio_avg > 0.01 {
         let sigma_error = field.branching_ratio_avg - 1.0;
         field.lambda *= 1.0 - 0.05 * sigma_error; // zachte correctie
-        field.lambda = field.lambda.clamp(0.05, 1.0);
+        field.lambda = field.lambda.clamp(0.01, 0.1);
     }
 
     // #6: Control belief → strategie wissel
     // Laag vertrouwen in eigen controle → meer noise (probeer iets anders)
     let avg_control: f32 = field.active_set.iter()
         .map(|&id| field.points[id as usize].control_belief).sum::<f32>() / n;
-    if avg_control < 0.3 {
-        // Hulpeloos → verhoog noise, verlaag learning rate (huidige strategie werkt niet)
-        field.noise_amplitude = (field.noise_amplitude * 1.5).min(0.3);
-        field.learn_interval = (field.learn_interval as f32 * 1.5) as u64;
+    if avg_control < 0.3 && field.noise_amplitude < 0.03 {
+        // Hulpeloos → licht meer noise, maar learning NIET vertragen
+        // v2.6.4: learn_interval niet meer verhogen — dat was de death spiral
+        field.noise_amplitude = (field.noise_amplitude * 1.2).min(0.03);
     }
 
     // #7: Serotonine → geduld + settle speed
@@ -1812,7 +1838,7 @@ pub fn measure_spectral_radius(field: &mut Field) {
     let correction_rate = 0.1 * (1.0 + error.abs()); // 10× sneller, meer bij grote afstand
     field.lambda *= 1.0 - correction_rate * error;
     // Floor = 0.05 (was error_tracking_rate = 0.01 → lambda gevangen op 0.01)
-    field.lambda = field.lambda.clamp(0.05, 1.0);
+    field.lambda = field.lambda.clamp(0.01, 0.1);
 
     // Herstel ALLE punten — geen veld-corruptie meer
     for (i, phi) in saved_phis.into_iter().enumerate() {
@@ -1987,8 +2013,8 @@ pub fn apply_neuromodulation(field: &mut Field) {
     // #2: Oscillatie coherentie → learning rate (Hebbian = synchroon)
     // #8: Emoties → learning rate (curiosity = leer harder, frustration = leer anders)
     // #9: IIT Φ → learning rate (geïntegreerd = leer effectiever)
-    let coherence_boost = 0.5 + field.oscillation_coherence; // 0.5-1.5
-    let phi_boost = 1.0 + field.integrated_info_avg.min(2.0); // 1.0-3.0
+    let coherence_boost = 0.5 + if field.oscillation_coherence.is_finite() { field.oscillation_coherence } else { 0.0 }; // 0.5-1.5
+    let phi_boost = 1.0 + if field.integrated_info_avg.is_finite() { field.integrated_info_avg.min(2.0) } else { 0.0 }; // 1.0-3.0
     for i in 0..field.active_set.len() {
         let id = field.active_set[i];
         let point = &mut field.points[id as usize];
@@ -1998,17 +2024,21 @@ pub fn apply_neuromodulation(field: &mut Field) {
 
         // FIX: causal_power → extra learning boost voor causaal sterke punten
         // Hoge causal_power = dit punt heeft sterke causale invloed → leer harder
-        let causal_boost = 1.0 + point.causal_power.min(1.0) * 0.5; // 1.0-1.5
+        let cp = if point.causal_power.is_finite() { point.causal_power } else { 0.0 };
+        let causal_boost = 1.0 + cp.min(1.0) * 0.5; // 1.0-1.5
 
         // FIX: free_energy_rate → urgentie-modulatie
         // Snel dalende F (rate < 0) = convergentie → leer langzamer (al goed)
         // Snel stijgende F (rate > 0) = verslechtering → leer sneller (urgentie)
-        let urgency = if point.free_energy_rate > 0.01 { 1.0 + point.free_energy_rate.min(0.5) } else { 1.0 };
+        let fer = if point.free_energy_rate.is_finite() { point.free_energy_rate } else { 0.0 };
+        let urgency = if fer > 0.01 { 1.0 + fer.min(0.5) } else { 1.0 };
 
         // Combineer ALLE modulatie-signalen
         let total_boost = lr_multiplier * emo_factor * coherence_boost * phi_boost * causal_boost * urgency;
+        let total_boost = if total_boost.is_finite() { total_boost.clamp(0.01, 100.0) } else { 1.0 };
 
         point.eta = (point.eta * total_boost).min(field.lambda);
+        if !point.eta.is_finite() { point.eta = 0.01; }
     }
 
     // v2.4: Baseline ruis — VERSTERKT
@@ -2018,7 +2048,7 @@ pub fn apply_neuromodulation(field: &mut Field) {
         use rand::Rng;
         let mut rng = rand::rng();
         // Sterkte: minimaal 2.0 (was 1.0) — genoeg om prediction error te genereren
-        let baseline_noise = (field.noise_amplitude * 50.0).max(2.0);
+        let baseline_noise = (field.noise_amplitude * 5.0).max(0.1);
         // Bereik: minimaal 10% van punten of 100 (was 1% of 50)
         let min_count = (field.active_set.len() / 10).max(100);
         let noise_frac = field.noise_amplitude.max(0.1); // minimaal 10% van punten
@@ -2034,7 +2064,7 @@ pub fn apply_neuromodulation(field: &mut Field) {
         // v2.5.2: Extra boost voor depth-3 punten — ignition vereist phi > 0
         // Depth-3 punten zijn abstracte representaties die signaal nodig hebben
         // om bewuste ignition te kunnen triggeren
-        let d3_boost = baseline_noise * 2.0; // 2× sterkere noise voor abstracte laag
+        let d3_boost = baseline_noise * 0.5; // zachte noise voor abstracte laag
         for &id_u32 in &field.active_set {
             let id = id_u32 as usize;
             if field.points[id].depth == 3 {
@@ -2313,9 +2343,10 @@ pub fn update_oscillations(field: &mut Field) {
         let modulated_amplitude = if modulated_amplitude.is_finite() { modulated_amplitude } else { 0.0 };
 
         // Injectie in phi — gamma op oneven dimensies, theta op even dimensies
-        let gamma_signal = modulated_amplitude * point.oscillation_phase.sin();
+        // v2.6.4: amplitude gecapt — oscillaties zijn voor synchronisatie, niet energie-injectie
+        let gamma_signal = modulated_amplitude.clamp(-0.05, 0.05) * point.oscillation_phase.sin();
         let gamma_signal = if gamma_signal.is_finite() { gamma_signal } else { 0.0 };
-        let theta_signal = field.noise_amplitude * 0.5 * point.oscillation_phase_theta.sin();
+        let theta_signal = 0.01 * point.oscillation_phase_theta.sin(); // vaste amplitude, niet noise_amp-afhankelijk
         let theta_signal = if theta_signal.is_finite() { theta_signal } else { 0.0 };
         for d in 0..DIM {
             if d % 2 == 1 {
@@ -2718,7 +2749,8 @@ pub fn consolidate_weights(field: &mut Field) {
 /// EWC-penalty weight update: straf veranderingen aan belangrijke weights.
 /// Voeg dit toe aan update_weights als penalty.
 pub fn ewc_penalty(coupling: &Coupling, ewc_lambda: f32) -> f32 {
-    ewc_lambda * coupling.importance * (coupling.weight - coupling.consolidated)
+    let pen = ewc_lambda * coupling.importance * (coupling.weight - coupling.consolidated);
+    if pen.is_finite() { pen } else { 0.0 }
 }
 
 // === v0.7: HIËRARCHIE + GLOBAL WORKSPACE BROADCAST ===
@@ -3233,7 +3265,7 @@ pub fn update_attention_weights(field: &mut Field) {
             error_mag += error[d] * error[d];
         }
         error_mag = error_mag.sqrt();
-        if error_mag < 0.001 { continue; }
+        if error_mag < 0.001 || !error_mag.is_finite() { continue; }
 
         // Normaliseer error voor stabiele updates
         let error_scale = (error_mag.min(1.0)) / error_mag;
