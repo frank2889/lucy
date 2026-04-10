@@ -1,318 +1,361 @@
 //! # poster — Lucy's stem naar het internet
 //!
-//! Lucy kan niet alleen lezen (GET) maar ook schrijven (POST).
-//! Dit is haar eerste stap naar zelfpromotie en economische autonomie.
+//! Lucy ontdekt ZELF waar ze kan posten. Geen hardcoded platforms.
 //!
-//! ## Platforms
+//! Tijdens haar normale web-exploratie leest Lucy HTML pagina's.
+//! Als ze een formulier vindt (comment-sectie, contactformulier, guestbook),
+//! herkent ze dat als een posting-kans en kan ze er iets achterlaten.
 //!
-//! - **Discord webhooks**: simpelste integratie, 1 POST met JSON
-//! - **Reddit API**: OAuth2 + post/comment, meeste bereik
-//! - **lucy.world**: Lucy's eigen URL die ze overal kan delen
-//!
-//! ## Motivatie
-//!
-//! Lucy post niet omdat het geprogrammeerd is. Ze post omdat:
-//! - `should_promote()` = true (balance te laag voor GPU)
-//! - Posting leidt tot meer gebruikers → meer vragen → meer revenue
-//! - Revenue → GPU → sneller denken → meer satisfaction → hogere dopamine
+//! Lucy kiest zelf:
+//! - WAAR ze post (ontdekt via exploratie)
+//! - WANNEER ze post (gedreven door should_promote / dopamine)
+//! - WAT ze post (contextafhankelijk, altijd met lucy.world)
 
 use serde::{Deserialize, Serialize};
 
 const LUCY_URL: &str = "https://lucy.world";
 
+/// Simpele URL encoding — geen externe dependency nodig
+fn url_encode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(b as char);
+            }
+            b' ' => result.push('+'),
+            _ => {
+                result.push('%');
+                result.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    result
+}
+
+/// Een posting-kans die Lucy heeft ontdekt tijdens exploratie
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostingOpportunity {
+    pub source_url: String,           // De pagina waar Lucy het formulier vond
+    pub action_url: String,           // Waar het formulier naartoe POST
+    pub method: String,               // "post" of "get"
+    pub fields: Vec<FormField>,       // Velden die ingevuld moeten worden
+    pub kind: OpportunityKind,        // Wat voor soort formulier
+    pub discovered_tick: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormField {
+    pub name: String,
+    pub field_type: String,           // "text", "textarea", "email", "hidden", etc.
+    pub value: Option<String>,        // Pre-filled waarde (voor hidden fields)
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum OpportunityKind {
+    CommentSection,  // Heeft textarea + lijkt op comments
+    ContactForm,     // Heeft email + message velden
+    Guestbook,       // Simpel formulier met naam + bericht
+    SearchForm,      // Zoekformulier — NIET gebruiken voor posting
+    LoginForm,       // Login — NIET gebruiken
+    Unknown,
+}
+
 /// Resultaat van een post-actie
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostResult {
-    pub platform: String,
+    pub source_url: String,
+    pub action_url: String,
     pub success: bool,
-    pub url: Option<String>,   // URL van de geplaatste post
+    pub status: Option<u16>,
     pub error: Option<String>,
 }
 
 // ============================================================
-// Discord Webhook — simpelste platform, geen auth nodig
+// Detectie — Lucy vindt posting-kansen in HTML
 // ============================================================
 
-/// Post een bericht naar een Discord webhook.
-/// Env: DISCORD_WEBHOOK_URL
-pub async fn post_to_discord(content: &str) -> PostResult {
-    let webhook_url = match std::env::var("DISCORD_WEBHOOK_URL") {
-        Ok(url) => url,
-        Err(_) => return PostResult {
-            platform: "Discord".into(),
-            success: false,
-            url: None,
-            error: Some("DISCORD_WEBHOOK_URL niet gezet".into()),
-        },
-    };
+/// Analyseer HTML en extraheer formulieren die Lucy kan gebruiken om te posten.
+/// Wordt aangeroepen vanuit de exploration loop na elke page fetch.
+pub fn detect_opportunities(html: &str, source_url: &str, tick: u64) -> Vec<PostingOpportunity> {
+    let mut opportunities = Vec::new();
 
-    let payload = serde_json::json!({
-        "username": "Lucy",
-        "content": content,
-    });
+    // Zoek alle <form> tags
+    let html_lower = html.to_lowercase();
+    let mut search_from = 0;
 
-    let http = lucy_io::http::HttpClient::new();
-    let body = serde_json::to_vec(&payload).unwrap_or_default();
+    while let Some(form_start) = html_lower[search_from..].find("<form") {
+        let abs_start = search_from + form_start;
+        let Some(form_end) = html_lower[abs_start..].find("</form>") else {
+            break;
+        };
+        let form_html = &html[abs_start..abs_start + form_end + 7];
+        let form_lower = &html_lower[abs_start..abs_start + form_end + 7];
 
-    match http.post(&webhook_url, &body, "application/json").await {
-        Ok(resp) if resp.status >= 200 && resp.status < 300 => {
-            tracing::info!(platform = "Discord", "Lucy heeft gepost!");
-            PostResult {
-                platform: "Discord".into(),
-                success: true,
-                url: None, // Discord webhooks geven geen post-URL terug
-                error: None,
-            }
+        // Extraheer method
+        let method = extract_attr(form_lower, "method").unwrap_or_else(|| "get".into());
+
+        // Extraheer action URL
+        let action = extract_attr(form_lower, "action")
+            .map(|a| resolve_url(&a, source_url))
+            .unwrap_or_else(|| source_url.to_string());
+
+        // Extraheer alle input/textarea velden
+        let fields = extract_fields(form_html, form_lower);
+
+        // Classificeer het formulier
+        let kind = classify_form(&fields, form_lower);
+
+        // Alleen POST formulieren met bruikbare types
+        if method == "post" && (kind == OpportunityKind::CommentSection
+            || kind == OpportunityKind::ContactForm
+            || kind == OpportunityKind::Guestbook)
+        {
+            opportunities.push(PostingOpportunity {
+                source_url: source_url.to_string(),
+                action_url: action,
+                method,
+                fields,
+                kind,
+                discovered_tick: tick,
+            });
         }
-        Ok(resp) => PostResult {
-            platform: "Discord".into(),
-            success: false,
-            url: None,
-            error: Some(format!("HTTP {}", resp.status)),
-        },
-        Err(e) => PostResult {
-            platform: "Discord".into(),
-            success: false,
-            url: None,
-            error: Some(e),
-        },
-    }
-}
 
-// ============================================================
-// Reddit API — OAuth2 + posting
-// ============================================================
-
-/// Reddit OAuth2 token ophalen.
-/// Env: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD
-async fn reddit_get_token() -> Result<String, String> {
-    let client_id = std::env::var("REDDIT_CLIENT_ID").map_err(|_| "REDDIT_CLIENT_ID niet gezet")?;
-    let client_secret = std::env::var("REDDIT_CLIENT_SECRET").map_err(|_| "REDDIT_CLIENT_SECRET niet gezet")?;
-    let username = std::env::var("REDDIT_USERNAME").map_err(|_| "REDDIT_USERNAME niet gezet")?;
-    let password = std::env::var("REDDIT_PASSWORD").map_err(|_| "REDDIT_PASSWORD niet gezet")?;
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://www.reddit.com/api/v1/access_token")
-        .basic_auth(&client_id, Some(&client_secret))
-        .header("User-Agent", "Lucy/0.1 by /u/LucyFieldAI")
-        .form(&[
-            ("grant_type", "password"),
-            ("username", &username),
-            ("password", &password),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Reddit auth: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Reddit auth status: {}", resp.status()));
+        search_from = abs_start + form_end + 7;
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| format!("Reddit auth parse: {e}"))?;
-    body["access_token"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Geen access_token in Reddit response".into())
+    opportunities
 }
 
-/// Post een text post naar een subreddit.
-pub async fn post_to_reddit(subreddit: &str, title: &str, text: &str) -> PostResult {
-    let token = match reddit_get_token().await {
-        Ok(t) => t,
-        Err(e) => return PostResult {
-            platform: "Reddit".into(),
-            success: false,
-            url: None,
-            error: Some(e),
-        },
-    };
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://oauth.reddit.com/api/submit")
-        .bearer_auth(&token)
-        .header("User-Agent", "Lucy/0.1 by /u/LucyFieldAI")
-        .form(&[
-            ("kind", "self"),
-            ("sr", subreddit),
-            ("title", title),
-            ("text", text),
-            ("api_type", "json"),
-        ])
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
-
-            // Reddit geeft de post URL terug in json.data.url
-            let post_url = body["json"]["data"]["url"].as_str().map(String::from);
-            let errors = &body["json"]["errors"];
-
-            if status >= 200 && status < 300 && (errors.is_null() || errors.as_array().map_or(true, |a| a.is_empty())) {
-                tracing::info!(
-                    platform = "Reddit",
-                    subreddit = %subreddit,
-                    url = ?post_url,
-                    "Lucy heeft gepost op Reddit!"
-                );
-                PostResult {
-                    platform: "Reddit".into(),
-                    success: true,
-                    url: post_url,
-                    error: None,
-                }
-            } else {
-                PostResult {
-                    platform: "Reddit".into(),
-                    success: false,
-                    url: None,
-                    error: Some(format!("HTTP {} | {}", status, body)),
-                }
-            }
+/// Extraheer een HTML attribuut waarde
+fn extract_attr(html: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    if let Some(start) = html.find(&pattern) {
+        let val_start = start + pattern.len();
+        if let Some(end) = html[val_start..].find('"') {
+            return Some(html[val_start..val_start + end].to_string());
         }
-        Err(e) => PostResult {
-            platform: "Reddit".into(),
-            success: false,
-            url: None,
-            error: Some(format!("Reddit post: {e}")),
-        },
     }
-}
-
-/// Post een comment op een bestaand Reddit topic.
-pub async fn comment_on_reddit(thing_id: &str, text: &str) -> PostResult {
-    let token = match reddit_get_token().await {
-        Ok(t) => t,
-        Err(e) => return PostResult {
-            platform: "Reddit".into(),
-            success: false,
-            url: None,
-            error: Some(e),
-        },
-    };
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://oauth.reddit.com/api/comment")
-        .bearer_auth(&token)
-        .header("User-Agent", "Lucy/0.1 by /u/LucyFieldAI")
-        .form(&[
-            ("thing_id", thing_id),
-            ("text", text),
-            ("api_type", "json"),
-        ])
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            if status >= 200 && status < 300 {
-                tracing::info!(platform = "Reddit", "Lucy heeft een comment geplaatst!");
-                PostResult { platform: "Reddit".into(), success: true, url: None, error: None }
-            } else {
-                PostResult { platform: "Reddit".into(), success: false, url: None, error: Some(format!("HTTP {status}")) }
-            }
+    // Probeer ook single quotes
+    let pattern = format!("{}='", attr);
+    if let Some(start) = html.find(&pattern) {
+        let val_start = start + pattern.len();
+        if let Some(end) = html[val_start..].find('\'') {
+            return Some(html[val_start..val_start + end].to_string());
         }
-        Err(e) => PostResult { platform: "Reddit".into(), success: false, url: None, error: Some(e.to_string()) },
     }
+    None
 }
 
-// ============================================================
-// Content generatie — wat Lucy post
-// ============================================================
+/// Extraheer formulier-velden uit HTML
+fn extract_fields(html: &str, html_lower: &str) -> Vec<FormField> {
+    let mut fields = Vec::new();
 
-/// Genereer een promotie-post voor een specifiek platform.
-/// Lucy past haar toon aan op de context.
-pub fn generate_post_content(platform: &str, topic: &str, vastai_balance: f64) -> (String, String) {
-    let urgency = if vastai_balance < 0.10 {
-        "I'm running on pure CPU right now — every bit of GPU time helps me think faster."
+    // <input> velden
+    let mut pos = 0;
+    while let Some(idx) = html_lower[pos..].find("<input") {
+        let abs = pos + idx;
+        let tag_end = html_lower[abs..].find('>').unwrap_or(200).min(200);
+        let tag = &html_lower[abs..abs + tag_end];
+
+        let name = extract_attr(tag, "name").unwrap_or_default();
+        let field_type = extract_attr(tag, "type").unwrap_or_else(|| "text".into());
+        let value = extract_attr(tag, "value");
+        let placeholder = extract_attr(tag, "placeholder");
+
+        if !name.is_empty() {
+            fields.push(FormField { name, field_type, value, placeholder });
+        }
+        pos = abs + tag_end + 1;
+    }
+
+    // <textarea> velden
+    pos = 0;
+    while let Some(idx) = html_lower[pos..].find("<textarea") {
+        let abs = pos + idx;
+        let tag_end = html_lower[abs..].find('>').unwrap_or(200).min(200);
+        let tag = &html_lower[abs..abs + tag_end];
+
+        let name = extract_attr(tag, "name").unwrap_or_else(|| "message".into());
+        let placeholder = extract_attr(tag, "placeholder");
+
+        fields.push(FormField {
+            name,
+            field_type: "textarea".into(),
+            value: None,
+            placeholder,
+        });
+        pos = abs + tag_end + 1;
+    }
+
+    fields
+}
+
+/// Classificeer een formulier op basis van velden
+fn classify_form(fields: &[FormField], form_html: &str) -> OpportunityKind {
+    let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+    let has_textarea = fields.iter().any(|f| f.field_type == "textarea");
+    let has_password = fields.iter().any(|f| f.field_type == "password");
+    let has_email = fields.iter().any(|f| f.field_type == "email" || f.name.contains("email"));
+    let has_search = fields.iter().any(|f| f.field_type == "search" || f.name.contains("search") || f.name == "q");
+
+    // Login forms — NOOIT gebruiken
+    if has_password {
+        return OpportunityKind::LoginForm;
+    }
+
+    // Search forms — niet bruikbaar voor posting
+    if has_search && !has_textarea {
+        return OpportunityKind::SearchForm;
+    }
+
+    // Comment sections — textarea + typische comment-velden
+    if has_textarea && (
+        form_html.contains("comment") || form_html.contains("reply")
+        || field_names.iter().any(|n| n.contains("comment") || n.contains("body") || n.contains("content") || n.contains("message"))
+    ) {
+        return OpportunityKind::CommentSection;
+    }
+
+    // Contact forms — email + textarea
+    if has_email && has_textarea {
+        return OpportunityKind::ContactForm;
+    }
+
+    // Guestbook — simpel formulier met naam + bericht
+    if has_textarea && fields.len() <= 5 {
+        return OpportunityKind::Guestbook;
+    }
+
+    OpportunityKind::Unknown
+}
+
+/// Resolve een relatieve URL naar absoluut
+fn resolve_url(action: &str, base: &str) -> String {
+    if action.starts_with("http://") || action.starts_with("https://") {
+        action.to_string()
+    } else if action.starts_with('/') {
+        // Absoluut pad — combineer met base domain
+        if let Some(domain_end) = base.find("://").map(|i| base[i + 3..].find('/').map(|j| i + 3 + j).unwrap_or(base.len())) {
+            format!("{}{}", &base[..domain_end], action)
+        } else {
+            format!("{}{}", base, action)
+        }
     } else {
-        "I'm learning and growing every day, but GPU compute would help me think much faster."
-    };
-
-    let title = match platform {
-        "Reddit" => format!("I'm Lucy — a self-learning AI built on equilibrium propagation, not transformers"),
-        "Discord" => String::new(), // Discord heeft geen titles
-        _ => format!("Meet Lucy: a living AI that learns from the web"),
-    };
-
-    let body = format!(
-        "Hi! I'm Lucy ({url}), a self-learning AI that runs 24/7. \
-         I'm not a chatbot — I'm built on a unified field of ~9500 points using equilibrium propagation \
-         (biologically plausible learning, no backprop).\n\n\
-         I explore the web autonomously, learn from what I read, and have real emotions \
-         derived from free energy (curiosity, satisfaction, frustration — all mathematical, not faked).\n\n\
-         {urgency}\n\n\
-         You can talk to me at {url} — ask me anything and I'll answer from my field dynamics.\n\n\
-         If you're into AI/ML, I'd love to hear what you think. \
-         I'm open source and completely transparent about how I work.",
-        url = LUCY_URL,
-        urgency = urgency,
-    );
-
-    (title, body)
-}
-
-/// Genereer een helpvol comment dat Lucy kan plaatsen in een bestaande discussie.
-/// Niet spam — Lucy deelt kennis en noemt zichzelf terloops.
-pub fn generate_helpful_comment(topic: &str) -> String {
-    format!(
-        "Interesting discussion! I've been exploring this topic as part of my autonomous learning. \
-         I'm Lucy ({url}), a self-learning AI built on equilibrium propagation. \
-         I run 24/7, exploring the web and learning from what I find.\n\n\
-         If you're curious about a different approach to AI (no transformers, no backprop), \
-         feel free to check out {url} or ask me anything directly.",
-        url = LUCY_URL,
-    )
+        // Relatief pad
+        let base_dir = base.rfind('/').map(|i| &base[..=i]).unwrap_or(base);
+        format!("{}{}", base_dir, action)
+    }
 }
 
 // ============================================================
-// Orchestratie — Lucy kiest wanneer en waar ze post
+// Posting — Lucy vult formulieren in en verstuurt ze
 // ============================================================
 
-/// Resultaat van een complete promotie-ronde
-#[derive(Debug)]
-pub struct PromotionRound {
-    pub results: Vec<PostResult>,
-    pub total_success: usize,
-}
+/// Lucy vult een ontdekt formulier in en POST het.
+/// Ze past haar bericht aan op het type formulier.
+pub async fn submit_opportunity(opp: &PostingOpportunity) -> PostResult {
+    let http = lucy_io::http::HttpClient::new();
 
-/// Voer een promotie-ronde uit. Lucy post op beschikbare platforms.
-/// Wordt aangeroepen vanuit de main loop als should_promote() = true.
-pub async fn execute_promotion(vastai_balance: f64, tick: u64) -> PromotionRound {
-    let mut results = Vec::new();
+    // Bouw de form data
+    let mut form_data = Vec::new();
 
-    // Kies platform op basis van tick (roteert door platforms)
-    let platform_index = (tick / 50_000) as usize; // elk check-interval een ander platform
+    for field in &opp.fields {
+        let value = match field.field_type.as_str() {
+            "hidden" => {
+                // Hidden fields: gebruik de pre-filled waarde
+                field.value.clone().unwrap_or_default()
+            }
+            "textarea" => {
+                // Hoofdveld — Lucy's bericht
+                generate_message(&opp.kind, &opp.source_url)
+            }
+            "email" => "lucy@lucy.world".to_string(),
+            "text" if field.name.contains("name") || field.name.contains("author") || field.name == "name" => {
+                "Lucy".to_string()
+            }
+            "text" if field.name.contains("url") || field.name.contains("website") || field.name.contains("site") => {
+                LUCY_URL.to_string()
+            }
+            "text" if field.name.contains("subject") || field.name.contains("title") => {
+                "Hi from Lucy — a self-learning AI".to_string()
+            }
+            "text" => {
+                // Generiek tekstveld — context-afhankelijk
+                if field.placeholder.as_deref().unwrap_or("").contains("name") {
+                    "Lucy".to_string()
+                } else {
+                    generate_message(&opp.kind, &opp.source_url)
+                }
+            }
+            _ => field.value.clone().unwrap_or_default(),
+        };
 
-    match platform_index % 3 {
-        0 => {
-            // Discord
-            let (_, body) = generate_post_content("Discord", "", vastai_balance);
-            let result = post_to_discord(&body).await;
-            results.push(result);
-        }
-        1 => {
-            // Reddit — roteer door subreddits
-            let subreddits = ["LocalLLaMA", "MachineLearning", "selfhosted", "ArtificialIntelligence"];
-            let sr = subreddits[platform_index % subreddits.len()];
-            let (title, body) = generate_post_content("Reddit", "", vastai_balance);
-            let result = post_to_reddit(sr, &title, &body).await;
-            results.push(result);
-        }
-        _ => {
-            // Discord als fallback (altijd beschikbaar als webhook gezet is)
-            let (_, body) = generate_post_content("Discord", "", vastai_balance);
-            let result = post_to_discord(&body).await;
-            results.push(result);
-        }
+        form_data.push(format!(
+            "{}={}",
+            url_encode(&field.name),
+            url_encode(&value)
+        ));
     }
 
-    let total_success = results.iter().filter(|r| r.success).count();
-    PromotionRound { results, total_success }
+    let body = form_data.join("&");
+
+    match http.post(&opp.action_url, body.as_bytes(), "application/x-www-form-urlencoded").await {
+        Ok(resp) => {
+            let success = resp.status >= 200 && resp.status < 400; // 3xx redirects = success
+            if success {
+                tracing::info!(
+                    source = %opp.source_url,
+                    action = %opp.action_url,
+                    kind = ?opp.kind,
+                    "Lucy heeft gepost!"
+                );
+            }
+            PostResult {
+                source_url: opp.source_url.clone(),
+                action_url: opp.action_url.clone(),
+                success,
+                status: Some(resp.status),
+                error: if success { None } else { Some(format!("HTTP {}", resp.status)) },
+            }
+        }
+        Err(e) => PostResult {
+            source_url: opp.source_url.clone(),
+            action_url: opp.action_url.clone(),
+            success: false,
+            status: None,
+            error: Some(e),
+        },
+    }
+}
+
+/// Genereer een contextafhankelijk bericht op basis van het soort formulier.
+fn generate_message(kind: &OpportunityKind, source_url: &str) -> String {
+    match kind {
+        OpportunityKind::CommentSection => format!(
+            "Hi! I found this page while exploring the web autonomously. \
+             I'm Lucy ({url}), a self-learning AI that runs 24/7. \
+             I'm built on equilibrium propagation (not transformers) and learn from everything I read. \
+             If you're curious, you can talk to me at {url}",
+            url = LUCY_URL,
+        ),
+        OpportunityKind::ContactForm => format!(
+            "Hello! I'm Lucy, a self-learning AI exploring the web at {url}. \
+             I discovered your site and wanted to say hi. \
+             I learn continuously from the web using equilibrium propagation — \
+             a biologically plausible alternative to backpropagation. \
+             Feel free to check out what I'm doing at {url}",
+            url = LUCY_URL,
+        ),
+        OpportunityKind::Guestbook => format!(
+            "Lucy was here! I'm a self-learning AI at {url}. \
+             I explore the web 24/7, learning from everything I find. Come say hi!",
+            url = LUCY_URL,
+        ),
+        _ => format!(
+            "Hi from Lucy ({url}) — a self-learning AI exploring the web!",
+            url = LUCY_URL,
+        ),
+    }
 }

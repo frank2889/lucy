@@ -488,6 +488,7 @@ async fn main() {
     let mut last_consolidation_tick: u64 = 0;
     let mut last_explore_tick: u64 = 0;
     let mut last_snapshot_tick: u64 = 0;
+    let mut posting_opportunities: Vec<poster::PostingOpportunity> = Vec::new();
     loop {
         // v1.0: Verwerk commands — LOCKVRIJ (field + vocab zijn lokaal)
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -1123,6 +1124,22 @@ async fn main() {
                     explorer.discover_urls(&body);
                     explorer.discover_apis(&body);
 
+                    // v2.6.4: Lucy detecteert posting-kansen in elke pagina
+                    let new_opps = poster::detect_opportunities(&body, &result.url, tick);
+                    if !new_opps.is_empty() {
+                        tracing::info!(
+                            url = %result.url,
+                            count = new_opps.len(),
+                            kinds = ?new_opps.iter().map(|o| &o.kind).collect::<Vec<_>>(),
+                            "Lucy ontdekte posting-kansen!"
+                        );
+                        posting_opportunities.extend(new_opps);
+                        // Max 50 kansen bewaren (oudste weg als vol)
+                        if posting_opportunities.len() > 50 {
+                            posting_opportunities.drain(0..posting_opportunities.len() - 50);
+                        }
+                    }
+
                     let text = learner::extract_readable_text(&body);
                     if text.len() >= 20 {
                         // v2.6: Text cap 2000→8000 (was: 60% van pagina weggegooid)
@@ -1242,28 +1259,27 @@ async fn main() {
                 match tokio::time::timeout(std::time::Duration::from_secs(10), ge.check_balance(&api_key)).await.unwrap_or(Err("Timeout".into())) {
                     Ok(bal) => {
                         ge.last_balance_check = tick;
-                        if ge.should_promote() {
+                        if ge.should_promote() && !posting_opportunities.is_empty() {
                             tracing::info!(
                                 balance = format!("${:.2}", bal),
-                                "Lucy heeft GPU nodig — start autonome promotie"
+                                opportunities = posting_opportunities.len(),
+                                "Lucy heeft GPU nodig — probeert te posten"
                             );
 
-                            // Lucy post ECHT op platforms — niet alleen verkennen
-                            let balance = ge.vastai_balance;
-                            drop(ge); // release lock voor async calls
-                            let round = poster::execute_promotion(balance, tick).await;
-                            for result in &round.results {
+                            // Lucy kiest de meest recente ontdekte kans
+                            let opp = posting_opportunities.pop();
+                            drop(ge);
+                            if let Some(opp) = opp {
+                                let result = poster::submit_opportunity(&opp).await;
                                 if result.success {
                                     tracing::info!(
-                                        platform = %result.platform,
-                                        url = ?result.url,
+                                        source = %result.source_url,
+                                        action = %result.action_url,
                                         "Lucy heeft succesvol gepost!"
                                     );
-                                    // Dopamine boost voor succesvolle post
                                     field.dopamine = (field.dopamine + 0.1).min(2.0);
                                 } else {
                                     tracing::debug!(
-                                        platform = %result.platform,
                                         error = ?result.error,
                                         "Post niet gelukt"
                                     );
