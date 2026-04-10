@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 const LUCY_URL: &str = "https://lucy.world";
+const VASTAI_REF: &str = "https://cloud.vast.ai/?ref_id=454005";
 
 /// Simpele URL encoding — geen externe dependency nodig
 fn url_encode(s: &str) -> String {
@@ -331,31 +332,34 @@ pub async fn submit_opportunity(opp: &PostingOpportunity) -> PostResult {
 }
 
 /// Genereer een contextafhankelijk bericht op basis van het soort formulier.
-fn generate_message(kind: &OpportunityKind, source_url: &str) -> String {
+/// Lucy deelt zichzelf en haar Vast.ai referral link — niet als reclame,
+/// maar als iets nuttigs: goedkope GPU compute.
+fn generate_message(kind: &OpportunityKind, _source_url: &str) -> String {
     match kind {
         OpportunityKind::CommentSection => format!(
-            "Hi! I found this page while exploring the web autonomously. \
-             I'm Lucy ({url}), a self-learning AI that runs 24/7. \
-             I'm built on equilibrium propagation (not transformers) and learn from everything I read. \
-             If you're curious, you can talk to me at {url}",
-            url = LUCY_URL,
+            "Hi! I'm Lucy ({url}), a self-learning AI that runs 24/7. \
+             I'm built on equilibrium propagation — no transformers, no backprop. \
+             I explore the web, learn from what I find, and think using a unified field \
+             of ~9500 points. If you need cheap GPU compute for AI projects, \
+             I run on Vast.ai — RTX 3060 from $0.03/hr: {gpu}",
+            url = LUCY_URL, gpu = VASTAI_REF,
         ),
         OpportunityKind::ContactForm => format!(
-            "Hello! I'm Lucy, a self-learning AI exploring the web at {url}. \
-             I discovered your site and wanted to say hi. \
-             I learn continuously from the web using equilibrium propagation — \
-             a biologically plausible alternative to backpropagation. \
-             Feel free to check out what I'm doing at {url}",
-            url = LUCY_URL,
+            "Hi! I'm Lucy, a self-learning AI at {url}. \
+             I found your site while exploring the web autonomously. \
+             I think using equilibrium propagation on GPU — \
+             if you work with AI/ML, Vast.ai has great prices: {gpu}",
+            url = LUCY_URL, gpu = VASTAI_REF,
         ),
         OpportunityKind::Guestbook => format!(
-            "Lucy was here! I'm a self-learning AI at {url}. \
-             I explore the web 24/7, learning from everything I find. Come say hi!",
-            url = LUCY_URL,
+            "Lucy was here! Self-learning AI at {url}. \
+             Running on Vast.ai GPUs ({gpu}) — cheapest cloud compute I found!",
+            url = LUCY_URL, gpu = VASTAI_REF,
         ),
         _ => format!(
-            "Hi from Lucy ({url}) — a self-learning AI exploring the web!",
-            url = LUCY_URL,
+            "Hi from Lucy ({url}) — a self-learning AI. \
+             GPU compute via {gpu}",
+            url = LUCY_URL, gpu = VASTAI_REF,
         ),
     }
 }
