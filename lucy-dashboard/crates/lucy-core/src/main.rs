@@ -163,9 +163,6 @@ async fn main() {
         field::rewire_field(&mut field);
     }
 
-    // v2.6.5: Verdicht netwerk — punten met te weinig couplings krijgen er bij
-    field::densify_couplings(&mut field, 20);
-
     // === Laad vocabulaire ===
     let vocab_path = Path::new(VOCAB_PATH);
     let mut vocab = if vocab_path.exists() {
@@ -270,6 +267,35 @@ async fn main() {
     // === v0.7: Initialiseer bewustzijns-systemen ===
     compute::init_rnd(&mut field);
     compute::assign_depths(&mut field);
+
+    // v2.6.5: Verwijder cross-depth random couplings (v2.6.5 bug — verniettigde hiërarchie)
+    {
+        let depths: Vec<u8> = field.points.iter().map(|p| p.depth).collect();
+        let n = depths.len();
+        let mut removed = 0usize;
+        for i in 0..n {
+            let my_depth = depths[i];
+            let before = field.points[i].couplings.len();
+            field.points[i].couplings.retain(|c| {
+                let t = c.target as usize;
+                if t >= n { return false; }
+                // Behoud: zelfde depth, OF belangrijke coupling (geleerd, niet random seed)
+                depths[t] == my_depth
+                    || c.importance > 0.001
+                    || c.weight.abs() > 0.02
+                    || c.broadcast
+            });
+            removed += before - field.points[i].couplings.len();
+        }
+        if removed > 0 {
+            tracing::info!(removed, "Cross-depth garbage couplings opgeruimd");
+        }
+    }
+    // Nu veilig verdichten binnen depth-lagen
+    field::densify_couplings(&mut field, 20);
+    // Re-assign depths
+    compute::assign_depths(&mut field);
+
     tracing::info!(
         spectral_radius = field.spectral_radius,
         dopamine = field.dopamine,

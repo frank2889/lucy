@@ -374,26 +374,36 @@ pub fn rewire_field(field: &mut Field) {
     );
 }
 
-/// v2.6.5: Voeg extra couplings toe aan punten die te weinig hebben.
-/// Bestaande couplings blijven intact — alleen NIEUWE worden toegevoegd.
-/// Dit vergroot het geheugen per neuron zonder geleerde weights te verliezen.
+/// v2.6.5: Voeg extra couplings toe BINNEN dezelfde depth-laag.
+/// Voorkomt dat cross-depth shortcuts de hiërarchie vernietigen.
+/// assign_depths() MOET eerst gedraaid hebben.
 pub fn densify_couplings(field: &mut Field, target_k: usize) {
     use rand::Rng;
     let mut rng = rand::rng();
     let n = field.points.len();
-    let mut added = 0usize;
 
+    // Groepeer punten per depth-laag
+    let mut by_depth: [Vec<u32>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for i in 0..n {
+        let d = field.points[i].depth.min(3) as usize;
+        by_depth[d].push(i as u32);
+    }
+
+    let mut added = 0usize;
     for i in 0..n {
         let current = field.points[i].couplings.len();
         if current >= target_k { continue; }
 
-        // Bestaande targets — voorkom duplicaten
+        let my_depth = field.points[i].depth.min(3) as usize;
+        let peers = &by_depth[my_depth];
+        if peers.len() < 2 { continue; }
+
         let existing: std::collections::HashSet<u32> = field.points[i]
             .couplings.iter().map(|c| c.target).collect();
 
         let to_add = target_k - current;
         for _ in 0..to_add {
-            let target = rng.random_range(0..n as u32);
+            let target = peers[rng.random_range(0..peers.len())];
             if target != i as u32 && !existing.contains(&target) {
                 field.points[i].couplings.push(lucy_state::Coupling {
                     target,
@@ -409,5 +419,5 @@ pub fn densify_couplings(field: &mut Field, target_k: usize) {
     }
 
     let total: usize = field.points.iter().map(|p| p.couplings.len()).sum();
-    tracing::info!(added, total, target_k, "Couplings verdicht — meer geheugen per neuron");
+    tracing::info!(added, total, target_k, "Couplings verdicht (within-depth) — hiërarchie intact");
 }
