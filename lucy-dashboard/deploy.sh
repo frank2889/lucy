@@ -82,11 +82,14 @@ else
 
     echo ""
     echo "=== 5. Lucy hercompileert ==="
-    ssh $SERVER "docker exec lucy bash -c 'cd /lucy && cargo build --release -p lucy-core 2>&1 | tail -3 && cp target/release/lucy-core /lucy/lucy-core.new'"
+    ssh -o ServerAliveInterval=15 $SERVER "docker exec lucy bash -c 'cd /lucy && cargo build --release -p lucy-core 2>&1 | tail -3'"
 
     echo ""
-    echo "=== 6. Herstart met nieuwe binary ==="
-    ssh $SERVER "docker restart lucy"
+    echo "=== 6. Stop, vervang binary, herstart ==="
+    ssh $SERVER "docker stop lucy --timeout 10 && \
+        docker cp lucy:/lucy/target/release/lucy-core /tmp/lucy-core-new && \
+        docker cp /tmp/lucy-core-new lucy:/lucy/lucy-core && \
+        docker start lucy"
     sleep 15
 fi
 
