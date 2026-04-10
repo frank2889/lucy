@@ -47,18 +47,52 @@
 use lucy_state::*;
 use rand::Rng;
 
-/// Aantal input-punten — gelijk aan DIM voor 1:1 mapping met embeddings
-const N_INPUT: usize = 256;
-/// Aantal hidden-punten — het denkvermogen. 8192 geeft ~100K koppelingen.
-const N_HIDDEN: usize = 8192;
-/// Aantal output-punten — gelijk aan DIM voor decodering via dot product
-const N_OUTPUT: usize = 256;
-/// Watts-Strogatz K parameter: elke node verbonden met K dichtstbijzijnde buren
-const LOCAL_K: usize = 12;
-/// Kans op long-range verbinding per slot (small-world shortcut)
-const LONG_RANGE_P: f32 = 0.05;
-/// Fractie inhibitorische punten (negatieve gewichten)
-const INHIBITORY_FRAC: f32 = 0.2;
+/// v2.5: Bootstrap configuratie — Lucy kan haar eigen brein-architectuur kiezen.
+/// Defaults = oude hardcoded waarden. Lucy kan via data/field_config.json aanpassen.
+#[derive(Clone, Debug)]
+pub struct FieldConfig {
+    pub n_input: usize,
+    pub n_hidden: usize,
+    pub n_output: usize,
+    pub local_k: usize,
+    pub long_range_p: f32,
+    pub inhibitory_frac: f32,
+}
+
+impl Default for FieldConfig {
+    fn default() -> Self {
+        Self {
+            n_input: 256,      // gelijk aan DIM voor 1:1 mapping
+            n_hidden: 8192,    // het denkvermogen — ~100K koppelingen
+            n_output: 256,     // gelijk aan DIM voor decodering
+            local_k: 20,       // v2.6.5: meer couplings = meer geheugen per neuron (was 12)
+            long_range_p: 0.05, // kans op small-world shortcut
+            inhibitory_frac: 0.2, // fractie inhibitorische punten
+        }
+    }
+}
+
+impl FieldConfig {
+    /// Laad configuratie uit bestand, of gebruik defaults
+    pub fn load_or_default() -> Self {
+        let path = std::path::Path::new("data/field_config.json");
+        if path.exists() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                    return Self {
+                        n_input: val["n_input"].as_u64().unwrap_or(256) as usize,
+                        n_hidden: val["n_hidden"].as_u64().unwrap_or(8192) as usize,
+                        n_output: val["n_output"].as_u64().unwrap_or(256) as usize,
+                        local_k: val["local_k"].as_u64().unwrap_or(12) as usize,
+                        long_range_p: val["long_range_p"].as_f64().unwrap_or(0.05) as f32,
+                        inhibitory_frac: val["inhibitory_frac"].as_f64().unwrap_or(0.2) as f32,
+                    };
+                }
+            }
+        }
+        Self::default()
+    }
+}
 
 // Helper functies voor rand 0.9 API (edition 2024 reserveert `gen` keyword)
 fn rng_f32(rng: &mut impl Rng) -> f32 { rng.random::<f32>() }
@@ -68,14 +102,32 @@ fn rng_usize(rng: &mut impl Rng, lo: usize, hi: usize) -> usize { rng.random_ran
 /// Creëer een vers veld met small-world topologie.
 /// Dit wordt aangeroepen bij eerste start of als snapshot corrupt is.
 pub fn bootstrap_field() -> Field {
+    let config = FieldConfig::load_or_default();
+    bootstrap_field_with_config(&config)
+}
+
+pub fn bootstrap_field_with_config(config: &FieldConfig) -> Field {
     let mut field = Field::new();
     let mut rng = rand::rng();
 
-    let total = N_INPUT + N_HIDDEN + N_OUTPUT;
+    let n_input = config.n_input;
+    let n_hidden = config.n_hidden;
+    let n_output = config.n_output;
+
+    let local_k = config.local_k;
+    let long_range_p = config.long_range_p;
+    let inhibitory_frac = config.inhibitory_frac;
+
+    field.n_input = n_input;
+    field.n_hidden = n_hidden;
+    field.n_output = n_output;
+    field.snapshot_version = 1;
+
+    let total = n_input + n_hidden + n_output;
     field.points.reserve(total);
 
     // Input regio
-    for _ in 0..N_INPUT {
+    for _ in 0..n_input {
         let mut p = FieldPoint::new();
         p.flags = FLAG_ACTIVE | FLAG_INPUT | FLAG_SENSORY;
         p.energy = 5.0;
@@ -83,13 +135,13 @@ pub fn bootstrap_field() -> Field {
     }
 
     // Hidden regio
-    for _ in 0..N_HIDDEN {
+    for _ in 0..n_hidden {
         let mut p = FieldPoint::new();
         p.flags = FLAG_ACTIVE;
         for d in 0..DIM {
             p.phi[d] = rng_range(&mut rng, -0.1, 0.1);
         }
-        if rng_f32(&mut rng) < INHIBITORY_FRAC {
+        if rng_f32(&mut rng) < inhibitory_frac {
             p.flags |= FLAG_INHIBITORY;
         }
         p.energy = 1.0;
@@ -98,20 +150,20 @@ pub fn bootstrap_field() -> Field {
     }
 
     // Output regio
-    for _ in 0..N_OUTPUT {
+    for _ in 0..n_output {
         let mut p = FieldPoint::new();
         p.flags = FLAG_ACTIVE | FLAG_OUTPUT | FLAG_MOTOR;
         p.energy = 5.0;
         field.points.push(p);
     }
 
-    let hidden_start = N_INPUT;
-    let output_start = N_INPUT + N_HIDDEN;
+    let hidden_start = n_input;
+    let output_start = n_input + n_hidden;
 
     // Input → eerste kwart hidden
-    for i in 0..N_INPUT {
+    for i in 0..n_input {
         for _ in 0..32 {
-            let target = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN / 4);
+            let target = hidden_start + rng_usize(&mut rng, 0, n_hidden / 4);
             field.points[i].couplings.push(Coupling {
                 target: target as u32,
                 weight: rng_range(&mut rng, -0.3, 0.3),
@@ -122,13 +174,13 @@ pub fn bootstrap_field() -> Field {
     }
 
     // Hidden: Watts-Strogatz small-world
-    for i in 0..N_HIDDEN {
+    for i in 0..n_hidden {
         let idx = hidden_start + i;
         let is_inhib = field.points[idx].is_inhibitory();
 
-        for k in 1..=LOCAL_K / 2 {
-            let left = hidden_start + (i + N_HIDDEN - k) % N_HIDDEN;
-            let right = hidden_start + (i + k) % N_HIDDEN;
+        for k in 1..=local_k / 2 {
+            let left = hidden_start + (i + n_hidden - k) % n_hidden;
+            let right = hidden_start + (i + k) % n_hidden;
             let w = if is_inhib {
                 rng_range(&mut rng, -0.5, -0.1)
             } else {
@@ -143,8 +195,8 @@ pub fn bootstrap_field() -> Field {
         }
 
         for _ in 0..4 {
-            if rng_f32(&mut rng) < LONG_RANGE_P {
-                let far = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
+            if rng_f32(&mut rng) < long_range_p {
+                let far = hidden_start + rng_usize(&mut rng, 0, n_hidden);
                 if far != idx {
                     field.points[idx].couplings.push(Coupling {
                         target: far as u32,
@@ -158,11 +210,11 @@ pub fn bootstrap_field() -> Field {
     }
 
     // Laatste kwart hidden → Output
-    let last_q = hidden_start + N_HIDDEN * 3 / 4;
-    for i in 0..N_OUTPUT {
+    let last_q = hidden_start + n_hidden * 3 / 4;
+    for i in 0..n_output {
         let oidx = output_start + i;
         for _ in 0..32 {
-            let source = last_q + rng_usize(&mut rng, 0, N_HIDDEN / 4);
+            let source = last_q + rng_usize(&mut rng, 0, n_hidden / 4);
             field.points[oidx].couplings.push(Coupling {
                 target: source as u32,
                 weight: rng_range(&mut rng, -0.3, 0.3),
@@ -179,9 +231,9 @@ pub fn bootstrap_field() -> Field {
     }
 
     // Recurrente feedback loops
-    for _ in 0..N_HIDDEN / 10 {
-        let a = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
-        let b = hidden_start + rng_usize(&mut rng, 0, N_HIDDEN);
+    for _ in 0..n_hidden / 10 {
+        let a = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+        let b = hidden_start + rng_usize(&mut rng, 0, n_hidden);
         if a != b {
             let w = rng_range(&mut rng, -0.1, 0.1);
             field.points[a].couplings.push(Coupling {
@@ -200,12 +252,162 @@ pub fn bootstrap_field() -> Field {
     let n_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
     tracing::info!(
         points = total,
-        input = N_INPUT,
-        hidden = N_HIDDEN,
-        output = N_OUTPUT,
+        input = n_input,
+        hidden = n_hidden,
+        output = n_output,
         couplings = n_couplings,
         "Field bootstrapped"
     );
 
     field
+}
+
+/// Herbedrading van een bestaand veld — alleen couplings worden opnieuw aangemaakt.
+/// Phi, memory, prediction, emoties, vocab, retrieval etc. blijven INTACT.
+/// Wordt aangeroepen als couplings verloren zijn (bijv. door homeostasis death spiral).
+pub fn rewire_field(field: &mut Field) {
+    let config = FieldConfig::load_or_default();
+    let mut rng = rand::rng();
+
+    let n_input = config.n_input.min(field.n_input);
+    let n_hidden = config.n_hidden.min(field.n_hidden);
+    let n_output = config.n_output.min(field.n_output);
+    let hidden_start = n_input;
+    let output_start = n_input + n_hidden;
+    let local_k = config.local_k;
+    let long_range_p = config.long_range_p;
+
+    // Wis alle bestaande (lege) couplings
+    for p in &mut field.points {
+        p.couplings.clear();
+    }
+
+    // Input → eerste kwart hidden
+    for i in 0..n_input {
+        for _ in 0..32 {
+            let target = hidden_start + rng_usize(&mut rng, 0, n_hidden / 4);
+            field.points[i].couplings.push(Coupling {
+                target: target as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Hidden: Watts-Strogatz small-world
+    for i in 0..n_hidden {
+        let idx = hidden_start + i;
+        let is_inhib = field.points[idx].is_inhibitory();
+
+        for k in 1..=local_k / 2 {
+            let left = hidden_start + (i + n_hidden - k) % n_hidden;
+            let right = hidden_start + (i + k) % n_hidden;
+            let w = if is_inhib {
+                rng_range(&mut rng, -0.5, -0.1)
+            } else {
+                rng_range(&mut rng, 0.1, 0.5)
+            };
+            field.points[idx].couplings.push(Coupling {
+                target: left as u32, weight: w, momentum: 0.0, ..Default::default()
+            });
+            field.points[idx].couplings.push(Coupling {
+                target: right as u32, weight: w * 0.8, momentum: 0.0, ..Default::default()
+            });
+        }
+
+        for _ in 0..4 {
+            if rng_f32(&mut rng) < long_range_p {
+                let far = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+                if far != idx {
+                    field.points[idx].couplings.push(Coupling {
+                        target: far as u32,
+                        weight: rng_range(&mut rng, -0.2, 0.2),
+                        momentum: 0.0,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    // Laatste kwart hidden → Output
+    let last_q = hidden_start + n_hidden * 3 / 4;
+    for i in 0..n_output {
+        let oidx = output_start + i;
+        for _ in 0..32 {
+            let source = last_q + rng_usize(&mut rng, 0, n_hidden / 4);
+            field.points[oidx].couplings.push(Coupling {
+                target: source as u32,
+                weight: rng_range(&mut rng, -0.3, 0.3),
+                momentum: 0.0,
+                ..Default::default()
+            });
+            field.points[source].couplings.push(Coupling {
+                target: oidx as u32,
+                weight: rng_range(&mut rng, -0.15, 0.15),
+                momentum: 0.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Recurrente feedback loops
+    for _ in 0..n_hidden / 10 {
+        let a = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+        let b = hidden_start + rng_usize(&mut rng, 0, n_hidden);
+        if a != b {
+            let w = rng_range(&mut rng, -0.1, 0.1);
+            field.points[a].couplings.push(Coupling {
+                target: b as u32, weight: w, momentum: 0.0, ..Default::default()
+            });
+            field.points[b].couplings.push(Coupling {
+                target: a as u32, weight: w * 0.5, momentum: 0.0, ..Default::default()
+            });
+        }
+    }
+
+    let n_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    tracing::info!(
+        couplings = n_couplings,
+        "Field rewired — couplings hersteld, phi/memory intact"
+    );
+}
+
+/// v2.6.5: Voeg extra couplings toe aan punten die te weinig hebben.
+/// Bestaande couplings blijven intact — alleen NIEUWE worden toegevoegd.
+/// Dit vergroot het geheugen per neuron zonder geleerde weights te verliezen.
+pub fn densify_couplings(field: &mut Field, target_k: usize) {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let n = field.points.len();
+    let mut added = 0usize;
+
+    for i in 0..n {
+        let current = field.points[i].couplings.len();
+        if current >= target_k { continue; }
+
+        // Bestaande targets — voorkom duplicaten
+        let existing: std::collections::HashSet<u32> = field.points[i]
+            .couplings.iter().map(|c| c.target).collect();
+
+        let to_add = target_k - current;
+        for _ in 0..to_add {
+            let target = rng.random_range(0..n as u32);
+            if target != i as u32 && !existing.contains(&target) {
+                field.points[i].couplings.push(lucy_state::Coupling {
+                    target,
+                    weight: rng.random_range(-0.01f32..0.01),
+                    momentum: 0.0,
+                    importance: 0.0,
+                    consolidated: 0.0,
+                    broadcast: false,
+                });
+                added += 1;
+            }
+        }
+    }
+
+    let total: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    tracing::info!(added, total, target_k, "Couplings verdicht — meer geheugen per neuron");
 }

@@ -65,7 +65,7 @@ impl Default for FieldConfig {
             n_input: 256,      // gelijk aan DIM voor 1:1 mapping
             n_hidden: 8192,    // het denkvermogen — ~100K koppelingen
             n_output: 256,     // gelijk aan DIM voor decodering
-            local_k: 12,       // Watts-Strogatz K parameter
+            local_k: 20,       // v2.6.5: meer couplings = meer geheugen per neuron (was 12)
             long_range_p: 0.05, // kans op small-world shortcut
             inhibitory_frac: 0.2, // fractie inhibitorische punten
         }
@@ -372,4 +372,42 @@ pub fn rewire_field(field: &mut Field) {
         couplings = n_couplings,
         "Field rewired — couplings hersteld, phi/memory intact"
     );
+}
+
+/// v2.6.5: Voeg extra couplings toe aan punten die te weinig hebben.
+/// Bestaande couplings blijven intact — alleen NIEUWE worden toegevoegd.
+/// Dit vergroot het geheugen per neuron zonder geleerde weights te verliezen.
+pub fn densify_couplings(field: &mut Field, target_k: usize) {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let n = field.points.len();
+    let mut added = 0usize;
+
+    for i in 0..n {
+        let current = field.points[i].couplings.len();
+        if current >= target_k { continue; }
+
+        // Bestaande targets — voorkom duplicaten
+        let existing: std::collections::HashSet<u32> = field.points[i]
+            .couplings.iter().map(|c| c.target).collect();
+
+        let to_add = target_k - current;
+        for _ in 0..to_add {
+            let target = rng.random_range(0..n as u32);
+            if target != i as u32 && !existing.contains(&target) {
+                field.points[i].couplings.push(lucy_state::Coupling {
+                    target,
+                    weight: rng.random_range(-0.01f32..0.01),
+                    momentum: 0.0,
+                    importance: 0.0,
+                    consolidated: 0.0,
+                    broadcast: false,
+                });
+                added += 1;
+            }
+        }
+    }
+
+    let total: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    tracing::info!(added, total, target_k, "Couplings verdicht — meer geheugen per neuron");
 }

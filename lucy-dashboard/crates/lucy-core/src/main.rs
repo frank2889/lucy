@@ -163,6 +163,9 @@ async fn main() {
         field::rewire_field(&mut field);
     }
 
+    // v2.6.5: Verdicht netwerk — punten met te weinig couplings krijgen er bij
+    field::densify_couplings(&mut field, 20);
+
     // === Laad vocabulaire ===
     let vocab_path = Path::new(VOCAB_PATH);
     let mut vocab = if vocab_path.exists() {

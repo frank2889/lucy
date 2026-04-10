@@ -78,7 +78,7 @@ pub struct FieldPoint {
     pub memory: [f32; DIM],
 
     // W — koppelingen naar andere punten (sparse, signed)
-    pub couplings: SmallVec<[Coupling; 8]>,
+    pub couplings: SmallVec<[Coupling; 16]>, // v2.6.5: meer stack-ruimte voor dichtere netwerken
 
     // η — lokale leersnelheid (leert zelf via meta-leren)
     pub eta: f32,

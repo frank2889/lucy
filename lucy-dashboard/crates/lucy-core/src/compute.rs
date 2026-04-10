@@ -263,10 +263,10 @@ pub fn update_weights(field: &mut Field, id: u32) {
         for d in 0..DIM {
             dw += eps[d] * (phi_self[d] - neighbor_data[i][d]);
         }
-        dw /= DIM as f32;
+        dw /= (DIM as f32).sqrt(); // v2.6.5: √DIM ipv DIM — correcte normalisatie (16× sterker signaal)
         // Gradient clipping: voorkom explosive weight updates en NaN propagatie
         if !dw.is_finite() { dw = 0.0; }
-        dw = dw.clamp(-1.0, 1.0);
+        dw = dw.clamp(-2.0, 2.0); // v2.6.5: ruimer dan ±1.0 want gradient is 16× sterker
 
         coupling.momentum = mu * coupling.momentum + (1.0 - mu) * dw;
         // EWC penalty: bescherm belangrijke weights — sterkte schaalt met kl_scale
@@ -1390,7 +1390,7 @@ pub fn equilibrium_propagation(
                 let corr_free = phi_free[d] * neighbor_free[d];
                 dw += corr_clamped - corr_free;
             }
-            dw *= ep_beta / DIM as f32;
+            dw *= ep_beta / (DIM as f32).sqrt(); // v2.6.5: √DIM normalisatie
 
             let eta = field.points[idx].eta;
             field.points[idx].couplings[ci].weight += eta * dw;
@@ -2048,7 +2048,7 @@ pub fn apply_neuromodulation(field: &mut Field) {
         use rand::Rng;
         let mut rng = rand::rng();
         // Sterkte: minimaal 2.0 (was 1.0) — genoeg om prediction error te genereren
-        let baseline_noise = (field.noise_amplitude * 5.0).max(0.1);
+        let baseline_noise = (field.noise_amplitude * 5.0).max(0.01); // v2.6.5: floor 0.1→0.01, laat learning signaal domineren
         // Bereik: minimaal 10% van punten of 100 (was 1% of 50)
         let min_count = (field.active_set.len() / 10).max(100);
         let noise_frac = field.noise_amplitude.max(0.1); // minimaal 10% van punten
@@ -2620,8 +2620,8 @@ pub fn micro_ep(
     // Injecteer input (light — alleen IO punten + buren)
     inject_token_sequence_light(field, input_embs, 1);
 
-    // Settle light (5 ticks, ~500 punten)
-    settle_light(field, 5, field.settle_epsilon * 50.0);
+    // v2.6.5: 20 ticks ipv 5 — veld moet echt settlen voor EP werkt
+    settle_light(field, 20, field.settle_epsilon * 10.0);
 
     // Bewaar vrije-fase states (alleen IO + buren)
     let mut subset: Vec<u32> = Vec::with_capacity(1024);
@@ -2653,8 +2653,8 @@ pub fn micro_ep(
         }
     }
 
-    // Settle light (5 ticks)
-    settle_light(field, 5, field.settle_epsilon * 50.0);
+    // v2.6.5: 20 ticks ipv 5 — geklemde fase moet ook echt settlen
+    settle_light(field, 20, field.settle_epsilon * 10.0);
 
     // === WEIGHT UPDATE (alleen IO subset) ===
     let mut total_delta = 0.0f32;
@@ -2687,7 +2687,7 @@ pub fn micro_ep(
                 let corr_free = phi_free[d] * neighbor_free[d];
                 dw += corr_clamped - corr_free;
             }
-            dw *= ep_beta / DIM as f32;
+            dw *= ep_beta / (DIM as f32).sqrt(); // v2.6.5: √DIM normalisatie
 
             let eta = field.points[idx].eta;
             field.points[idx].couplings[ci].weight += eta * dw;
