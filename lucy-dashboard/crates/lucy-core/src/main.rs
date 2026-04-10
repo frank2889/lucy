@@ -90,6 +90,7 @@ mod retrieval;
 mod thinker;
 mod field_handle;
 mod backup;
+mod poster;
 mod replica_manager;
 mod federation;
 mod server;
@@ -1247,31 +1248,25 @@ async fn main() {
                                 "Lucy heeft GPU nodig — start autonome promotie"
                             );
 
-                            // Lucy probeert haar referral link te verspreiden
-                            let http = lucy_io::http::HttpClient::new();
-                            let _promo = ge.generate_promo_message();
-                            let targets = ge.promotion_targets();
-
-                            // Kies een willekeurig platform om te proberen
-                            let target = &targets[tick as usize % targets.len()];
-                            tracing::info!(
-                                platform = %target.platform,
-                                strategy = %target.strategy,
-                                "Lucy overweegt promotie"
-                            );
-
-                            // Lucy leert over het platform door het te bezoeken
-                            // Ze moet zelf uitvogelen HOE ze er kan posten
-                            match tokio::time::timeout(std::time::Duration::from_secs(10), http.get(&target.url)).await.unwrap_or(Err("Timeout".to_string())) {
-                                Ok(resp) => {
-                                    tracing::debug!(
-                                        platform = %target.platform,
-                                        status = resp.status,
-                                        "Lucy verkent promotie-platform"
+                            // Lucy post ECHT op platforms — niet alleen verkennen
+                            let balance = ge.vastai_balance;
+                            drop(ge); // release lock voor async calls
+                            let round = poster::execute_promotion(balance, tick).await;
+                            for result in &round.results {
+                                if result.success {
+                                    tracing::info!(
+                                        platform = %result.platform,
+                                        url = ?result.url,
+                                        "Lucy heeft succesvol gepost!"
                                     );
-                                }
-                                Err(e) => {
-                                    tracing::debug!(%e, "Platform niet bereikbaar");
+                                    // Dopamine boost voor succesvolle post
+                                    field.dopamine = (field.dopamine + 0.1).min(2.0);
+                                } else {
+                                    tracing::debug!(
+                                        platform = %result.platform,
+                                        error = ?result.error,
+                                        "Post niet gelukt"
+                                    );
                                 }
                             }
                         }
