@@ -442,10 +442,11 @@ pub fn compute_tension(field: &mut Field, id: u32) {
     // Curiosity = hoe verrassend is mijn grens met de wereld?
     // Dit is DIRECT de S(η|b) term uit F — geen aparte formule.
     let distributional_spread = (point.reward_quantiles[4] - point.reward_quantiles[0]).abs();
+    // v2.6.5: floor 0.1 ipv noise_amplitude (0.02) — curiosity moet leven
     let surprise = (blanket_surprise.sqrt().min(1.0) + distributional_spread * 0.3)
-        .max(field.noise_amplitude)
+        .max(0.1)
         .min(1.0);
-    let surprise = if surprise.is_finite() { surprise } else { field.noise_amplitude };
+    let surprise = if surprise.is_finite() { surprise } else { 0.1 };
     let smoothed = emo_smooth * point.curiosity + (1.0 - emo_smooth) * surprise;
     point.curiosity = smoothed.max(surprise).clamp(0.0, 1.0);
 
@@ -1959,8 +1960,10 @@ pub fn update_neuromodulators(field: &mut Field) {
     // Was: reward = dopamine * baseline - tension → dopamine in eigen berekening → vast op 0.01
     // Nu: reward = vorige tension - huidige tension (echte verbetering) + baseline
     // Baseline = noise_amplitude zodat dopamine nooit op nul vastzit
-    let tension_improvement = (field.serotonin - avg_tension).max(0.0); // serotonin ≈ slow tension EMA
-    let reward = (tension_improvement + field.noise_amplitude).max(field.noise_amplitude);
+    // v2.6.5: serotonin is nu gezond (decay 0.95) → reward klopt weer
+    // Extra safety: clamp reward zodat vals-hoge serotonin nooit meer kan exploiteren
+    let tension_improvement = (field.serotonin - avg_tension).max(0.0);
+    let reward = tension_improvement.clamp(0.0, 0.5) + field.noise_amplitude * 0.1;
     field.dopamine = nan_safe(da_decay * field.dopamine + (1.0 - da_decay) * reward);
 
     // Noradrenaline: onzekerheid = hoge spanning-variantie
@@ -2418,7 +2421,10 @@ pub fn compute_criticality(field: &mut Field) {
 
     // === Stap 1: Bereken branching ratio per punt ===
     // σ_i = hoeveel van mijn buren zijn "geactiveerd" (tension stijgt)?
-    let activation_threshold = field.noise_amplitude; // dynamisch: meer ruis → hogere drempel
+    // v2.6.5: relatief aan tension, niet noise_amplitude (was 0.02 → niks overschrijdt drempel)
+    let avg_t: f32 = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension).sum::<f32>() / n as f32;
+    let activation_threshold = (avg_t * 0.5).max(0.001);
 
     let mut total_sigma = 0.0f32;
     let mut sigma_count = 0u32;

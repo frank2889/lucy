@@ -268,18 +268,19 @@ async fn main() {
     compute::init_rnd(&mut field);
     compute::assign_depths(&mut field);
 
-    // v2.6.5: Volledige rewire — herstel hiërarchie (oude weights waren noise, 42:1 ratio)
-    // Phi, memory, prediction, emoties, vocab, retrieval etc. blijven INTACT.
-    {
-        let old_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+    // v2.6.5: Rewire ALLEEN als topologie echt kapot is (niet elke startup)
+    let avg_couplings = if field.points.is_empty() { 0 } else { total_couplings / field.points.len() };
+    if avg_couplings < 5 {
+        tracing::warn!(avg_couplings, "Topologie te dun — rewire met K=20");
         field::rewire_field(&mut field);
-        let new_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
-        tracing::info!(old_couplings, new_couplings, "Topologie hersteld met K=20");
     }
     compute::assign_depths(&mut field);
-    // Verdicht binnen depth-lagen
+    // Verdicht binnen depth-lagen (idempotent — skipt punten die al ≥20 hebben)
     field::densify_couplings(&mut field, 20);
     compute::assign_depths(&mut field);
+
+    // v2.6.5: Reset serotonin naar dopamine (voorkom vastzit op 2.0 uit snapshot)
+    field.serotonin = field.dopamine;
 
     tracing::info!(
         spectral_radius = field.spectral_radius,

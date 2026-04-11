@@ -646,7 +646,7 @@ pub struct AdaptiveParams {
 impl Default for AdaptiveParams {
     fn default() -> Self {
         Self {
-            emotion_decay: [0.95, 0.95, 0.99, 0.95], // DA, NE, 5HT(langzamer), ACh
+            emotion_decay: [0.95, 0.95, 0.95, 0.95], // v2.6.5: 5HT nu zelfde decay als rest (was 0.99 → vastzit op 2.0)
             dopamine_baseline: 0.5,
             ne_noise_scale: 0.02,
             ne_perturb_frac: 0.2,
@@ -657,7 +657,7 @@ impl Default for AdaptiveParams {
             escalation_frust_thresh: 0.2,
             neuromod_interactions: [
                 // DA→[DA, NE, 5HT, ACh]
-                [0.0,  0.0,  0.1, -0.02], // DA stimuleert serotonine, remt ACh licht
+                [0.0,  0.0,  0.02, -0.02], // v2.6.5: DA→5HT van 0.1→0.02 (was: serotonin ratchet naar 2.0)
                 // NE→[DA, NE, 5HT, ACh]
                 [0.05, 0.0,  0.0,  0.02], // NE stimuleert DA (arousal→reward), en ACh (alertheid)
                 // 5HT→[DA, NE, 5HT, ACh]
