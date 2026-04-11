@@ -279,8 +279,9 @@ async fn main() {
     field::densify_couplings(&mut field, 20);
     compute::assign_depths(&mut field);
 
-    // v2.6.5: Reset serotonin naar dopamine (voorkom vastzit op 2.0 uit snapshot)
-    field.serotonin = field.dopamine;
+    // v2.6.5: Reset neuromod parameters uit snapshot die vastzaten
+    field.serotonin = field.dopamine;   // voorkom vastzit op 2.0
+    field.ema_decay = 0.90;             // was 0.99 in snapshot → bewustzijn dood
 
     tracing::info!(
         spectral_radius = field.spectral_radius,

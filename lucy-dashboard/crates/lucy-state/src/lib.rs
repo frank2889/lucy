@@ -921,7 +921,7 @@ impl Field {
             rho: 0.95,
             mu: 0.9,
             growth_threshold: 0.5,
-            ema_decay: 0.99,
+            ema_decay: 0.90, // v2.6.5: was 0.99 → tension_ema volgde tension te precies → branching/phi altijd 0
             // Dynamische parameters — startwaarden, adapt_dynamics() past aan
             emo_decay: default_emo_decay(),
             error_tracking_rate: default_error_tracking_rate(),
@@ -1090,7 +1090,7 @@ impl Field {
         if !self.kappa.is_finite() { self.kappa = 0.01; healed += 1; }
         if !self.omega.is_finite() { self.omega = 0.01; healed += 1; }
         if !self.growth_threshold.is_finite() { self.growth_threshold = 0.5; healed += 1; }
-        if !self.ema_decay.is_finite() { self.ema_decay = 0.99; healed += 1; }
+        if !self.ema_decay.is_finite() { self.ema_decay = 0.90; healed += 1; }
         if !self.clamp_range.is_finite() { self.clamp_range = 10.0; healed += 1; }
         if !self.settle_epsilon.is_finite() { self.settle_epsilon = 0.01; healed += 1; }
         if !self.noise_amplitude.is_finite() { self.noise_amplitude = 0.1; healed += 1; }
