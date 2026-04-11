@@ -661,7 +661,7 @@ impl Default for AdaptiveParams {
                 // NE→[DA, NE, 5HT, ACh]
                 [0.05, 0.0,  0.0,  0.02], // NE stimuleert DA (arousal→reward), en ACh (alertheid)
                 // 5HT→[DA, NE, 5HT, ACh]
-                [-0.05, 0.0, 0.0,  0.0],  // Serotonine remt dopamine (geduld vs impulsiviteit)
+                [-0.01, 0.0, 0.0,  0.0],  // v2.6.5: was -0.05 → dopamine kon nooit stijgen (0.029/tick drain)
                 // ACh→[DA, NE, 5HT, ACh]
                 [0.0,  0.03, 0.0,  0.0],  // ACh stimuleert NE (nieuwheid→alertheid)
             ],

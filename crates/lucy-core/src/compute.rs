@@ -2914,14 +2914,16 @@ pub fn global_workspace_broadcast(field: &mut Field) {
         // Geen recurrente support of score verwaarloosbaar → geen ignition
         field.ignition_active = false;
         let fe = field.fe_tracking_rate;
-        field.ignition_strength = (1.0 - fe) * field.ignition_strength;
+        let decayed = (1.0 - fe) * field.ignition_strength;
+        field.ignition_strength = if decayed.is_finite() { decayed } else { 0.0 };
         return;
     }
 
     // === Stap 4: IGNITION! Broadcast + zelfversterking + inhibitie ===
     field.ignition_active = true;
     let fe = field.fe_tracking_rate;
-    field.ignition_strength = (1.0 - fe) * field.ignition_strength + fe * ignition_product;
+    let new_is = (1.0 - fe) * field.ignition_strength + fe * ignition_product;
+    field.ignition_strength = if new_is.is_finite() { new_is } else { 0.0 }; // v2.6.5: NaN guard
 
     // Broadcast sterkte = proportioneel aan ignition sterkte (niet vast)
     let broadcast_strength = (field.noise_amplitude * ignition_product).min(0.5);
