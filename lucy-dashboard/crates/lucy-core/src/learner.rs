@@ -46,7 +46,7 @@ use lucy_io::http::HttpClient;
 use crate::encoding::Vocabulary;
 use crate::compute;
 use rand::Rng;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lucy's autonome ontdekkingssysteem.
 /// Ze kiest ZELF waar ze leert. Geen hardcoded bronnen.
@@ -90,6 +90,33 @@ impl Explorer {
     pub fn visited_cleanup(&self) -> usize {
         self.frontier_max()
     }
+
+    /// v2.5: Diversifieer de frontier — voorkom domein-monoculture
+    /// Elk domein mag maximaal 20% van de frontier beslaan.
+    /// Over-vertegenwoordigde domeinen worden getrimd.
+    pub fn diversify_frontier(&mut self) {
+        if self.frontier.len() < 20 { return; }
+
+        let max_per_domain = self.frontier.len() / 5; // max 20%
+        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+        let mut keep: VecDeque<String> = VecDeque::new();
+
+        for url in self.frontier.drain(..) {
+            let domain = extract_domain(&url);
+            let count = domain_counts.entry(domain).or_default();
+            if *count < max_per_domain {
+                *count += 1;
+                keep.push_back(url);
+            }
+            // Anders: URL wordt gedropt (te veel van dit domein)
+        }
+
+        let trimmed = self.frontier.len().saturating_sub(keep.len());
+        self.frontier = keep;
+        if trimmed > 0 {
+            tracing::info!(trimmed, remaining = self.frontier.len(), "Frontier gediversifieerd");
+        }
+    }
 }
 
 impl Explorer {
@@ -103,13 +130,71 @@ impl Explorer {
         }
     }
 
-    /// Lucy kiest zelf de volgende URL of genereert er een
+    /// Lucy kiest zelf de volgende URL — curiosity-gedreven
+    /// v2.5: Niet FIFO maar DIVERS:
+    /// - Elke 3e URL: verse bron uit sources.txt (doorbreekt loops)
+    /// - Andere URLs: kies de URL met het MEEST ONBEKENDE domein
+    ///   (domein dat ze het minst bezocht heeft = meeste novelty)
+    /// - Frontier leeg: genereer vanuit interests
     pub fn next_url(&mut self) -> Option<String> {
-        if let Some(url) = self.frontier.pop_front() {
-            return Some(url);
+        self.pages_read += 0; // trigger type check
+
+        // Elke 3e pagina: verse bron uit sources.txt (diversiteitsgarantie)
+        if self.pages_read % 3 == 0 {
+            if let Some(url) = self.fresh_source_url() {
+                return Some(url);
+            }
         }
-        // Frontier leeg → genereer een zoekopdracht vanuit wat ze weet
-        self.generate_curiosity_url()
+
+        if self.frontier.is_empty() {
+            return self.generate_curiosity_url();
+        }
+
+        // Kies URL met het meest onbekende domein (niet FIFO!)
+        // Tel hoe vaak elk domein al bezocht is
+        let mut domain_counts: HashMap<String, usize> = HashMap::new();
+        for visited in &self.visited {
+            let domain = extract_domain(visited);
+            *domain_counts.entry(domain).or_default() += 1;
+        }
+
+        // Zoek de frontier-URL waarvan het domein het MINST bezocht is
+        let mut best_idx = 0;
+        let mut best_score = usize::MAX;
+        for (i, url) in self.frontier.iter().enumerate() {
+            let domain = extract_domain(url);
+            let count = domain_counts.get(&domain).copied().unwrap_or(0);
+            if count < best_score {
+                best_score = count;
+                best_idx = i;
+            }
+        }
+
+        self.frontier.remove(best_idx)
+    }
+
+    /// Haal een verse URL uit sources.txt (de diverse bronnen)
+    fn fresh_source_url(&mut self) -> Option<String> {
+        let path = std::path::Path::new("data/sources.txt");
+        if !path.exists() { return None; }
+        let content = std::fs::read_to_string(path).ok()?;
+        let sources: Vec<&str> = content.lines()
+            .filter(|l| l.starts_with("http"))
+            .collect();
+        if sources.is_empty() { return None; }
+
+        // Kies random bron die niet recent bezocht is
+        use rand::Rng;
+        let mut rng = rand::rng();
+        for _ in 0..10 { // max 10 pogingen
+            let idx = rng.random_range(0..sources.len());
+            let url = sources[idx].trim().to_string();
+            if !self.visited.contains(&url) {
+                return Some(url);
+            }
+        }
+        // Alle sources bezocht → geef toch een (voor random Wikipedia = altijd nieuw)
+        Some(sources[rng.random_range(0..sources.len())].trim().to_string())
     }
 
     /// Lucy genereert zelf een URL vanuit haar interesses
@@ -132,9 +217,10 @@ impl Explorer {
         let query = query_words.join("+");
 
         // Wissel tussen bronnen — Lucy leert van diverse plekken
-        let source = rng.random_range(0..5u32);
+        // v2.5: NL Wikipedia toegevoegd, meer diversiteit
+        let source = rng.random_range(0..9u32);
         match source {
-            // Wikipedia REST API — gestructureerde kennis, gratis, geen key
+            // EN Wikipedia REST API — gestructureerde kennis
             0 | 1 => {
                 let word = interests_vec[rng.random_range(0..interests_vec.len())];
                 Some(format!(
@@ -142,23 +228,46 @@ impl Explorer {
                     word
                 ))
             }
-            // Wikipedia zoeken — ontdek gerelateerde artikelen
+            // NL Wikipedia — Nederlands leren
             2 => {
+                let word = interests_vec[rng.random_range(0..interests_vec.len())];
+                Some(format!(
+                    "https://nl.wikipedia.org/api/rest_v1/page/summary/{}",
+                    word
+                ))
+            }
+            // Wikipedia zoeken — ontdek gerelateerde artikelen
+            3 => {
                 Some(format!(
                     "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&utf8=1&srlimit=5",
                     query
                 ))
             }
             // DuckDuckGo Instant Answer API — snelle feiten
-            3 => {
+            4 => {
                 Some(format!(
                     "https://api.duckduckgo.com/?q={}&format=json&no_html=1",
                     query
                 ))
             }
+            // Random Wikipedia — ontdek iets totaal nieuws
+            5 => {
+                if rng.random_range(0..2u32) == 0 {
+                    Some("https://en.wikipedia.org/wiki/Special:Random".to_string())
+                } else {
+                    Some("https://nl.wikipedia.org/wiki/Speciaal:Willekeurig".to_string())
+                }
+            }
             // DuckDuckGo Lite — volledige zoekresultaten
-            _ => {
+            6 => {
                 Some(format!("https://lite.duckduckgo.com/lite/?q={}", query))
+            }
+            // v2.6.5: Community sites — hebben formulieren (posting-kansen)
+            7 => {
+                Some(format!("https://lite.duckduckgo.com/lite/?q={}+forum+discussion", query))
+            }
+            _ => {
+                Some(format!("https://lite.duckduckgo.com/lite/?q={}+blog+comments", query))
             }
         }
     }
@@ -167,36 +276,39 @@ impl Explorer {
     /// NIET met vaste data-URLs — Lucy ontdekt zelf welke APIs en data er bestaan.
     /// Dit zijn de "telefoonboeken" van het internet — Lucy bladert er zelf doorheen.
     pub fn seed_api_discovery(&mut self) {
-        let discovery_sources = [
-            // === API Directory's — Lucy vindt hier ZELF welke APIs er bestaan ===
-            "https://api.publicapis.org/entries?https=true", // 1400+ gratis APIs, gecategoriseerd
-            "https://raw.githubusercontent.com/public-apis/public-apis/master/README.md", // Grootste open API lijst
-            "https://apis.guru/api/v1/list.json", // OpenAPI directory — duizenden APIs met specs
+        // v2.5: ZERO hardcoded bronnen — Lucy beheert haar eigen bronnenlijst
+        //
+        // Lucy leest bronnen uit data/sources.txt (1 URL per regel).
+        // Als dat bestand niet bestaat, wordt het aangemaakt met initiële seeds.
+        // Lucy kan zelf bronnen toevoegen via discover_apis() en learn_from_text().
+        //
+        // De initiële seeds zijn ALLEEN een startpunt — geen permanente lijst.
+        let sources_path = std::path::Path::new("data/sources.txt");
+        let sources = if sources_path.exists() {
+            // Lucy's eigen bronnenlijst — zij heeft deze zelf beheerd/uitgebreid
+            std::fs::read_to_string(sources_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("http"))
+                .map(|l| l.trim().to_string())
+                .collect::<Vec<_>>()
+        } else {
+            // Eerste boot: breed spectrum aan startpunten
+            let defaults = vec![
+                "https://en.wikipedia.org/wiki/Special:Random".to_string(),
+                "https://nl.wikipedia.org/wiki/Speciaal:Willekeurig".to_string(),
+                "https://api.publicapis.org/entries?https=true".to_string(),
+                "https://news.ycombinator.com/rss".to_string(),
+            ];
+            // Sla op zodat Lucy het kan uitbreiden
+            let content = defaults.join("\n");
+            let _ = std::fs::write(sources_path, &content);
+            defaults
+        };
 
-            // === Wetenschappelijke zoekmachines — Lucy zoekt zelf wat relevant is ===
-            "https://api.openalex.org/works?search=open+data+api&per_page=10", // Wetenschappelijke werken over open data
-            "https://api.semanticscholar.org/graph/v1/paper/search?query=open+science+data+api&limit=10",
-            "https://api.crossref.org/works?query=public+dataset+api&rows=10",
-
-            // === Open Data portals — Lucy ontdekt zelf welke datasets er zijn ===
-            "https://catalog.data.gov/api/3/action/package_search?q=api&rows=10", // US overheidsdata
-            "https://data.europa.eu/api/hub/search/datasets?q=api&limit=10", // EU open data
-            "https://ckan.org/portfolio/", // Wereldwijde data portals
-
-            // === Universiteit & onderzoek toegangspunten ===
-            "https://api.ror.org/organizations?query=university&page=1", // Research Organization Registry — alle universiteiten
-            "https://api.openalex.org/institutions?search=university&per_page=10", // Academische instellingen + hun output
-            "https://doaj.org/api/search/journals?query=open+access+data&pageSize=10", // Open access journals
-
-            // === Code & kennis ===
-            "https://api.github.com/search/repositories?q=open+data+api+stars:>100&sort=stars&per_page=10",
-            "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=list+of+open+APIs&format=json",
-        ];
-
-        for url in &discovery_sources {
-            let url_str = url.to_string();
-            if !self.frontier.contains(&url_str) && !self.visited.contains(&url_str) {
-                self.frontier.push_back(url_str);
+        for url in &sources {
+            if !self.frontier.contains(url) && !self.visited.contains(url) {
+                self.frontier.push_back(url.clone());
             }
         }
     }
@@ -290,18 +402,27 @@ impl Explorer {
         }
     }
 
-    /// Leer interessante woorden uit tekst — bouwt Lucy's nieuwsgierigheid op
-    /// Ze kiest woorden die lang genoeg zijn en niet te gewoon
+    /// Leer interessante woorden uit tekst — Lucy kiest ZELF wat interessant is
+    /// v2.5: Geen hardcoded BORING_WORDS meer. In plaats daarvan:
+    /// - Woorden die Lucy al VEEL gezien heeft → niet interessant (diminishing returns)
+    /// - Woorden die NIEUW zijn → interessant (novelty-driven)
+    /// - Diversiteit: max 5 nieuwe interests per tekst (voorkomt flooding door 1 bron)
     pub fn absorb_interests(&mut self, text: &str) {
+        let mut new_this_text = 0u32;
         for word in text.split_whitespace() {
+            if new_this_text >= 5 { break; } // max 5 per tekst — diversiteit
+
             let clean = word.trim_matches(|c: char| !c.is_alphanumeric())
                 .to_lowercase();
-            // Woorden van 4+ karakters die niet te kort/generiek zijn
+
+            // Minimale filters: alleen lengte (Lucy bepaalt de rest zelf)
             if clean.len() >= 4
-                && !BORING_WORDS.contains(&clean.as_str())
+                && clean.len() <= 30 // geen URL-achtige rommel
+                && clean.chars().all(|c| c.is_alphanumeric()) // alleen echte woorden
                 && !self.interests.contains(&clean)
             {
                 self.interests.insert(clean);
+                new_this_text += 1;
             }
         }
         // Hou interesses beheersbaar — oudste eruit als te veel
@@ -533,13 +654,8 @@ pub fn generate_teacher_question(
 // v2.0: Geen externe AI teacher meer — Lucy is 100% zelflerend via web-exploratie
 
 /// Woorden die te generiek zijn om interessant te zijn als zoekopdracht
-const BORING_WORDS: &[&str] = &[
-    "the", "this", "that", "with", "from", "have", "been", "will",
-    "what", "when", "where", "which", "there", "their", "about",
-    "would", "could", "should", "some", "than", "then", "them",
-    "self", "true", "false", "none", "null", "return", "struct",
-    "impl", "func", "void", "else", "match", "loop", "while",
-];
+// v2.5: BORING_WORDS verwijderd — Lucy bepaalt zelf wat interessant is
+// via haar curiosity (blanket surprise). Geen hardcoded filters meer.
 
 /// Lucy leert autonoom van haar eigen source code (bootstrap)
 /// Dit is het eerste wat ze leest — zichzelf
@@ -672,9 +788,17 @@ pub fn learn_from_text(
     if token_ids.len() < 3 { return 0; }
 
     let mut trained = 0;
-    let chunk_size = 32; // v1.2: kleiner = sneller, meer pagina's per uur
-    let ticks_per_token = 2; // v1.2: minimaal, laat het veld organisch leren
-    let settle_ticks = 10; // v1.2: kort settlen, meer iteraties > minder diep
+    // v2.5: Adaptieve training parameters — Lucy bepaalt zelf hoe diep ze leert
+    // Hoge tension = veel te leren → grotere chunks, meer settle (diep leren)
+    // Lage tension = al bekend → kleine chunks, snel (breed leren)
+    let avg_tension = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension).sum::<f32>()
+        / field.active_set.len().max(1) as f32;
+    let tension_factor = (avg_tension * 10.0).clamp(0.5, 3.0);
+
+    let chunk_size = (32.0 * tension_factor) as usize; // 16-96 tokens per chunk
+    let ticks_per_token = (2.0 * tension_factor) as usize; // 1-6 ticks per token
+    let settle_ticks = (10.0 * tension_factor) as usize; // 5-30 settle ticks
 
     for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) { // v2.5: 50% overlap — elk token 2× gezien
         if chunk.len() < 3 { break; }
@@ -801,4 +925,15 @@ pub fn extract_readable_text(body: &str) -> String {
     clean.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Extract domein uit URL (bijv. "https://en.wikipedia.org/wiki/Foo" → "en.wikipedia.org")
+fn extract_domain(url: &str) -> String {
+    url.split("//")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
 }

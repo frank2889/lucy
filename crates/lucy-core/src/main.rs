@@ -116,7 +116,7 @@ const RETRIEVAL_PATH: &str = "data/retrieval.bincode";
 const LOG_INTERVAL: u64 = 1_000;          // Heartbeat logging (infra)
 const SELF_READ_INTERVAL: u64 = 10_000;   // Herlees eigen source code (structureel)
 const CURRICULUM_INTERVAL: u64 = 50_000;  // HTML/CSS curriculum training (structureel)
-const GPU_BALANCE_CHECK: u64 = 50_000;   // Check Vast.ai balance (infra)
+const GPU_BALANCE_CHECK: u64 = 5_000;    // Check Vast.ai balance + posting (elke ~40 min ipv 7 uur)
 // Dynamische intervallen: field.learn_interval, field.growth_interval, field.snapshot_interval,
 // field.explore_interval, field.consolidation_interval — aangepast door adapt_dynamics()
 
@@ -1131,7 +1131,23 @@ async fn main() {
                 for key in to_remove { explorer.visited.remove(&key); }
             }
 
-            if result.status == 200 {
+            // v2.6.5: Skip junk URLs — trackers, CDN images, ad networks
+            let is_junk = {
+                let u = result.url.to_lowercase();
+                u.contains("adnxs.com") || u.contains("tagmanager") || u.contains("doubleclick")
+                    || u.contains("googlesyndication") || u.contains("analytics")
+                    || u.contains("tracker") || u.contains("prebid")
+                    || u.contains("onetrust") || u.contains("cookie")
+                    || u.ends_with(".png") || u.ends_with(".jpg") || u.ends_with(".jpeg")
+                    || u.ends_with(".gif") || u.ends_with(".webp") || u.ends_with(".svg")
+                    || u.ends_with(".ico") || u.ends_with(".woff") || u.ends_with(".woff2")
+                    || u.ends_with(".css") || u.ends_with(".js")
+                    || u.contains("b-cdn.net") || u.contains("cloudfront.net/assets")
+                    || u.contains("staticflickr.com") || u.contains("cdn.") && u.contains("/assets/")
+            };
+            if is_junk {
+                tracing::debug!(url = %result.url, "Junk URL geskipt");
+            } else if result.status == 200 {
                 if let Ok(body_bytes) = result.body {
                     explorer.pages_read += 1;
                     let body = String::from_utf8_lossy(&body_bytes);

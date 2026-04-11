@@ -218,7 +218,7 @@ impl Explorer {
 
         // Wissel tussen bronnen — Lucy leert van diverse plekken
         // v2.5: NL Wikipedia toegevoegd, meer diversiteit
-        let source = rng.random_range(0..7u32);
+        let source = rng.random_range(0..9u32);
         match source {
             // EN Wikipedia REST API — gestructureerde kennis
             0 | 1 => {
@@ -259,8 +259,15 @@ impl Explorer {
                 }
             }
             // DuckDuckGo Lite — volledige zoekresultaten
-            _ => {
+            6 => {
                 Some(format!("https://lite.duckduckgo.com/lite/?q={}", query))
+            }
+            // v2.6.5: Community sites — hebben formulieren (posting-kansen)
+            7 => {
+                Some(format!("https://lite.duckduckgo.com/lite/?q={}+forum+discussion", query))
+            }
+            _ => {
+                Some(format!("https://lite.duckduckgo.com/lite/?q={}+blog+comments", query))
             }
         }
     }
