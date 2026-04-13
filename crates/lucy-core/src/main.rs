@@ -92,6 +92,7 @@ mod field_handle;
 mod backup;
 mod poster;
 mod ai_teacher;
+mod self_test;
 mod replica_manager;
 mod federation;
 mod server;
@@ -421,6 +422,17 @@ async fn main() {
         journal: Arc::new(RwLock::new(journal)),
         gpu_economy: Arc::new(RwLock::new(gpu_economy)),
         retrieval: Arc::new(RwLock::new(retrieval_store)),
+        total_queries: std::sync::atomic::AtomicU64::new(0),
+        fallback_queries: std::sync::atomic::AtomicU64::new(0),
+        queries_with_self_hit: std::sync::atomic::AtomicU64::new(0),
+        provenance_counts: [
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+        ],
     });
 
     // v2.0: Training queue — Lucy leert 1 chunk per tick
@@ -585,10 +597,34 @@ async fn main() {
                     let ok = field.save(snapshot_path).is_ok();
                     let _ = respond.send(ok);
                 }
+                FieldCommand::SetConceptPriors { enabled, until_delta_ticks } => {
+                    // v2.6.8 P2.2: ablation window toepassen. until_delta_ticks = 0 → permanent.
+                    field.concept_priors_enabled = enabled;
+                    if !enabled && until_delta_ticks > 0 {
+                        field.concept_priors_disabled_until_tick = field.tick + until_delta_ticks;
+                        tracing::warn!(
+                            tick = field.tick, window_end = field.concept_priors_disabled_until_tick,
+                            "ABLATION: concept_priors UIT tot tick {}", field.concept_priors_disabled_until_tick
+                        );
+                    } else {
+                        field.concept_priors_disabled_until_tick = 0;
+                        tracing::info!(tick = field.tick, enabled, "ABLATION: concept_priors toggled");
+                    }
+                }
             }
         }
 
         let tick = field.tick;
+
+        // v2.6.8 P2.2: auto-restore concept-priors als ablation-window is verlopen
+        if !field.concept_priors_enabled
+            && field.concept_priors_disabled_until_tick > 0
+            && tick >= field.concept_priors_disabled_until_tick
+        {
+            field.concept_priors_enabled = true;
+            field.concept_priors_disabled_until_tick = 0;
+            tracing::warn!(tick, "ABLATION window verlopen — concept_priors hersteld");
+        }
 
         // v2.1: Debug — log elke 100 ticks
         if tick % 100 == 0 {
@@ -915,6 +951,10 @@ async fn main() {
                             let _ = replay.replay_one(&mut field);
                             let _ = replay.replay_one(&mut field);
                             tracing::trace!(tick = field.tick, "dream_replay: 2× bij sluggish veld");
+                            // v2.6.8 P2.3: annoteer laatste self_ep_audit entry met dream_replay count
+                            if let Some(last) = field.self_ep_audit.last_mut() {
+                                last.dream_replay_count = last.dream_replay_count.saturating_add(2);
+                            }
                         }
                     }
                 }
@@ -925,6 +965,38 @@ async fn main() {
                 if tick > 0 && tick % 2000 == 0 {
                     compute::compute_concept_centroids(&mut field);
                     nan_check(&field, "after_concept_centroids");
+                }
+
+                // v2.6.8 P3.1: Self-test runner (audit-only, geen learning effect).
+                // Elke 5000 ticks = ~elk uur bij huidige tempo. 5 vaste probe-vragen.
+                if tick > 0 && tick % 5000 == 0 {
+                    if let Ok(vocab_guard) = shared.vocab.try_read() {
+                        if let Ok(retrieval_guard) = shared.retrieval.try_read() {
+                            let _ = self_test::run_batch_audit_only(&field, &vocab_guard, &retrieval_guard);
+                        }
+                    }
+                }
+
+                // v2.6.8 P1.4: delayed teacher effect-outcome evaluation
+                // Scan pending teacher_audit events en vul effect_outcome in zodra pending-window verstreken.
+                if tick > 0 && tick % 500 == 0 {
+                    // Tel teacher-entries met hits>1 als proxy voor reuse
+                    let teacher_reuse_total: u32 = if let Ok(r) = shared.retrieval.try_read() {
+                        r.count_teacher_reused()
+                    } else { 0 };
+
+                    if let Ok(mut explorer_guard) = shared.explorer.try_write() {
+                        for event in explorer_guard.teacher_audit.iter_mut() {
+                            if event.effect_outcome.is_some() { continue; }
+                            if tick < event.pending_until_tick { continue; }
+
+                            event.retrieval_reuse_within_window = teacher_reuse_total;
+
+                            // Outcome: sat_delta>0 EN (minstens 1 teacher-entry hergebruikt)
+                            let positive = event.sat_delta > 0.0 && teacher_reuse_total > 0;
+                            event.effect_outcome = Some(positive);
+                        }
+                    }
                 }
 
                 // v2.6: Synaptic homeostasis — intelligent vergeten (Tononi & Cirelli 2006)
@@ -982,8 +1054,7 @@ async fn main() {
                 compute::reflect_tick(&mut field);
                 nan_check(&field, "after_reflect");
 
-                // v2.6.7 E5: Self-state archive in retrieval store (alleen elke 500 ticks,
-                // anders explodeert de store). Dit bouwt een zelfmodel op uit eigen ervaring.
+                // v2.6.7 E5 + v2.6.8 P1.1: Self-state archive met kind=SELF
                 if tick % 500 == 0 {
                     let s = compute::self_state_input(&field);
                     let s_norm: f32 = s.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1000,7 +1071,7 @@ async fn main() {
                             field.reflection_count,
                         );
                         if let Ok(mut ret) = shared.retrieval.try_write() {
-                            ret.insert_with_value(&s, &snippet, 0.3, tick);
+                            ret.insert_full(&s, &snippet, 0.3, tick, retrieval::KIND_SELF);
                         }
                     }
                 }
@@ -1235,9 +1306,35 @@ async fn main() {
                     } else { 0.0 };
                     let sat_delta = sat_post - sat_pre;
 
-                    // URL-extractie
+                    // v2.6.8 P1.1: Teacher-gist in retrieval met kind=TEACHER (semantische anker, geen database-groei)
+                    let gist: String = answer.chars().take(200).collect();
+                    let gist_embs = crate::encoding::encode_text_readonly(&vocab, &gist);
+                    if !gist_embs.is_empty() {
+                        let mut avg = [0.0f32; lucy_state::DIM];
+                        for e in &gist_embs { for d in 0..lucy_state::DIM { avg[d] += e[d]; } }
+                        let n = gist_embs.len() as f32;
+                        for d in 0..lucy_state::DIM { avg[d] /= n; }
+                        if let Ok(mut ret) = shared.retrieval.try_write() {
+                            ret.insert_full(&avg, &gist, sat_delta.max(0.1), tick, retrieval::KIND_TEACHER);
+                        }
+                    }
+
+                    // URL-extractie + teacher event audit
                     if let Ok(mut explorer_guard) = shared.explorer.try_write() {
                         explorer_guard.discover_urls(&answer);
+                        // v2.6.8 P1.4: append pending teacher event voor delayed effect-evaluation
+                        explorer_guard.teacher_audit.push(lucy_state::TeacherEvent {
+                            tick, provider: provider.clone(),
+                            question_preview: "".to_string(), // query formulation niet meer beschikbaar hier
+                            answer_preview: answer.chars().take(200).collect(),
+                            sat_delta,
+                            pending_until_tick: tick + 1000,
+                            retrieval_reuse_within_window: 0,
+                            effect_outcome: None,
+                        });
+                        while explorer_guard.teacher_audit.len() > 256 {
+                            explorer_guard.teacher_audit.remove(0);
+                        }
                         ai_teacher::update_teacher_schedule(&mut field, &mut explorer_guard, &provider, true, sat_delta);
                     }
 

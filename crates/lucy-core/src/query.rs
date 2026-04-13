@@ -67,6 +67,21 @@ pub fn process_query(
     facts: &[String],
     cancel: &AtomicBool,
 ) -> QueryResult {
+    process_query_full(field, vocab, question, facts, &[], cancel, false)
+}
+
+/// v2.6.8 P1.2 + P3.1: volledige query met provenance-input en audit-only flag.
+/// `facts_with_kinds` levert de `kind` van elke opgehaalde fact voor classificatie.
+/// `audit_only=true` skipt alle learning side-effects (micro_ep calls).
+pub fn process_query_full(
+    field: &mut Field,
+    vocab: &Vocabulary,
+    question: &str,
+    facts: &[String],
+    facts_with_kinds: &[(f32, String, u8)],
+    cancel: &AtomicBool,
+    audit_only: bool,
+) -> QueryResult {
     let embeddings = encoding::encode_text_readonly(vocab, question);
     if embeddings.is_empty() {
         return QueryResult {
@@ -81,6 +96,10 @@ pub fn process_query(
             confidence: 0.0,
             verified: false,
             sources: vec![],
+            provenance: PROV_FALLBACK,
+            provenance_confidence: 1.0,
+            retrieval_top3_mean_sim: 0.0,
+            retrieval_top3_kind_mix: [0u8; 4],
         };
     }
 
@@ -90,7 +109,8 @@ pub fn process_query(
     // v2.5: Leer van ELKE interactie — de vraag zelf is trainingsdata
     // Lucy absorbeert de woorden en patronen in de vraag.
     // Dit is hoe een mens ook leert: door te luisteren naar wat anderen zeggen.
-    if embeddings.len() >= 4 {
+    // v2.6.8 P3.1: audit_only skipt learning — self-test meet, leert niet.
+    if !audit_only && embeddings.len() >= 4 {
         let mid = embeddings.len() / 2;
         let input_embs: Vec<[f32; DIM]> = embeddings[..mid].to_vec();
         let target_embs: Vec<[f32; DIM]> = embeddings[mid..].to_vec();
@@ -108,7 +128,8 @@ pub fn process_query(
         tracing::debug!(facts = facts_retrieved, "Lucy herinnert zich relevante feiten");
         // v2.5: Leer van opgehaalde feiten — context wordt trainingsdata
         // De feiten zijn het beste wat Lucy al weet → versterk die kennis
-        if all_embeddings.len() >= 4 {
+        // v2.6.8 P3.1: audit_only skipt training.
+        if !audit_only && all_embeddings.len() >= 4 {
             let mid = all_embeddings.len() / 2;
             let input_embs: Vec<[f32; DIM]> = all_embeddings[..mid].to_vec();
             let target_embs: Vec<[f32; DIM]> = all_embeddings[mid..].to_vec();
@@ -430,6 +451,17 @@ pub fn process_query(
         answer
     };
 
+    // v2.6.8 P1.2: Classificeer provenance via retrieval-kinds (primary truth)
+    // Als facts_with_kinds niet is geleverd, degradeer naar FIELD_GENERATED / FALLBACK.
+    let used_fallback = answer.is_empty() || answer.starts_with("[?");
+    let (prov, prov_conf, mean_sim, kind_mix) = if !facts_with_kinds.is_empty() {
+        classify_provenance(facts_with_kinds, used_fallback, 0.4)
+    } else if used_fallback {
+        (PROV_FALLBACK, 0.9, 0.0, [0u8; 4])
+    } else {
+        (PROV_FIELD_GENERATED, 0.5, 0.0, [0u8; 4])
+    };
+
     QueryResult {
         answer,
         settle_ticks: total_settle_ticks,
@@ -442,6 +474,10 @@ pub fn process_query(
         confidence,
         verified,
         sources,
+        provenance: prov,
+        provenance_confidence: prov_conf,
+        retrieval_top3_mean_sim: mean_sim,
+        retrieval_top3_kind_mix: kind_mix,
     }
 }
 
@@ -507,6 +543,82 @@ pub struct QueryResult {
     pub verified: bool,
     /// v2.0: Bronnen die het antwoord ondersteunen
     pub sources: Vec<String>,
+    /// v2.6.8 P1.2: response provenance — labels 0..5 zie `ResponseProvenance`
+    pub provenance: u8,
+    /// v2.6.8 P1.2: hoe zeker is de provenance-classificatie (0..1)
+    pub provenance_confidence: f32,
+    /// v2.6.8 P1.2: top-3 gemiddelde retrieval similarity (cosine)
+    pub retrieval_top3_mean_sim: f32,
+    /// v2.6.8 P1.2: mix van retrieval-kinds in top-3 (counts per kind)
+    pub retrieval_top3_kind_mix: [u8; 4],
+}
+
+/// v2.6.8 P1.2: Response bron-classificatie (primary truth via RetrievalEntry.kind).
+pub const PROV_FALLBACK: u8 = 0;
+pub const PROV_FIELD_GENERATED: u8 = 1;
+pub const PROV_RETRIEVAL_SELF: u8 = 2;
+pub const PROV_RETRIEVAL_TEACHER: u8 = 3;
+pub const PROV_RETRIEVAL_EXTERNAL: u8 = 4;
+pub const PROV_MIXED: u8 = 5;
+
+/// Classificeer response bron op basis van (mogelijk lege) retrieval top-k hits + fallback-flag.
+/// Returns (provenance_label, confidence, mean_sim, kind_mix).
+pub fn classify_provenance(
+    facts_with_kinds: &[(f32, String, u8)],
+    used_fallback: bool,
+    sim_threshold: f32,
+) -> (u8, f32, f32, [u8; 4]) {
+    let mut kind_mix = [0u8; 4];
+    let mut sim_sum = 0.0f32;
+    let mut relevant_count = 0u32;
+    for (sim, _, k) in facts_with_kinds {
+        if (*k as usize) < 4 { kind_mix[*k as usize] = kind_mix[*k as usize].saturating_add(1); }
+        if *sim >= sim_threshold {
+            sim_sum += *sim;
+            relevant_count += 1;
+        }
+    }
+    let mean_sim = if facts_with_kinds.is_empty() { 0.0 } else {
+        facts_with_kinds.iter().map(|(s, _, _)| *s).sum::<f32>() / facts_with_kinds.len() as f32
+    };
+
+    if used_fallback {
+        return (PROV_FALLBACK, 0.9, mean_sim, kind_mix);
+    }
+    if relevant_count == 0 {
+        // Geen significante retrieval-hits → field-generated
+        return (PROV_FIELD_GENERATED, 0.7, mean_sim, kind_mix);
+    }
+
+    // Welke kind domineert?
+    let self_c = kind_mix[1] as u32;
+    let teacher_c = kind_mix[2] as u32;
+    let external_c = kind_mix[0] as u32;
+    let interaction_c = kind_mix[3] as u32;
+    let total = self_c + teacher_c + external_c + interaction_c;
+    if total == 0 {
+        return (PROV_FIELD_GENERATED, 0.5, mean_sim, kind_mix);
+    }
+
+    // Dominantie: 60%+ van één kind = duidelijke classificatie
+    let (dom_kind, dom_count) = [(1, self_c), (2, teacher_c), (0, external_c), (3, interaction_c)]
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .unwrap();
+    let dom_frac = dom_count as f32 / total as f32;
+
+    if dom_frac >= 0.6 {
+        let label = match dom_kind {
+            1 => PROV_RETRIEVAL_SELF,
+            2 => PROV_RETRIEVAL_TEACHER,
+            0 => PROV_RETRIEVAL_EXTERNAL,
+            3 => PROV_RETRIEVAL_SELF, // interactie heeft self-karakter (eigen eerdere antwoorden)
+            _ => PROV_MIXED,
+        };
+        (label, dom_frac, mean_sim, kind_mix)
+    } else {
+        (PROV_MIXED, 1.0 - dom_frac, mean_sim, kind_mix)
+    }
 }
 
 /// Genereer een fallback-antwoord vanuit Lucy's eigen staat.

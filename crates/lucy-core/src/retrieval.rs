@@ -42,7 +42,19 @@ pub struct RetrievalStore {
     /// v2.6.7 E4: reward-signaal bij inslag (satisfaction_delta). Goed → blijft.
     #[serde(default)]
     learning_value: Vec<f32>,
+    /// v2.6.8 P1.1: bron-classificatie (primary truth voor provenance, geen heuristiek).
+    /// 0 = external (webpagina, unknown legacy), 1 = self (reflect snapshot),
+    /// 2 = teacher (AI-chat antwoord), 3 = interaction (user /ask + Lucy response).
+    /// Oude snapshot-entries krijgen default 0 (external) → conservatief.
+    #[serde(default)]
+    kind: Vec<u8>,
 }
+
+/// v2.6.8 P1.1: retrieval entry bron-classificatie
+pub const KIND_EXTERNAL: u8 = 0;
+pub const KIND_SELF: u8 = 1;
+pub const KIND_TEACHER: u8 = 2;
+pub const KIND_INTERACTION: u8 = 3;
 
 impl RetrievalStore {
     pub fn new() -> Self {
@@ -53,24 +65,142 @@ impl RetrievalStore {
             hits: Vec::new(),
             last_access_tick: Vec::new(),
             learning_value: Vec::new(),
+            kind: Vec::new(),
         }
     }
 
-    /// v2.6.7 E4: repair parallel-vectoren bij load — oude snapshots hebben ze niet
+    /// v2.6.7 E4 + v2.6.8 P1.1: repair parallel-vectoren bij load.
+    /// Oude snapshots hebben `kind` niet → default 0 (external, conservatief).
     pub fn ensure_parallel_vectors(&mut self, current_tick: u64) {
         let n = self.keys.len();
         if self.hits.len() != n { self.hits = vec![1; n]; }
         if self.last_access_tick.len() != n { self.last_access_tick = vec![current_tick; n]; }
         if self.learning_value.len() != n { self.learning_value = vec![0.0; n]; }
+        if self.kind.len() != n { self.kind = vec![KIND_EXTERNAL; n]; }
+    }
+
+    /// v2.6.8 P1.1: per-kind distributie (voor retrieval metrics)
+    pub fn kind_distribution(&self) -> [u32; 4] {
+        let mut counts = [0u32; 4];
+        for &k in &self.kind {
+            if (k as usize) < 4 {
+                counts[k as usize] = counts[k as usize].saturating_add(1);
+            }
+        }
+        counts
+    }
+
+    /// v2.6.8 P1.3: Geef alle self-entries (kind=1) met key + hits + last_access.
+    /// Gebruikt voor self_cluster_density / drift / centroid_strength berekening.
+    pub fn self_entries(&self) -> Vec<(&Vec<f32>, u32, u64)> {
+        let mut out = Vec::new();
+        for i in 0..self.keys.len() {
+            if self.kind.get(i).copied() == Some(KIND_SELF) {
+                out.push((
+                    &self.keys[i],
+                    self.hits.get(i).copied().unwrap_or(1),
+                    self.last_access_tick.get(i).copied().unwrap_or(0),
+                ));
+            }
+        }
+        out
+    }
+
+    /// v2.6.8 P1.3: Gemiddelde onderlinge cosine van recente self-entries (max 50).
+    /// Meet of er een kern ontstaat (hoog = convergerend zelfmodel).
+    pub fn self_cluster_density(&self, max_recent: usize) -> f32 {
+        let mut entries: Vec<(usize, u64)> = self.kind.iter().enumerate()
+            .filter(|(_, k)| **k == KIND_SELF)
+            .map(|(i, _)| (i, self.last_access_tick.get(i).copied().unwrap_or(0)))
+            .collect();
+        entries.sort_by_key(|(_, tick)| std::cmp::Reverse(*tick));
+        entries.truncate(max_recent);
+        let n = entries.len();
+        if n < 2 { return 0.0; }
+        let mut sum = 0.0f32;
+        let mut pairs = 0u32;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a = &self.keys[entries[i].0];
+                let b = &self.keys[entries[j].0];
+                sum += cosine_sim_vec(a, b);
+                pairs += 1;
+            }
+        }
+        if pairs > 0 { sum / pairs as f32 } else { 0.0 }
+    }
+
+    /// v2.6.8 P1.3: Gemiddelde cosine van recente self-entries naar centroid van alle self-entries.
+    /// Meet "hoe sterk is de zelf-attractor" (kern vs ruis).
+    pub fn self_centroid_and_strength(&self, max_recent: usize) -> (Vec<f32>, f32) {
+        let mut entries: Vec<(usize, u64)> = self.kind.iter().enumerate()
+            .filter(|(_, k)| **k == KIND_SELF)
+            .map(|(i, _)| (i, self.last_access_tick.get(i).copied().unwrap_or(0)))
+            .collect();
+        entries.sort_by_key(|(_, tick)| std::cmp::Reverse(*tick));
+        entries.truncate(max_recent);
+        if entries.is_empty() { return (vec![0.0; DIM], 0.0); }
+
+        // Bereken centroid
+        let mut centroid = vec![0.0f32; DIM];
+        for (idx, _) in &entries {
+            let k = &self.keys[*idx];
+            for d in 0..DIM.min(k.len()) {
+                centroid[d] += k[d];
+            }
+        }
+        let n = entries.len() as f32;
+        for d in 0..DIM { centroid[d] /= n; }
+
+        // Gemiddelde cosine naar centroid
+        let mut sum_sim = 0.0f32;
+        for (idx, _) in &entries {
+            sum_sim += cosine_sim_vec(&self.keys[*idx], &centroid);
+        }
+        let strength = sum_sim / n;
+        (centroid, strength)
+    }
+
+    /// v2.6.8 P1.4: aantal teacher-entries met hits > 1 (reuse proxy voor effect-eval)
+    pub fn count_teacher_reused(&self) -> u32 {
+        let mut n = 0u32;
+        for i in 0..self.keys.len() {
+            if self.kind.get(i).copied() == Some(KIND_TEACHER)
+                && self.hits.get(i).copied().unwrap_or(1) > 1
+            {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    /// v2.6.8 P1.3: fractie self-entries die hits > 1 hebben (reuse-rate proxy).
+    pub fn self_reuse_rate(&self) -> f32 {
+        let mut total = 0u32;
+        let mut reused = 0u32;
+        for i in 0..self.keys.len() {
+            if self.kind.get(i).copied() == Some(KIND_SELF) {
+                total += 1;
+                if self.hits.get(i).copied().unwrap_or(1) > 1 {
+                    reused += 1;
+                }
+            }
+        }
+        if total > 0 { reused as f32 / total as f32 } else { 0.0 }
     }
 
     /// Sla een feit op: embedding + tekst (met optioneel learning_value)
     pub fn insert(&mut self, embedding: &[f32; DIM], text: &str) {
-        self.insert_with_value(embedding, text, 0.0, 0);
+        self.insert_full(embedding, text, 0.0, 0, KIND_EXTERNAL);
     }
 
     /// v2.6.7 E4: insert met learning_value + tick voor score-based eviction
     pub fn insert_with_value(&mut self, embedding: &[f32; DIM], text: &str, learning_value: f32, current_tick: u64) {
+        self.insert_full(embedding, text, learning_value, current_tick, KIND_EXTERNAL);
+    }
+
+    /// v2.6.8 P1.1: insert met expliciete bron-classificatie (primary truth voor provenance)
+    pub fn insert_full(&mut self, embedding: &[f32; DIM], text: &str, learning_value: f32, current_tick: u64, kind: u8) {
         // Skip te korte teksten
         if text.len() < 10 { return; }
 
@@ -95,6 +225,7 @@ impl RetrievalStore {
             self.hits.remove(worst_idx);
             self.last_access_tick.remove(worst_idx);
             self.learning_value.remove(worst_idx);
+            if worst_idx < self.kind.len() { self.kind.remove(worst_idx); }
             self.rebuild_buckets();
         }
 
@@ -113,12 +244,89 @@ impl RetrievalStore {
         self.hits.push(1);
         self.last_access_tick.push(current_tick);
         self.learning_value.push(learning_value.clamp(-1.0, 1.0));
+        self.kind.push(kind);
 
         // Voeg toe aan bucket
         let bucket = self.hash_to_bucket(embedding);
         if bucket < self.buckets.len() {
             self.buckets[bucket].push(idx);
         }
+    }
+
+    /// v2.6.8 P1.2: retrieve_with_kinds — retourneert (sim, text, kind) zodat de caller
+    /// provenance kan classificeren zonder string-heuristiek. Updatet hits + last_access.
+    pub fn retrieve_with_kinds(&mut self, query: &[f32; DIM], top_k: usize, current_tick: u64) -> Vec<(f32, String, u8)> {
+        if self.keys.is_empty() { return Vec::new(); }
+        self.ensure_parallel_vectors(current_tick);
+
+        let query_bucket = self.hash_to_bucket(query);
+        let search_buckets = [
+            query_bucket,
+            (query_bucket + 1) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 1) % N_BUCKETS,
+            (query_bucket + 2) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 2) % N_BUCKETS,
+        ];
+        let mut candidates: Vec<usize> = Vec::new();
+        for &b in &search_buckets {
+            if b < self.buckets.len() {
+                candidates.extend_from_slice(&self.buckets[b]);
+            }
+        }
+        if candidates.len() < top_k * 2 {
+            candidates = (0..self.keys.len()).collect();
+        }
+        let mut scored: Vec<(f32, usize)> = candidates.iter()
+            .filter(|&&idx| idx < self.keys.len())
+            .map(|&idx| (cosine_sim(query, &self.keys[idx]), idx))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+
+        scored.into_iter()
+            .map(|(sim, idx)| {
+                self.hits[idx] = self.hits[idx].saturating_add(1);
+                self.last_access_tick[idx] = current_tick;
+                let k = self.kind.get(idx).copied().unwrap_or(KIND_EXTERNAL);
+                (sim, self.values[idx].clone(), k)
+            })
+            .collect()
+    }
+
+    /// v2.6.8 P1.2: retrieve zonder hits-update (voor audit-only self-tests)
+    pub fn retrieve_with_kinds_readonly(&self, query: &[f32; DIM], top_k: usize) -> Vec<(f32, String, u8)> {
+        if self.keys.is_empty() { return Vec::new(); }
+
+        let query_bucket = self.hash_to_bucket(query);
+        let search_buckets = [
+            query_bucket,
+            (query_bucket + 1) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 1) % N_BUCKETS,
+            (query_bucket + 2) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 2) % N_BUCKETS,
+        ];
+        let mut candidates: Vec<usize> = Vec::new();
+        for &b in &search_buckets {
+            if b < self.buckets.len() {
+                candidates.extend_from_slice(&self.buckets[b]);
+            }
+        }
+        if candidates.len() < top_k * 2 {
+            candidates = (0..self.keys.len()).collect();
+        }
+        let mut scored: Vec<(f32, usize)> = candidates.iter()
+            .filter(|&&idx| idx < self.keys.len())
+            .map(|&idx| (cosine_sim(query, &self.keys[idx]), idx))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+
+        scored.into_iter()
+            .map(|(sim, idx)| {
+                let k = self.kind.get(idx).copied().unwrap_or(KIND_EXTERNAL);
+                (sim, self.values[idx].clone(), k)
+            })
+            .collect()
     }
 
     /// v2.6.7 E4: retrieve_mut — update hits/last_access voor gebruikte entries.
@@ -250,6 +458,21 @@ impl RetrievalStore {
 }
 
 /// Cosine similarity tussen query en stored key
+/// v2.6.8 P1.3: Vec<f32> × Vec<f32> cosine (voor self-metrics berekeningen op keys)
+fn cosine_sim_vec(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut dot = 0.0f32;
+    let mut mag_a = 0.0f32;
+    let mut mag_b = 0.0f32;
+    for i in 0..n {
+        dot += a[i] * b[i];
+        mag_a += a[i] * a[i];
+        mag_b += b[i] * b[i];
+    }
+    let denom = mag_a.sqrt() * mag_b.sqrt();
+    if denom > 1e-8 { dot / denom } else { 0.0 }
+}
+
 fn cosine_sim(a: &[f32; DIM], b: &[f32]) -> f32 {
     let n = DIM.min(b.len());
     let mut dot = 0.0f32;

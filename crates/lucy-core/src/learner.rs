@@ -78,6 +78,9 @@ pub struct Explorer {
     /// Key = provider-naam, value = EMA van (satisfaction_delta > 0).
     #[serde(default)]
     pub provider_score: HashMap<String, f32>,
+    /// v2.6.8 P1.4: Teacher-event audit log (ring cap 256).
+    #[serde(default)]
+    pub teacher_audit: Vec<lucy_state::TeacherEvent>,
 }
 
 impl Explorer {
@@ -170,6 +173,7 @@ impl Explorer {
             interests: HashSet::new(),
             domain_score: HashMap::new(),
             provider_score: HashMap::new(),
+            teacher_audit: Vec::new(),
         }
     }
 

@@ -542,6 +542,32 @@ pub struct Field {
     #[serde(skip)]
     pub concept_assignments: Vec<u16>,
 
+    // === v2.6.8: Bewijs-architectuur (audit + metrics) ===
+
+    /// v2.6.8 P2.2: Ablation-toggle voor concept-priors. `true` = actief (default).
+    /// Combineer met `concept_priors_disabled_until_tick` voor windowed A/B testing.
+    #[serde(default = "default_true")]
+    pub concept_priors_enabled: bool,
+    /// v2.6.8 P2.2: Auto-restore tick — als 0, permanent; anders herstellen bij `tick >= deze`.
+    #[serde(default)]
+    pub concept_priors_disabled_until_tick: u64,
+
+    /// v2.6.8 P2.1: Ring-buffer (cap 64) met concept-clustering audit data
+    #[serde(default)]
+    pub concept_audit_log: Vec<ConceptAudit>,
+
+    /// v2.6.8 P2.3: Ring-buffer (cap 64) met self-EP + WM-seq effect-metingen
+    #[serde(default)]
+    pub self_ep_audit: Vec<SelfEpAudit>,
+
+    /// v2.6.8 P1.3: Self-model coherentie metrics (EMA, niet geserialiseerd — snel herberekenbaar)
+    #[serde(skip)]
+    pub self_metrics: SelfMetrics,
+
+    /// v2.6.8 P1.2: cumulatieve provenance counters per bron (voor telemetry-trends)
+    #[serde(default)]
+    pub provenance_counts: [u64; 6],
+
     // === v2.0: Bewustzijns-metrieken (veld-level) ===
 
     /// Globale oscillatiefase — de "klok" van Lucy's bewustzijn
@@ -804,6 +830,72 @@ fn default_chaos_target() -> f32 { 1.0 }
 fn default_precision() -> f32 { 1.0 }
 fn default_control_belief() -> f32 { 0.5 } // start neutraal: 50% vertrouwen in eigen controle
 fn default_teacher_interval() -> u64 { 10_000 }
+fn default_true() -> bool { true }
+
+// === v2.6.8: Bewijs-architectuur structs ===
+
+/// v2.6.8 P2.1: Per-cycle audit van concept-clustering kwaliteit.
+/// Ring-buffered in Field.concept_audit_log (cap 64).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ConceptAudit {
+    pub tick: u64,
+    pub k: u32,
+    pub n_points: u32,
+    pub avg_intra_cosine: f32,
+    pub avg_inter_cosine: f32,
+    pub silhouette_sampled: f32,
+    pub centroid_drift_mean: f32,
+    pub priors_bias_mean_norm: f32,
+    pub priors_applied_count: u32,
+    pub priors_enabled: bool,
+    pub ablation_window_start: u64,
+    pub ablation_window_end: u64,
+}
+
+/// v2.6.8 P2.3: Per-reflect audit van self-EP en WM-sequence effect.
+/// Ring-buffered in Field.self_ep_audit (cap 64).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SelfEpAudit {
+    pub tick: u64,
+    pub avg_tension_pre: f32,
+    pub avg_tension_post: f32,
+    pub self_ep_applied: bool,
+    pub wm_seq_pairs: u32,
+    pub wm_seq_avg_target_cosine_pre: f32,
+    pub wm_seq_avg_target_cosine_post: f32,
+    pub dream_replay_count: u32,
+}
+
+/// v2.6.8 P1.3: Self-model coherence metrics (runtime, geen serialisatie).
+#[derive(Clone, Debug, Default)]
+pub struct SelfMetrics {
+    pub self_cluster_density: f32,
+    pub self_cluster_drift: f32,
+    pub self_centroid_strength: f32,
+    pub self_query_hit_rate: f32,
+    pub self_response_fallback_rate: f32,
+    pub self_state_reuse_rate: f32,
+    pub last_self_centroid: Vec<f32>,
+    pub total_queries: u64,
+    pub fallback_queries: u64,
+    pub queries_with_self_hit: u64,
+}
+
+/// v2.6.8 P1.4: Teacher-event audit entry met delayed effect-evaluation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TeacherEvent {
+    pub tick: u64,
+    pub provider: String,
+    pub question_preview: String,
+    pub answer_preview: String,
+    pub sat_delta: f32,
+    /// Vanaf deze tick mag effect_outcome ingevuld worden.
+    pub pending_until_tick: u64,
+    /// Hoe vaak werd de teacher-entry in retrieval opnieuw gehit binnen window.
+    pub retrieval_reuse_within_window: u32,
+    /// None = nog pending. Some(true) = gunstig effect, Some(false) = geen impact.
+    pub effect_outcome: Option<bool>,
+}
 
 // === Defaults voor dynamische parameters ===
 // Deze waarden zijn startpunten — adapt_dynamics() past ze aan op basis van veldstaat.
@@ -987,6 +1079,12 @@ impl Field {
             wm_ages: Vec::new(),
             concept_centroids: Vec::new(),
             concept_assignments: Vec::new(),
+            concept_priors_enabled: true,
+            concept_priors_disabled_until_tick: 0,
+            concept_audit_log: Vec::new(),
+            self_ep_audit: Vec::new(),
+            self_metrics: SelfMetrics::default(),
+            provenance_counts: [0u64; 6],
             adaptive: AdaptiveParams::default(),
             temporal_history: Vec::new(),
             causal_log: Vec::new(),

@@ -13,6 +13,8 @@ pub enum FieldCommand {
     TrainPair { input: String, target: String, respond: oneshot::Sender<TrainResult> },
     FeedCode { filename: String, code: String, respond: oneshot::Sender<TrainResult> },
     Save { respond: oneshot::Sender<bool> },
+    /// v2.6.8 P2.2: Ablation-window toggle voor concept-priors
+    SetConceptPriors { enabled: bool, until_delta_ticks: u64 },
 }
 
 pub struct TrainResult {

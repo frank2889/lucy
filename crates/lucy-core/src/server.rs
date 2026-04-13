@@ -131,12 +131,11 @@ use crate::learner::Explorer;
 use crate::journal::Journal;
 use crate::self_modify::SelfModifier;
 use crate::gpu_manager::GpuEconomy;
-use crate::retrieval::RetrievalStore;
+use crate::retrieval::{self, RetrievalStore};
 use crate::field_handle::{FieldHandle, FieldCommand, TrainResult};
 use crate::query;
 
 /// Gedeelde state — v1.0: Field via FieldHandle (dubbel-buffer), rest via RwLock
-#[derive(Clone)]
 pub struct AppState {
     pub field_handle: FieldHandle,
     pub vocab: Arc<RwLock<Vocabulary>>,
@@ -146,6 +145,12 @@ pub struct AppState {
     pub journal: Arc<RwLock<Journal>>,
     pub gpu_economy: Arc<RwLock<GpuEconomy>>,
     pub retrieval: Arc<RwLock<RetrievalStore>>,
+    /// v2.6.8 P1.2/P1.3: cumulatieve counters voor provenance + self-metrics.
+    /// AtomicU64 = lock-free updates vanuit /ask handler.
+    pub total_queries: std::sync::atomic::AtomicU64,
+    pub fallback_queries: std::sync::atomic::AtomicU64,
+    pub queries_with_self_hit: std::sync::atomic::AtomicU64,
+    pub provenance_counts: [std::sync::atomic::AtomicU64; 6],
 }
 
 pub type SharedState = Arc<AppState>;
@@ -175,6 +180,14 @@ pub fn spawn_server(state: SharedState) {
             .route("/sense", post(sense_handler))
             .route("/topology", get(topology_handler))
             .route("/telemetry", get(telemetry_handler))
+            // v2.6.8 bewijs-architectuur endpoints
+            .route("/self_metrics", get(self_metrics_handler))
+            .route("/teacher_metrics", get(teacher_metrics_handler))
+            .route("/concept_audit", get(concept_audit_handler))
+            .route("/self_ep_audit", get(self_ep_audit_handler))
+            .route("/self_history", get(self_history_handler))
+            .route("/retrieval_metrics", get(retrieval_metrics_handler))
+            .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
             .route("/plugins", get(plugins_list_handler))
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
@@ -331,8 +344,9 @@ async fn ask_handler(
     }
 
     // v1.3: RAG lookup vóór spawn_blocking — scheelt ~120MB per query
+    // v2.6.8 P1.2: retrieve_with_kinds_readonly levert kind voor provenance-classificatie
     let vocab_arc = { state.vocab.read().await.clone() };
-    let facts = {
+    let (facts, facts_with_kinds) = {
         let question_embeddings = encoding::encode_text_readonly(&vocab_arc, &question);
         if !question_embeddings.is_empty() {
             let mut query_emb = [0.0f32; DIM];
@@ -343,15 +357,14 @@ async fn ask_handler(
             for d in 0..DIM { query_emb[d] /= n; }
             let retrieval = state.retrieval.read().await;
             if retrieval.len() > 0 {
-                retrieval.retrieve(&query_emb, 3)
-                    .into_iter()
-                    .map(|(_, text)| text.to_string())
-                    .collect::<Vec<_>>()
+                let with_kinds = retrieval.retrieve_with_kinds_readonly(&query_emb, 3);
+                let plain: Vec<String> = with_kinds.iter().map(|(_, t, _)| t.clone()).collect();
+                (plain, with_kinds)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -363,11 +376,13 @@ async fn ask_handler(
     // v2.6.7 E5: bewaar vocab_arc clone voor interactie-log na spawn_blocking
     let vocab_for_log = vocab_arc.clone();
 
+    let facts_kinds_moved = facts_with_kinds.clone();
     let query_result = tokio::time::timeout(
         std::time::Duration::from_secs(30), // v2.1: Meer tijd voor query processing
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                query::process_query(&mut field_copy, &vocab_arc, &q, &facts, &cancel_token)
+                // v2.6.8 P1.2: process_query_full met retrieval-kinds voor provenance
+                query::process_query_full(&mut field_copy, &vocab_arc, &q, &facts, &facts_kinds_moved, &cancel_token, false)
             }))
         })
     ).await;
@@ -506,9 +521,40 @@ async fn ask_handler(
             let combined = format!("V: {}\nA: {}", question, result.answer);
             let current_tick = state.field_handle.snapshot.load().tick;
             let mut ret = state.retrieval.write().await;
-            ret.insert_with_value(&q_emb, &combined, 0.5, current_tick);
+            // v2.6.8 P1.1: kind=INTERACTION → primary truth voor provenance
+            ret.insert_full(&q_emb, &combined, 0.5, current_tick, retrieval::KIND_INTERACTION);
         }
     }
+
+    // v2.6.8 P1.2: provenance label string + atomic counters update
+    use std::sync::atomic::Ordering::Relaxed;
+    let prov_idx = result.provenance.min(5) as usize;
+    state.provenance_counts[prov_idx].fetch_add(1, Relaxed);
+    state.total_queries.fetch_add(1, Relaxed);
+    if result.provenance == query::PROV_FALLBACK {
+        state.fallback_queries.fetch_add(1, Relaxed);
+    }
+    // Self-hit = top-3 bevatte ≥1 self-entry
+    if result.retrieval_top3_kind_mix[1] > 0 {
+        state.queries_with_self_hit.fetch_add(1, Relaxed);
+    }
+
+    let prov_label = match result.provenance {
+        query::PROV_FALLBACK => "fallback",
+        query::PROV_FIELD_GENERATED => "field_generated",
+        query::PROV_RETRIEVAL_SELF => "retrieval_self",
+        query::PROV_RETRIEVAL_TEACHER => "retrieval_teacher",
+        query::PROV_RETRIEVAL_EXTERNAL => "retrieval_external",
+        query::PROV_MIXED => "mixed",
+        _ => "unknown",
+    };
+    tracing::info!(
+        provenance = %prov_label,
+        prov_conf = result.provenance_confidence,
+        mean_sim = result.retrieval_top3_mean_sim,
+        kind_mix = ?result.retrieval_top3_kind_mix,
+        "ask: provenance"
+    );
 
     Json(json!({
         "answer": result.answer,
@@ -519,6 +565,10 @@ async fn ask_handler(
         "think_rounds": result.think_rounds,
         "coherence": format!("{:.4}", result.coherence),
         "facts_retrieved": result.facts_retrieved,
+        "provenance": prov_label,
+        "provenance_confidence": format!("{:.3}", result.provenance_confidence),
+        "retrieval_top3_mean_sim": format!("{:.3}", result.retrieval_top3_mean_sim),
+        "retrieval_top3_kind_mix": result.retrieval_top3_kind_mix,
         "internal": internal,
     }))
 }
@@ -1053,6 +1103,235 @@ async fn topology_handler(State(state): State<SharedState>) -> Json<Value> {
         "sampled": nodes.len(),
         "nodes": nodes,
         "links": links,
+    }))
+}
+
+// =============================================================================
+// v2.6.8 — Bewijs-architectuur endpoints
+// =============================================================================
+
+/// /self_metrics — Self-model coherentie metrics (density, drift, strength, hit-rate)
+async fn self_metrics_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let retrieval = state.retrieval.read().await;
+
+    let density = retrieval.self_cluster_density(50);
+    let (centroid, strength) = retrieval.self_centroid_and_strength(50);
+    let reuse = retrieval.self_reuse_rate();
+
+    // Drift: cosine tussen huidige centroid en opgeslagen last_self_centroid
+    let drift = if f.self_metrics.last_self_centroid.is_empty() {
+        0.0
+    } else {
+        let last = &f.self_metrics.last_self_centroid;
+        let mut dot = 0.0f32;
+        let mut mag_a = 0.0f32;
+        let mut mag_b = 0.0f32;
+        let n = centroid.len().min(last.len());
+        for i in 0..n {
+            dot += centroid[i] * last[i];
+            mag_a += centroid[i] * centroid[i];
+            mag_b += last[i] * last[i];
+        }
+        let cos = if mag_a.sqrt() * mag_b.sqrt() > 1e-8 {
+            dot / (mag_a.sqrt() * mag_b.sqrt())
+        } else { 0.0 };
+        1.0 - cos // drift = 1 - cosine; hoger = meer gewijzigd
+    };
+
+    let kind_dist = retrieval.kind_distribution();
+    let self_entries_count = kind_dist[1];
+    let total_entries = retrieval.len() as u32;
+
+    // Hit-rate: atomic counters (lock-free) uit AppState
+    use std::sync::atomic::Ordering::Relaxed;
+    let total_q = state.total_queries.load(Relaxed);
+    let fallback_q = state.fallback_queries.load(Relaxed);
+    let self_hit_q = state.queries_with_self_hit.load(Relaxed);
+    let hit_rate = if total_q > 0 { self_hit_q as f32 / total_q as f32 } else { 0.0 };
+    let fallback_rate = if total_q > 0 { fallback_q as f32 / total_q as f32 } else { 0.0 };
+
+    Json(json!({
+        "tick": f.tick,
+        "self_cluster_density": density,
+        "self_cluster_drift": drift,
+        "self_centroid_strength": strength,
+        "self_query_hit_rate": hit_rate,
+        "self_response_fallback_rate": fallback_rate,
+        "self_state_reuse_rate": reuse,
+        "self_entries_count": self_entries_count,
+        "total_retrieval_entries": total_entries,
+        "total_queries": total_q,
+        "fallback_queries": fallback_q,
+        "queries_with_self_hit": self_hit_q,
+        "provenance_counts": {
+            "fallback": state.provenance_counts[0].load(Relaxed),
+            "field_generated": state.provenance_counts[1].load(Relaxed),
+            "retrieval_self": state.provenance_counts[2].load(Relaxed),
+            "retrieval_teacher": state.provenance_counts[3].load(Relaxed),
+            "retrieval_external": state.provenance_counts[4].load(Relaxed),
+            "mixed": state.provenance_counts[5].load(Relaxed),
+        },
+    }))
+}
+
+/// /teacher_metrics — AI-teacher bootstrap fade-out metrics
+async fn teacher_metrics_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let explorer = state.explorer.read().await;
+
+    let events = &explorer.teacher_audit;
+    let total = events.len();
+    let success_count = events.iter().filter(|e| e.sat_delta > 0.0).count();
+    let pending_count = events.iter().filter(|e| e.effect_outcome.is_none()).count();
+    let good_effect_count = events.iter().filter(|e| e.effect_outcome == Some(true)).count();
+    let avg_sat_delta = if total > 0 {
+        events.iter().map(|e| e.sat_delta).sum::<f32>() / total as f32
+    } else { 0.0 };
+
+    // Teacher events in laatste 1000 ticks
+    let recent_cutoff = f.tick.saturating_sub(1000);
+    let recent_events: Vec<&lucy_state::TeacherEvent> = events.iter()
+        .filter(|e| e.tick >= recent_cutoff).collect();
+
+    // Dependency ratio = teacher-provenance / total meaningful responses
+    use std::sync::atomic::Ordering::Relaxed;
+    let teacher_provs = state.provenance_counts[3].load(Relaxed); // retrieval_teacher
+    let total_provs: u64 = (0..6).map(|i| state.provenance_counts[i].load(Relaxed)).sum();
+    let dependency_ratio = if total_provs > 0 {
+        teacher_provs as f64 / total_provs as f64
+    } else { 0.0 };
+
+    // Recent teacher_interval trajectory (laatste 20 unique values in events)
+    let mut interval_traj: Vec<u64> = Vec::new();
+    let mut last_seen = 0u64;
+    for e in events.iter().rev().take(50) {
+        // pending_until - tick ≈ 1000, so this is approximate; gebruik sat_delta > 0 als proxy
+        if e.tick != last_seen {
+            interval_traj.push(e.pending_until_tick.saturating_sub(e.tick));
+            last_seen = e.tick;
+        }
+        if interval_traj.len() >= 20 { break; }
+    }
+
+    Json(json!({
+        "tick": f.tick,
+        "teacher_interval_current": f.teacher_interval,
+        "teacher_success_streak": f.teacher_success_streak,
+        "teacher_calls_total": total,
+        "teacher_success_rate": if total > 0 { success_count as f32 / total as f32 } else { 0.0 },
+        "avg_teacher_sat_delta": avg_sat_delta,
+        "teacher_pending_evaluations": pending_count,
+        "teacher_good_effect_count": good_effect_count,
+        "teacher_dependency_ratio": dependency_ratio,
+        "recent_events_1000_ticks": recent_events.len(),
+        "provider_score": &explorer.provider_score,
+        "interval_trajectory_approx": interval_traj,
+        "recent_events_preview": events.iter().rev().take(10).map(|e| json!({
+            "tick": e.tick,
+            "provider": e.provider,
+            "sat_delta": e.sat_delta,
+            "effect_outcome": e.effect_outcome,
+            "retrieval_reuse": e.retrieval_reuse_within_window,
+            "preview": e.answer_preview.chars().take(80).collect::<String>(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// /concept_audit — Per-cycle concept-clustering kwaliteit metrics
+async fn concept_audit_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    Json(json!({
+        "tick": f.tick,
+        "current_k": f.concept_centroids.len(),
+        "priors_enabled": f.concept_priors_enabled,
+        "priors_disabled_until_tick": f.concept_priors_disabled_until_tick,
+        "audit_log": f.concept_audit_log.iter().rev().take(32).collect::<Vec<_>>(),
+    }))
+}
+
+/// /self_ep_audit — Self-EP + WM-seq + dream-replay effect-metingen
+async fn self_ep_audit_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let audit = &f.self_ep_audit;
+    let total = audit.len();
+    let avg_tension_delta = if total > 0 {
+        audit.iter().map(|a| a.avg_tension_post - a.avg_tension_pre).sum::<f32>() / total as f32
+    } else { 0.0 };
+    let total_dream_replays: u32 = audit.iter().map(|a| a.dream_replay_count).sum();
+    let total_wm_pairs: u32 = audit.iter().map(|a| a.wm_seq_pairs).sum();
+
+    Json(json!({
+        "tick": f.tick,
+        "total_audit_entries": total,
+        "avg_tension_delta_pre_post": avg_tension_delta,
+        "total_dream_replay_events": total_dream_replays,
+        "total_wm_seq_pairs": total_wm_pairs,
+        "recent": audit.iter().rev().take(32).collect::<Vec<_>>(),
+    }))
+}
+
+/// /self_history — Tijdreeks uit data/self_test.jsonl (laatste 240 rows ≈ 48u)
+async fn self_history_handler(State(_state): State<SharedState>) -> Json<Value> {
+    let path = std::path::Path::new("data/self_test.jsonl");
+    if !path.exists() {
+        return Json(json!({"rows": [], "note": "no self_test.jsonl yet"}));
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().rev().take(240).collect();
+            let rows: Vec<Value> = lines.into_iter().rev()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            Json(json!({"rows": rows}))
+        }
+        Err(e) => Json(json!({"error": format!("{}", e)}))
+    }
+}
+
+/// /retrieval_metrics — cache-vs-brein bewijsmetrics
+async fn retrieval_metrics_handler(State(state): State<SharedState>) -> Json<Value> {
+    let f = state.field_handle.snapshot.load();
+    let r = state.retrieval.read().await;
+    let kind_counts = r.kind_distribution();
+    let total = r.len() as u64;
+
+    Json(json!({
+        "tick": f.tick,
+        "total_entries": total,
+        "by_kind": {
+            "external": kind_counts[0],
+            "self": kind_counts[1],
+            "teacher": kind_counts[2],
+            "interaction": kind_counts[3],
+        },
+        "cap": 15000,
+        "usage_fraction": if total > 0 { total as f32 / 15000.0 } else { 0.0 },
+    }))
+}
+
+/// POST /debug/toggle_priors?enabled=false&ticks=1000
+/// Ablation window: zet concept-priors uit voor N ticks, auto-restore.
+async fn debug_toggle_priors_handler(
+    State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let enabled_str = params.get("enabled").cloned().unwrap_or_else(|| "true".to_string());
+    let enabled = enabled_str == "true";
+    let ticks: u64 = params.get("ticks").and_then(|s| s.parse().ok()).unwrap_or(1000);
+
+    // Command naar tick-loop: set flags
+    // We gebruiken FieldCommand::SetConceptPriors (nieuw)
+    let _ = state.field_handle.commands.send(FieldCommand::SetConceptPriors {
+        enabled,
+        until_delta_ticks: ticks,
+    }).await;
+
+    Json(json!({
+        "ok": true,
+        "enabled": enabled,
+        "window_ticks": ticks,
+        "note": "ablation toegepast op next adapt cycle",
     }))
 }
 
