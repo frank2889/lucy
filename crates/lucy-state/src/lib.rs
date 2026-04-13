@@ -490,6 +490,18 @@ pub struct Field {
     #[serde(default)]
     pub teacher_success_streak: u32,
 
+    // === v2.6.6: Boredom-attractor escape ===
+
+    /// Laatst gemeten avg_tension (voor fixed-point detectie)
+    #[serde(default)]
+    pub last_boredom_tension: f32,
+    /// Laatst gemeten avg_curiosity (voor fixed-point detectie)
+    #[serde(default)]
+    pub last_boredom_curiosity: f32,
+    /// Hoeveel opeenvolgende adapt_dynamics calls het veld identiek bleef
+    #[serde(default)]
+    pub boredom_streak: u32,
+
     // === v0.9: Attention + Working Memory ===
 
     /// Attention projectie-weights: Q, K, V per depth-laag
@@ -946,6 +958,9 @@ impl Field {
             last_reflect_tick: 0,
             teacher_interval: 10_000,
             teacher_success_streak: 0,
+            last_boredom_tension: 0.0,
+            last_boredom_curiosity: 0.0,
+            boredom_streak: 0,
             attn_weights: None,
             attn_context: Vec::new(),
             working_memory: Vec::new(),
