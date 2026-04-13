@@ -543,29 +543,31 @@ pub struct Field {
     pub concept_assignments: Vec<u16>,
 
     // === v2.6.8: Bewijs-architectuur (audit + metrics) ===
+    // ALLE velden #[serde(skip)] → runtime-only. Reden: bincode is positioneel en
+    // snapshot-migratie is duur. Ring-buffers herbouwen zich bij runtime (~minuten).
+    // Atomic counters voor provenance zitten in AppState (geen state-struct nodig).
 
-    /// v2.6.8 P2.2: Ablation-toggle voor concept-priors. `true` = actief (default).
-    /// Combineer met `concept_priors_disabled_until_tick` voor windowed A/B testing.
-    #[serde(default = "default_true")]
+    /// v2.6.8 P2.2: Ablation-toggle voor concept-priors.
+    #[serde(skip, default = "default_true_skip")]
     pub concept_priors_enabled: bool,
     /// v2.6.8 P2.2: Auto-restore tick — als 0, permanent; anders herstellen bij `tick >= deze`.
-    #[serde(default)]
+    #[serde(skip)]
     pub concept_priors_disabled_until_tick: u64,
 
     /// v2.6.8 P2.1: Ring-buffer (cap 64) met concept-clustering audit data
-    #[serde(default)]
+    #[serde(skip)]
     pub concept_audit_log: Vec<ConceptAudit>,
 
     /// v2.6.8 P2.3: Ring-buffer (cap 64) met self-EP + WM-seq effect-metingen
-    #[serde(default)]
+    #[serde(skip)]
     pub self_ep_audit: Vec<SelfEpAudit>,
 
     /// v2.6.8 P1.3: Self-model coherentie metrics (EMA, niet geserialiseerd — snel herberekenbaar)
     #[serde(skip)]
     pub self_metrics: SelfMetrics,
 
-    /// v2.6.8 P1.2: cumulatieve provenance counters per bron (voor telemetry-trends)
-    #[serde(default)]
+    /// v2.6.8 P1.2: cumulatieve provenance counters (runtime-only; AppState heeft de primary atomics)
+    #[serde(skip)]
     pub provenance_counts: [u64; 6],
 
     // === v2.0: Bewustzijns-metrieken (veld-level) ===
@@ -831,6 +833,7 @@ fn default_precision() -> f32 { 1.0 }
 fn default_control_belief() -> f32 { 0.5 } // start neutraal: 50% vertrouwen in eigen controle
 fn default_teacher_interval() -> u64 { 10_000 }
 fn default_true() -> bool { true }
+fn default_true_skip() -> bool { true } // voor #[serde(skip, default = ...)]
 
 // === v2.6.8: Bewijs-architectuur structs ===
 

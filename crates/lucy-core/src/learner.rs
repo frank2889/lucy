@@ -79,7 +79,9 @@ pub struct Explorer {
     #[serde(default)]
     pub provider_score: HashMap<String, f32>,
     /// v2.6.8 P1.4: Teacher-event audit log (ring cap 256).
-    #[serde(default)]
+    /// Runtime-only — bincode-compat issue bij serde(default). Herbouwt zichzelf
+    /// bij runtime naarmate teacher-calls binnenkomen.
+    #[serde(skip)]
     pub teacher_audit: Vec<lucy_state::TeacherEvent>,
 }
 
