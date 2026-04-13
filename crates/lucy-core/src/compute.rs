@@ -390,7 +390,9 @@
         // │ De ENE formule. Alles volgt hieruit.                    │
         // └─────────────────────────────────────────────────────────┘
         let free_energy = kl_divergence + blanket_surprise;
-        point.free_energy = (1.0 - fe_rate) * old_free_energy + fe_rate * free_energy;
+        // v2.6.7 A2: NaN/Inf safety op EMA-update van free_energy
+        let raw_fe = (1.0 - fe_rate) * old_free_energy + fe_rate * free_energy;
+        point.free_energy = if raw_fe.is_finite() { raw_fe.clamp(0.0, f32::MAX / 1e6) } else { 0.0 };
 
         // ┌─────────────────────────────────────────────────────────┐
         // │ STAP 5: TENSION = INSTANT F + metabole kosten + basaal │
@@ -940,6 +942,7 @@
             satisfaction: f32,
             frustration: f32,
             stuck_ticks: u16,
+            free_energy: f32, // v2.6.7: ook parallelle update schrijft free_energy
             // v2.4: nieuwe velden
             reward_quantiles: [f32; 5],
             control_belief: f32,
@@ -967,6 +970,7 @@
                     stuck_ticks: point.stuck_ticks,
                     reward_quantiles: point.reward_quantiles,
                     control_belief: point.control_belief,
+                    free_energy: if point.free_energy.is_finite() { point.free_energy } else { 0.0 },
                 };
                 // Memory update
                 let eps = {
@@ -1024,11 +1028,13 @@
             // --- UNIFIED SAMENVELD: F = KL + blanket_surprise, emoties = afgeleiden ---
             let pred_error = squared_norm(&eps);
             let compute_cost = n_couplings as f32 * kappa;
-            let old_free_energy = point.free_energy;
+            // v2.6.7 A2: NaN-safe read van stale free_energy (na snapshot-load kan nog NaN in zitten)
+            let old_free_energy = if point.free_energy.is_finite() { point.free_energy } else { 0.0 };
+            let old_error_var = if point.error_var.is_finite() { point.error_var } else { 1.0 };
 
             // Precision
-            let error_diff = pred_error - point.free_energy;
-            let error_var = (1.0 - tracking) * point.error_var + tracking * error_diff * error_diff;
+            let error_diff = pred_error - old_free_energy;
+            let error_var = (1.0 - tracking) * old_error_var + tracking * error_diff * error_diff;
             let precision = (1.0 / (error_var + tracking)).min(10.0); // v2.5: clamp
 
             // F = KL(q‖p) + S(η|b)
@@ -1123,6 +1129,11 @@
                 stuck_ticks: new_stuck_ticks,
                 reward_quantiles: new_quantiles,
                 control_belief: new_control,
+                // v2.6.7: EMA update van free_energy, NaN-safe
+                free_energy: {
+                    let raw = (1.0 - fe_rate) * old_free_energy + fe_rate * free_energy;
+                    if raw.is_finite() { raw.clamp(0.0, f32::MAX / 1e6) } else { 0.0 }
+                },
             })
         }).collect();
 
@@ -1142,6 +1153,7 @@
             p.stuck_ticks = upd.stuck_ticks;
             p.reward_quantiles = upd.reward_quantiles;
             p.control_belief = upd.control_belief;
+            p.free_energy = upd.free_energy; // v2.6.7
         }
     }
 
