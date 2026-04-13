@@ -1,5 +1,68 @@
 # Lucy Changelog
 
+## v2.6.9 (2026-04-13) — Snapshot-migratie framework [COMMITTED, READY TO DEPLOY]
+
+**Doel:** Oplossen van de v2.6.8 deploy-crisis — maak struct-wijzigingen aan
+Field/Explorer/RetrievalStore voortaan safe via expliciete versioned snapshots
+en migratie-impls.
+
+**Status:** Code gecommitteerd. End-to-end getest:
+legacy snapshot (zonder header) → `FieldV1` → migratie → current `Field` ✓
+headered roundtrip: save → load ✓.
+
+### Nieuwe infrastructuur
+
+- **`SnapshotHeader`** (`lucy-state/src/snapshot_header.rs`) — 20-byte fixed-size
+  header: magic `b"LUCY"` + `schema_version: u32` + `payload_size: u64` + reserved.
+  Zero-cost detectie: 4-byte magic check vóór bincode.
+- **`schema_v1::FieldV1`** — exact kopie van v2.6.7-era Field struct (pre-v2.6.8
+  velden alleen). Wordt gebruikt voor legacy-load fallback.
+- **`From<FieldV1> for Field`** — expliciete migratie: 1-op-1 veld-mapping voor
+  behouden velden, nieuwe v2.6.8+ velden krijgen `Default`.
+- **`Field::load`** nieuw versioned pad:
+  1. Detecteer magic bytes
+  2. **Headered v1**: direct deserialize current Field
+  3. **Legacy**: try `FieldV1` → migrate via `From` → current Field
+  4. **Fallback**: probeer direct current (voor pre-v2.6.7 snapshots)
+- **`Field::save`** schrijft altijd met current header (`SnapshotHeader::current`).
+
+### Nieuwe tools
+
+- **`crates/snapshot_check/src/bin/migrate_snapshot.rs`** — CLI:
+  ```
+  cargo run -p snapshot_check --bin migrate_snapshot -- input.snapshot output.snapshot
+  ```
+  Leest any versie, schrijft current-headered output. Offline migratie voor
+  backups of deploy-migraties.
+- **`test_v269`** — end-to-end integration test (`cargo run -p snapshot_check --bin test_v269`).
+
+### Ontwerp-regels (aangescherpt t.o.v. v2.6.8)
+
+1. **Bump `CURRENT_SCHEMA_VERSION`** bij elke breaking Field/Explorer/RetrievalStore wijziging.
+2. **Nieuw schema = nieuwe module**: `schema_v2.rs`, `schema_v3.rs`, ... met exacte
+   layout + `From<schema_vN::Field> for current::Field` impl.
+3. **Pre-deploy verplicht**: download live snapshot, run `cargo run -p snapshot_check`.
+   Als geen 🟢 → NIET deployen (bouw eerst compat-struct).
+4. **Header-magic is stabiel** (`b"LUCY"`). Versie-field is het enige wat bump't.
+5. **CRC32 zit op RAW bytes** (incl. header) voor atomische integriteit.
+
+### Bekende beperking
+
+De HUIDIGE live lucy.world snapshot (geschreven door v2.6.7 binary in de container,
+vermoedelijk pre-hotfix `49d051f`) laadt NIET met onze `FieldV1` struct — zelfs niet
+met een verse checkout van commit `49d051f`. Dit impliceert dat de container-binary
+een subtly andere struct layout heeft gehad dan wat in git staat. Voor v2.6.9 deploy:
+
+- **Optie 1 (voorkeur):** live Lucy schrijft nieuwe snapshot via lopende v2.6.7 binary →
+  `sigterm graceful shutdown` → stop → `bash deploy.sh` → v2.6.9 leest via legacy pad.
+  Als dat faalt: voer `migrate_snapshot` op `/lucy/data-safety-backup/lucy.snapshot` uit
+  nadat die eenmaal succesvol door v2.6.7 is gelezen + opnieuw opgeslagen.
+- **Optie 2:** Accepteer fresh-bootstrap (vocab + journal behouden, couplings verloren).
+- **Optie 3:** Build `dump_v267_state` binary die via `docker exec` de live v2.6.7 binary
+  aanroept met speciale env-vars om state als JSON te exporteren. Complex, uitgesteld.
+
+---
+
 ## v2.6.8 (2026-04-13) — Bewijs-architectuur [COMMITTED, NIET GEDEPLOYED]
 
 **Doel:** Observability + auditability voor v2.6.7 claims. Geen nieuwe cognitieve

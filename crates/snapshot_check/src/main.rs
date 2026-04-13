@@ -58,20 +58,33 @@ fn main() -> ExitCode {
         eprintln!("⚠ Geen CRC32 bestand — skip checksum check");
     }
 
-    // Poging tot deserialiseren
-    eprintln!("→ Deserializeer met CURRENT Field struct...");
-    let field: Field = match bincode::deserialize(&bytes) {
+    // v2.6.9: versie-detectie eerst
+    use lucy_state::{detect_version, SnapshotFormat, CURRENT_SCHEMA_VERSION};
+    match detect_version(&bytes) {
+        SnapshotFormat::Headered(v, offset) => {
+            eprintln!("→ Headered snapshot v{} detected (payload vanaf offset {})", v, offset);
+            if v != CURRENT_SCHEMA_VERSION {
+                eprintln!("⚠ Versie {} ≠ current ({}) — migratie nodig", v, CURRENT_SCHEMA_VERSION);
+            }
+        }
+        SnapshotFormat::Legacy => {
+            eprintln!("→ LEGACY snapshot (geen magic header) — zal via FieldV1 migratie geladen worden");
+        }
+    }
+
+    // Gebruik Field::load (versioned load-path) ipv raw bincode
+    eprintln!("→ Load via Field::load (versioned + migratie)...");
+    let field: Field = match Field::load(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("❌ Deserialisatie gefaald: {}", e);
+            eprintln!("❌ Field::load gefaald: {}", e);
             eprintln!();
-            eprintln!("Dit betekent dat de CURRENT lucy-state struct niet compatible is");
-            eprintln!("met de snapshot op disk. Waarschijnlijke oorzaak:");
-            eprintln!("  - Nieuwe velden toegevoegd MIDDEN in Field struct");
-            eprintln!("  - Type-wijziging van bestaand veld");
-            eprintln!("  - Bincode is positioneel; serde(default) werkt alleen bij EOF");
+            eprintln!("Mogelijke oorzaken:");
+            eprintln!("  - Legacy snapshot ouder dan v2.6.7 Field layout");
+            eprintln!("  - Corrupt bestand (CRC matcht wel, maar bincode decodeert niet)");
+            eprintln!("  - Onbekend headered schema_version");
             eprintln!();
-            eprintln!("Zie docs/SNAPSHOT_MIGRATION.md voor het veilige pad.");
+            eprintln!("Zie docs/SNAPSHOT_MIGRATION.md voor recovery-paden.");
             return ExitCode::from(2);
         }
     };
@@ -113,29 +126,29 @@ fn main() -> ExitCode {
         eprintln!("⚠ NaN/Inf in phi: {} values — zouden door healing opgeruimd worden bij boot", nan_phi);
     }
 
-    // Round-trip test: serialize → deserialize moet identiek zijn (grootte)
+    // Round-trip: schrijf via Field::save (naar /tmp), lees terug via Field::load.
     eprintln!();
-    eprintln!("→ Round-trip test (serialize → deserialize)...");
-    match bincode::serialize(&field) {
-        Ok(reserialized) => {
-            eprintln!("  original size: {} bytes", bytes.len());
-            eprintln!("  reserialized size: {} bytes", reserialized.len());
-            if reserialized.len() != bytes.len() {
-                eprintln!("  ⚠ Size changed — verwacht bij v2.6.8 als nieuwe velden geschreven worden");
-            } else {
-                eprintln!("  ✓ Sizes match exact");
-            }
-            // Verify second load werkt
-            match bincode::deserialize::<Field>(&reserialized) {
-                Ok(_) => eprintln!("  ✓ Reserialized bytes laden succesvol"),
+    eprintln!("→ Round-trip via Field::save → Field::load (v2.6.9 headered)...");
+    let tmp = std::env::temp_dir().join("lucy_snapshot_roundtrip_test.snapshot");
+    match field.save(&tmp) {
+        Ok(()) => {
+            let new_size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+            eprintln!("  written: {} bytes (headered, current schema)", new_size);
+            eprintln!("  original: {} bytes (pre-migration)", bytes.len());
+            match Field::load(&tmp) {
+                Ok(f2) => {
+                    eprintln!("  ✓ Roundtrip succesvol — tick={}, points={}", f2.tick, f2.points.len());
+                    let _ = std::fs::remove_file(&tmp);
+                    let _ = std::fs::remove_file(tmp.with_extension("crc32"));
+                }
                 Err(e) => {
-                    eprintln!("  ❌ Reserialized bytes kunnen niet geladen worden: {}", e);
+                    eprintln!("  ❌ Roundtrip load gefaald: {}", e);
                     return ExitCode::from(2);
                 }
             }
         }
         Err(e) => {
-            eprintln!("  ❌ Serialize-back faalde: {}", e);
+            eprintln!("  ❌ Roundtrip save gefaald: {}", e);
             return ExitCode::from(2);
         }
     }

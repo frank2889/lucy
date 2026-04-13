@@ -1,8 +1,24 @@
-# Snapshot-migratie — lessons learned & vooruitpad
+# Snapshot-migratie — lessons learned & v2.6.9 framework
 
-**Status:** v2.6.8 code gecommitteerd (9acfbb8, 4593d30) maar NIET gedeployed.
-lucy.world draait v2.6.7 met volledige data intact (tick ≥ 492750, 20933 points,
-431K couplings, 11.321 retrieval entries, vocab 11984, 368 interests).
+**Status (2026-04-13 laat):**
+- lucy.world draait v2.6.7 met volledige data intact (tick ≥ 492750)
+- v2.6.8 code gecommitteerd (`9acfbb8`, `4593d30`) — niet gedeployed
+- **v2.6.9 migratie-framework gebouwd + end-to-end getest** — ready for deploy
+
+## v2.6.9 oplossing (samenvatting)
+
+Voegt toe:
+
+- `SnapshotHeader` (20 bytes, magic=LUCY + version): detecteerbaar in O(1)
+- `schema_v1::FieldV1`: bit-precieze kopie van v2.6.7 Field layout
+- `From<FieldV1> for Field` migratie-impl: 1-op-1 velden + defaults voor nieuwe
+- `Field::save` schrijft current header; `Field::load` detecteert + migreert legacy
+- `migrate_snapshot` CLI voor offline conversie
+- `test_v269` end-to-end test bewijst het werkt
+
+Details: zie [CHANGELOG.md v2.6.9 section](CHANGELOG.md#v269-2026-04-13--snapshot-migratie-framework).
+
+---
 
 ## Probleem in een zin
 

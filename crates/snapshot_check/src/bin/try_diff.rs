@@ -23,7 +23,7 @@ fn main() {
 
     // Check: is er een 0x40 byte (64) ergens?
     let occurrences: Vec<usize> = bytes.iter().enumerate()
-        .filter(|(_, &b)| b == 64)
+        .filter(|&(_, &b)| b == 64)
         .map(|(i, _)| i)
         .collect();
     println!("0x40 byte (64) appears at {} positions", occurrences.len());

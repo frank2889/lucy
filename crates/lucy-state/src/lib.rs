@@ -46,6 +46,12 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod snapshot_header;
+pub mod schema_v1;
+
+pub use snapshot_header::{SnapshotHeader, SnapshotFormat, CURRENT_SCHEMA_VERSION,
+    HEADER_SIZE, MAGIC, detect_version};
+
 /// Dimensionaliteit van elke veldvector (Φ, P, M, embeddings).
 /// 64 is gekozen als balans: groot genoeg voor expressiviteit,
 /// klein genoeg voor snelheid op een $6/maand server.
@@ -664,7 +670,114 @@ pub struct Field {
     pub provenance_counts: [u64; 6],
 }
 
-fn default_dim() -> usize { DIM }
+pub(crate) fn default_dim() -> usize { DIM }
+
+// === v2.6.9: Migratie van legacy schema's naar current Field ===
+
+impl From<schema_v1::FieldV1> for Field {
+    /// v2.6.7-era FieldV1 → current Field. Nieuwe v2.6.8+ velden → default.
+    /// Alle v1 data wordt EXACT gemapped (geen veld-verlies).
+    fn from(v1: schema_v1::FieldV1) -> Self {
+        Field {
+            // --- 1-op-1 gemapped vanuit v1 (identieke veldnamen) ---
+            points: v1.points,
+            active_set: v1.active_set,
+            tick: v1.tick,
+            total_energy: v1.total_energy,
+            economy: v1.economy,
+            phase: v1.phase,
+            clamps: v1.clamps,
+            input_ids: v1.input_ids,
+            output_ids: v1.output_ids,
+            last_thought: v1.last_thought,
+            reflection_count: v1.reflection_count,
+            dopamine: v1.dopamine,
+            norepinephrine: v1.norepinephrine,
+            serotonin: v1.serotonin,
+            acetylcholine: v1.acetylcholine,
+            spectral_radius: v1.spectral_radius,
+            chaos_target: v1.chaos_target,
+            current_intention: v1.current_intention,
+            intention_strength: v1.intention_strength,
+            rnd_frozen: v1.rnd_frozen,
+            rnd_predictor: v1.rnd_predictor,
+            kappa: v1.kappa,
+            omega: v1.omega,
+            lambda: v1.lambda,
+            beta: v1.beta,
+            alpha: v1.alpha,
+            rho: v1.rho,
+            mu: v1.mu,
+            growth_threshold: v1.growth_threshold,
+            ema_decay: v1.ema_decay,
+            emo_decay: v1.emo_decay,
+            error_tracking_rate: v1.error_tracking_rate,
+            fe_tracking_rate: v1.fe_tracking_rate,
+            kl_scale: v1.kl_scale,
+            clamp_range: v1.clamp_range,
+            settle_epsilon: v1.settle_epsilon,
+            noise_amplitude: v1.noise_amplitude,
+            think_interval: v1.think_interval,
+            reflect_interval: v1.reflect_interval,
+            max_goals: v1.max_goals,
+            learn_interval: v1.learn_interval,
+            explore_interval: v1.explore_interval,
+            consolidation_interval: v1.consolidation_interval,
+            snapshot_interval: v1.snapshot_interval,
+            growth_interval: v1.growth_interval,
+            sampling_temperature: v1.sampling_temperature,
+            sampling_top_p: v1.sampling_top_p,
+            repetition_penalty: v1.repetition_penalty,
+            goals: v1.goals,
+            last_think_tick: v1.last_think_tick,
+            last_reflect_tick: v1.last_reflect_tick,
+            teacher_interval: v1.teacher_interval,
+            teacher_success_streak: v1.teacher_success_streak,
+            last_boredom_tension: v1.last_boredom_tension,
+            last_boredom_curiosity: v1.last_boredom_curiosity,
+            boredom_streak: v1.boredom_streak,
+            is_sluggish_flag: v1.is_sluggish_flag,
+            attn_weights: v1.attn_weights,
+            attn_context: v1.attn_context,
+            working_memory: v1.working_memory,
+            wm_gates: v1.wm_gates,
+            wm_ages: v1.wm_ages,
+            concept_centroids: v1.concept_centroids,
+            concept_assignments: v1.concept_assignments,
+            global_oscillation_phase: v1.global_oscillation_phase,
+            oscillation_coherence: v1.oscillation_coherence,
+            integrated_info_avg: v1.integrated_info_avg,
+            power_law_exponent: v1.power_law_exponent,
+            is_critical: v1.is_critical,
+            avg_free_energy: v1.avg_free_energy,
+            theta_phase: v1.theta_phase,
+            theta_gamma_coupling: v1.theta_gamma_coupling,
+            branching_ratio_avg: v1.branching_ratio_avg,
+            ignition_active: v1.ignition_active,
+            ignition_strength: v1.ignition_strength,
+            avg_expected_free_energy: v1.avg_expected_free_energy,
+            adaptive: v1.adaptive,
+            temporal_history: v1.temporal_history,
+            causal_log: v1.causal_log,
+            goal_history: v1.goal_history,
+            pages_read: v1.pages_read,
+            tokens_processed: v1.tokens_processed,
+            snapshot_version: v1.snapshot_version,
+            field_dim: v1.field_dim,
+            n_input: v1.n_input,
+            n_hidden: v1.n_hidden,
+            n_output: v1.n_output,
+
+            // --- Nieuwe v2.6.8+ velden → defaults ---
+            concept_priors_enabled: true,
+            concept_priors_disabled_until_tick: 0,
+            concept_audit_log: Vec::new(),
+            self_ep_audit: Vec::new(),
+            self_metrics: SelfMetrics::default(),
+            provenance_counts: [0u64; 6],
+        }
+    }
+}
 
 /// v1.0: Parameters die Lucy zelf aanpast — geen hardcoded magic numbers meer.
 /// Defaults komen overeen met de oude hardcoded waarden zodat bestaande snapshots
@@ -820,13 +933,12 @@ impl TrainingQueue {
     }
 }
 
-fn default_phase() -> FieldPhase { FieldPhase::Idle }
-fn default_chaos_target() -> f32 { 1.0 }
-fn default_precision() -> f32 { 1.0 }
-fn default_control_belief() -> f32 { 0.5 } // start neutraal: 50% vertrouwen in eigen controle
-fn default_teacher_interval() -> u64 { 10_000 }
-fn default_true() -> bool { true }
-fn default_true_skip() -> bool { true } // voor #[serde(skip, default = ...)]
+pub(crate) fn default_phase() -> FieldPhase { FieldPhase::Idle }
+pub(crate) fn default_chaos_target() -> f32 { 1.0 }
+pub(crate) fn default_precision() -> f32 { 1.0 }
+pub(crate) fn default_control_belief() -> f32 { 0.5 } // start neutraal: 50% vertrouwen in eigen controle
+pub(crate) fn default_teacher_interval() -> u64 { 10_000 }
+pub(crate) fn default_true() -> bool { true }
 
 // === v2.6.8: Bewijs-architectuur structs ===
 
@@ -895,24 +1007,24 @@ pub struct TeacherEvent {
 
 // === Defaults voor dynamische parameters ===
 // Deze waarden zijn startpunten — adapt_dynamics() past ze aan op basis van veldstaat.
-fn default_emo_decay() -> f32 { 0.95 }
-fn default_error_tracking_rate() -> f32 { 0.01 }
-fn default_fe_tracking_rate() -> f32 { 0.05 }
-fn default_kl_scale() -> f32 { 0.1 }
-fn default_clamp_range() -> f32 { 10.0 }
-fn default_settle_epsilon() -> f32 { 0.001 }
-fn default_noise_amplitude() -> f32 { 0.05 }
-fn default_think_interval() -> u64 { 500 }
-fn default_reflect_interval() -> u64 { 10_000 }
-fn default_max_goals() -> usize { 10 }
-fn default_learn_interval() -> u64 { 100 }
-fn default_explore_interval() -> u64 { 100 }
-fn default_consolidation_interval() -> u64 { 1_000 }
-fn default_snapshot_interval() -> u64 { 10_000 }
-fn default_growth_interval() -> u64 { 10_000 }
-fn default_sampling_temperature() -> f32 { 0.7 }
-fn default_sampling_top_p() -> f32 { 0.9 }
-fn default_repetition_penalty() -> f32 { 1.3 }
+pub(crate) fn default_emo_decay() -> f32 { 0.95 }
+pub(crate) fn default_error_tracking_rate() -> f32 { 0.01 }
+pub(crate) fn default_fe_tracking_rate() -> f32 { 0.05 }
+pub(crate) fn default_kl_scale() -> f32 { 0.1 }
+pub(crate) fn default_clamp_range() -> f32 { 10.0 }
+pub(crate) fn default_settle_epsilon() -> f32 { 0.001 }
+pub(crate) fn default_noise_amplitude() -> f32 { 0.05 }
+pub(crate) fn default_think_interval() -> u64 { 500 }
+pub(crate) fn default_reflect_interval() -> u64 { 10_000 }
+pub(crate) fn default_max_goals() -> usize { 10 }
+pub(crate) fn default_learn_interval() -> u64 { 100 }
+pub(crate) fn default_explore_interval() -> u64 { 100 }
+pub(crate) fn default_consolidation_interval() -> u64 { 1_000 }
+pub(crate) fn default_snapshot_interval() -> u64 { 10_000 }
+pub(crate) fn default_growth_interval() -> u64 { 10_000 }
+pub(crate) fn default_sampling_temperature() -> f32 { 0.7 }
+pub(crate) fn default_sampling_top_p() -> f32 { 0.9 }
+pub(crate) fn default_repetition_penalty() -> f32 { 1.3 }
 
 // === Bitflag constanten ===
 pub const FLAG_ACTIVE: u8 = 1 << 0;
@@ -1292,15 +1404,22 @@ impl Field {
 
 impl Field {
     /// Sla de volledige veldstaat op — ONSTERFELIJK
+    /// v2.6.9+: prepend SnapshotHeader met magic + schema_version voor forward-compat.
     /// Atomic write + CRC32 checksum + 5 versioned backups.
     /// Lucy's geleerde data gaat NOOIT verloren.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = bincode::serialize(self)?;
+        let payload = bincode::serialize(self)?;
 
         // Weiger lege/corrupte data
-        if bytes.len() < 1000 {
-            return Err(format!("Snapshot te klein ({} bytes) — weiger save", bytes.len()).into());
+        if payload.len() < 1000 {
+            return Err(format!("Snapshot te klein ({} bytes) — weiger save", payload.len()).into());
         }
+
+        // v2.6.9: prepend header
+        let header = SnapshotHeader::current(payload.len() as u64);
+        let mut bytes = Vec::with_capacity(HEADER_SIZE + payload.len());
+        bytes.extend_from_slice(&header.to_bytes());
+        bytes.extend_from_slice(&payload);
 
         // Atomic write + checksum + 5 backups
         let tmp = path.with_extension("tmp");
@@ -1334,11 +1453,13 @@ impl Field {
         Ok(())
     }
 
-    /// Laad een veldstaat — met CRC32 validatie en structurele checks
+    /// Laad een veldstaat — met CRC32 validatie en structurele checks.
+    /// v2.6.9+: detecteert SnapshotHeader + versie; legacy snapshots (zonder
+    /// magic bytes) worden via `schema_v1::FieldV1` + `From` migratie geladen.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
 
-        // CRC32 validatie (als checksum bestaat)
+        // CRC32 validatie (als checksum bestaat) — checksum is op RAW bytes (met header bij v1+).
         let checksum_path = path.with_extension("crc32");
         if checksum_path.exists() {
             let stored = std::fs::read(&checksum_path)?;
@@ -1354,7 +1475,58 @@ impl Field {
             }
         }
 
-        let field: Self = bincode::deserialize(&bytes)?;
+        // v2.6.9: versie-detectie via header magic bytes
+        let field: Self = match detect_version(&bytes) {
+            SnapshotFormat::Headered(version, payload_offset) => {
+                let payload = &bytes[payload_offset..];
+                match version {
+                    1 => {
+                        // v2.6.9+ current format — direct deserialize
+                        bincode::deserialize(payload)?
+                    }
+                    unknown => {
+                        return Err(format!(
+                            "Unsupported snapshot schema version: {}. Huidige binary ondersteunt v0 (legacy) en v{}.",
+                            unknown, CURRENT_SCHEMA_VERSION
+                        ).into());
+                    }
+                }
+            }
+            SnapshotFormat::Legacy => {
+                // Pre-v2.6.9: geen header. Probeer FieldV1 (v2.6.7-era layout).
+                tracing::warn!(
+                    "Legacy snapshot gedetecteerd (geen magic header) — probeer FieldV1 schema"
+                );
+                match bincode::deserialize::<schema_v1::FieldV1>(&bytes) {
+                    Ok(v1) => {
+                        tracing::info!(
+                            tick = v1.tick,
+                            points = v1.points.len(),
+                            "Legacy FieldV1 geladen — migreer naar current"
+                        );
+                        Field::from(v1)
+                    }
+                    Err(v1_err) => {
+                        // Laatste poging: misschien een heel oude snapshot die niet volgens
+                        // v1 layout is — probeer direct current Field (werkt soms bij geluk).
+                        match bincode::deserialize::<Self>(&bytes) {
+                            Ok(f) => {
+                                tracing::warn!(
+                                    "Legacy snapshot geladen via current struct (niet via v1) — mogelijk pre-v2.6.7"
+                                );
+                                f
+                            }
+                            Err(current_err) => {
+                                return Err(format!(
+                                    "Legacy load faalde: FieldV1 error: {}. Current error: {}",
+                                    v1_err, current_err
+                                ).into());
+                            }
+                        }
+                    }
+                }
+            }
+        };
 
         // Structurele validatie
         if field.points.is_empty() {
