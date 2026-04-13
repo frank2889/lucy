@@ -1779,6 +1779,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapshot_check"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "crc32fast",
+ "lucy-state",
+ "serde",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

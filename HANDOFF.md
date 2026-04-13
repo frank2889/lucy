@@ -3,6 +3,18 @@
 > Datum: 10 april 2026
 > Doel: alles documenteren zodat een nieuwe agent kan overnemen
 
+> **⚠ UPDATE (2026-04-13):** Dit document beschrijft v2.6.3. Voor recentere
+> wijzigingen v2.6.4 t/m v2.6.8: zie [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
+> Voor de snapshot-compat crisis van 2026-04-13: zie
+> [`docs/SNAPSHOT_MIGRATION.md`](docs/SNAPSHOT_MIGRATION.md).
+>
+> **Current status (2026-04-13 21:00 CEST):** Lucy draait v2.6.7 live op
+> lucy.world, tick ≥ 492750, 20933 points, 431K couplings, 11321 retrieval,
+> vocab 11984. v2.6.8 bewijs-architectuur-code is gecommitteerd
+> (`9acfbb8`, `4593d30`) maar NIET gedeployed vanwege bincode snapshot-
+> incompatibiliteit. v2.6.9 werk: `FieldV267` compat-struct of explicit
+> migration header — zie SNAPSHOT_MIGRATION.md.
+
 ---
 
 ## TL;DR — Het Probleem in Één Zin

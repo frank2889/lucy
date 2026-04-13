@@ -5,6 +5,7 @@ members = [
     "crates/lucy-gpu",
     "crates/lucy-io",
     "crates/lucy-state",
+    "crates/snapshot_check",
 ]
 
 [workspace.dependencies]

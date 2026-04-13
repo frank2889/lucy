@@ -1,4 +1,55 @@
-# Lucy v2.6.1 — Technical Architecture
+# Lucy v2.6.7 — Technical Architecture
+
+> **Live status (2026-04-13):** v2.6.7 op lucy.world. v2.6.8 bewijs-architectuur
+> gecommitteerd maar niet gedeployed — zie [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
+> en [`docs/SNAPSHOT_MIGRATION.md`](docs/SNAPSHOT_MIGRATION.md).
+
+## v2.6.7 key changes t.o.v. v2.6.1
+
+**Numerieke stabiliteit (Fase A):**
+- Phi hard-clamp in `update_phi` + parallelle versie (was alleen in layer_norm/10 ticks)
+- Tension anti-Inf clamp (`f32::MAX / 1e6`)
+- Boredom-kick veld-relatief (`clamp_range * 0.05` ipv 0.3)
+
+**Self-EP loop (Fase B):** intelligentie groeit zonder externe data
+- `reflect_tick` doet nu `micro_ep(field, &[self_state_input], &[self_state_input])` — Lucy traint zichzelf op haar eigen veld-staat
+- WM-sequence training op opeenvolgende working-memory slots
+- Dream-replay triggert bij `is_sluggish_flag`
+
+**AI-teacher bootstrap (Fase C):** zelfafbouwend
+- Nieuwe module `ai_teacher.rs`: DDG AI Chat + DDG Lite fallback, provider-rotatie op success-rate EMA
+- Vraagformulering uit `explorer.interests` — géén hardcoded prompts
+- `teacher_interval` verdubbelt na 3 succes, halveert bij falen → ~elk uur bij start, ~nauwelijks na weken
+
+**Bron-balans (Fase D):** organisch, geen blacklist
+- `diversify_frontier` strenger (10%/domein) bij monocultuur > 50%
+- `Explorer.domain_score`: reward-EMA per domein op satisfaction-delta
+- Sources.txt fadet uit bij ≥ 50 unique visited domains
+
+**Depth-3 concept-clustering (Fase E):** compressie in WEIGHTS, niet entries
+- `compute_concept_centroids`: mini-batch k-means (k=32-256) op depth-3 phi's
+- `hierarchical_prediction` uitgebreid: concept-centroid als extra top-down prior voor depth-2
+- `consolidate_weights` uitgebreid: intra-concept EWC ×1.5, cross-concept ×0.7
+- `RetrievalStore` cap 100K → 15K + score-based eviction
+
+**Self-state archive:** zelfmodel ontstaat uit reflectie
+- Elke 500 reflects: `(self_state_input, journal_snippet)` in retrieval met KIND_SELF
+- `/ask` interactie-log in retrieval met KIND_INTERACTION
+
+## v2.6.8 (in code, niet live): Bewijs-architectuur
+
+Observability-release (geen nieuwe cognitie). Blijft in code omdat snapshot-migratie
+gefaald tijdens deploy. Features:
+- `RetrievalEntry.kind` primary truth voor provenance (4 kinds)
+- Response-provenance in `/ask`: fallback/field_generated/retrieval_{self,teacher,external}/mixed
+- Endpoints: `/self_metrics`, `/teacher_metrics`, `/concept_audit`, `/self_ep_audit`, `/self_history`, `/retrieval_metrics`
+- `POST /debug/toggle_priors?enabled=false&ticks=N` voor ablation-windows
+- Audit-only self-test suite (5 vaste probe-vragen elke 5000 ticks)
+- `process_query_full(audit_only: bool)` voor learning-side-effect-vrije meting
+
+---
+
+# Lucy v2.6.1 — Technical Architecture (origineel)
 
 ## The Unified Samenveld
 

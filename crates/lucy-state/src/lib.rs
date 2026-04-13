@@ -542,33 +542,7 @@ pub struct Field {
     #[serde(skip)]
     pub concept_assignments: Vec<u16>,
 
-    // === v2.6.8: Bewijs-architectuur (audit + metrics) ===
-    // ALLE velden #[serde(skip)] → runtime-only. Reden: bincode is positioneel en
-    // snapshot-migratie is duur. Ring-buffers herbouwen zich bij runtime (~minuten).
-    // Atomic counters voor provenance zitten in AppState (geen state-struct nodig).
-
-    /// v2.6.8 P2.2: Ablation-toggle voor concept-priors.
-    #[serde(skip, default = "default_true_skip")]
-    pub concept_priors_enabled: bool,
-    /// v2.6.8 P2.2: Auto-restore tick — als 0, permanent; anders herstellen bij `tick >= deze`.
-    #[serde(skip)]
-    pub concept_priors_disabled_until_tick: u64,
-
-    /// v2.6.8 P2.1: Ring-buffer (cap 64) met concept-clustering audit data
-    #[serde(skip)]
-    pub concept_audit_log: Vec<ConceptAudit>,
-
-    /// v2.6.8 P2.3: Ring-buffer (cap 64) met self-EP + WM-seq effect-metingen
-    #[serde(skip)]
-    pub self_ep_audit: Vec<SelfEpAudit>,
-
-    /// v2.6.8 P1.3: Self-model coherentie metrics (EMA, niet geserialiseerd — snel herberekenbaar)
-    #[serde(skip)]
-    pub self_metrics: SelfMetrics,
-
-    /// v2.6.8 P1.2: cumulatieve provenance counters (runtime-only; AppState heeft de primary atomics)
-    #[serde(skip)]
-    pub provenance_counts: [u64; 6],
+    // (v2.6.8 velden staan aan EINDE van struct na n_output — zie onder)
 
     // === v2.0: Bewustzijns-metrieken (veld-level) ===
 
@@ -669,6 +643,25 @@ pub struct Field {
     /// Aantal output-punten
     #[serde(default)]
     pub n_output: usize,
+
+    // === v2.6.8: Bewijs-architectuur velden — ALLE runtime-only (serde skip) ===
+    // Bincode 1.x negeert #[serde(default)] bij EOF (positioneel format).
+    // Snapshot migratie is daarom ALLE-OF-NIETS: volledige write + read van alle velden,
+    // of helemaal niet serialiseren. Audit-data is voldoende om bij reboot te herbouwen
+    // (teacher_audit binnen uren, concept_audit binnen 2000 ticks, self_ep_audit binnen 100 ticks).
+
+    #[serde(skip, default = "default_true")]
+    pub concept_priors_enabled: bool,
+    #[serde(skip)]
+    pub concept_priors_disabled_until_tick: u64,
+    #[serde(skip)]
+    pub concept_audit_log: Vec<ConceptAudit>,
+    #[serde(skip)]
+    pub self_ep_audit: Vec<SelfEpAudit>,
+    #[serde(skip)]
+    pub self_metrics: SelfMetrics,
+    #[serde(skip)]
+    pub provenance_counts: [u64; 6],
 }
 
 fn default_dim() -> usize { DIM }

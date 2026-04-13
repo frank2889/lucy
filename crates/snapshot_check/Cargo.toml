@@ -1,0 +1,14 @@
+[package]
+name = "snapshot_check"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lucy-state = { path = "../lucy-state" }
+bincode = { workspace = true }
+serde = { workspace = true }
+crc32fast = { workspace = true }
+
+[[bin]]
+name = "snapshot_check"
+path = "src/main.rs"
