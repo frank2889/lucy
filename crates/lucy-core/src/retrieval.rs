@@ -17,8 +17,11 @@
 use lucy_state::DIM;
 use serde::{Deserialize, Serialize};
 
-const MAX_ENTRIES: usize = 100_000; // v0.9+: 10× meer geheugen (~120MB)
+// v2.6.7 E4: cap verlaagd van 100K → 15K. Intelligentie zit in weights, niet in entries.
+const MAX_ENTRIES: usize = 15_000;
 const N_BUCKETS: usize = 256; // v0.9+: meer buckets voor snellere lookup
+/// v2.6.7 E4: value-truncate op inslag — reduceert ruis, bespaart geheugen.
+const MAX_VALUE_LEN: usize = 500;
 
 /// Lucy's episodisch geheugen — feiten die ze heeft gelezen
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,6 +33,15 @@ pub struct RetrievalStore {
     /// Bucket index: hash van eerste dims → indices in keys/values
     #[serde(skip)]
     buckets: Vec<Vec<usize>>,
+    /// v2.6.7 E4: hoe vaak deze entry is opgehaald. Hoog = waardevol.
+    #[serde(default)]
+    hits: Vec<u32>,
+    /// v2.6.7 E4: tick van laatste access. Voor recency in eviction-score.
+    #[serde(default)]
+    last_access_tick: Vec<u64>,
+    /// v2.6.7 E4: reward-signaal bij inslag (satisfaction_delta). Goed → blijft.
+    #[serde(default)]
+    learning_value: Vec<f32>,
 }
 
 impl RetrievalStore {
@@ -38,25 +50,69 @@ impl RetrievalStore {
             keys: Vec::new(),
             values: Vec::new(),
             buckets: vec![Vec::new(); N_BUCKETS],
+            hits: Vec::new(),
+            last_access_tick: Vec::new(),
+            learning_value: Vec::new(),
         }
     }
 
-    /// Sla een feit op: embedding + tekst
+    /// v2.6.7 E4: repair parallel-vectoren bij load — oude snapshots hebben ze niet
+    pub fn ensure_parallel_vectors(&mut self, current_tick: u64) {
+        let n = self.keys.len();
+        if self.hits.len() != n { self.hits = vec![1; n]; }
+        if self.last_access_tick.len() != n { self.last_access_tick = vec![current_tick; n]; }
+        if self.learning_value.len() != n { self.learning_value = vec![0.0; n]; }
+    }
+
+    /// Sla een feit op: embedding + tekst (met optioneel learning_value)
     pub fn insert(&mut self, embedding: &[f32; DIM], text: &str) {
+        self.insert_with_value(embedding, text, 0.0, 0);
+    }
+
+    /// v2.6.7 E4: insert met learning_value + tick voor score-based eviction
+    pub fn insert_with_value(&mut self, embedding: &[f32; DIM], text: &str, learning_value: f32, current_tick: u64) {
         // Skip te korte teksten
         if text.len() < 10 { return; }
 
-        // FIFO: als vol, verwijder oudste
+        // Zorg dat parallel-vectoren synchroon zijn
+        self.ensure_parallel_vectors(current_tick);
+
+        // v2.6.7 E4: score-based eviction (vervangt FIFO). Laagste score verdwijnt.
+        // score = hits / (tick - last_access + 1) + learning_value
         if self.keys.len() >= MAX_ENTRIES {
-            self.keys.remove(0);
-            self.values.remove(0);
-            // Rebuild buckets (goedkoop bij FIFO)
+            let mut worst_idx = 0usize;
+            let mut worst_score = f32::MAX;
+            for i in 0..self.keys.len() {
+                let recency = (current_tick.saturating_sub(self.last_access_tick[i]) + 1) as f32;
+                let score = (self.hits[i] as f32) / recency + self.learning_value[i];
+                if score < worst_score {
+                    worst_score = score;
+                    worst_idx = i;
+                }
+            }
+            self.keys.remove(worst_idx);
+            self.values.remove(worst_idx);
+            self.hits.remove(worst_idx);
+            self.last_access_tick.remove(worst_idx);
+            self.learning_value.remove(worst_idx);
             self.rebuild_buckets();
         }
 
+        // Truncate value naar MAX_VALUE_LEN chars (reduceert ruis)
+        let stored_text = if text.len() > MAX_VALUE_LEN {
+            // Neem eerste 500 chars maar kap op woord-grens
+            let cutoff = text.char_indices().take(MAX_VALUE_LEN).last().map(|(i, _)| i).unwrap_or(MAX_VALUE_LEN);
+            text[..cutoff].to_string()
+        } else {
+            text.to_string()
+        };
+
         let idx = self.keys.len();
         self.keys.push(embedding.to_vec());
-        self.values.push(text.to_string());
+        self.values.push(stored_text);
+        self.hits.push(1);
+        self.last_access_tick.push(current_tick);
+        self.learning_value.push(learning_value.clamp(-1.0, 1.0));
 
         // Voeg toe aan bucket
         let bucket = self.hash_to_bucket(embedding);
@@ -65,7 +121,48 @@ impl RetrievalStore {
         }
     }
 
-    /// Zoek top-K meest relevante feiten voor een query
+    /// v2.6.7 E4: retrieve_mut — update hits/last_access voor gebruikte entries.
+    /// Hoger-gebruikte entries overleven eviction langer.
+    pub fn retrieve_mut(&mut self, query: &[f32; DIM], top_k: usize, current_tick: u64) -> Vec<(f32, String)> {
+        if self.keys.is_empty() { return Vec::new(); }
+        self.ensure_parallel_vectors(current_tick);
+
+        let query_bucket = self.hash_to_bucket(query);
+        let search_buckets = [
+            query_bucket,
+            (query_bucket + 1) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 1) % N_BUCKETS,
+            (query_bucket + 2) % N_BUCKETS,
+            (query_bucket + N_BUCKETS - 2) % N_BUCKETS,
+        ];
+        let mut candidates: Vec<usize> = Vec::new();
+        for &b in &search_buckets {
+            if b < self.buckets.len() {
+                candidates.extend_from_slice(&self.buckets[b]);
+            }
+        }
+        if candidates.len() < top_k * 2 {
+            candidates = (0..self.keys.len()).collect();
+        }
+        let mut scored: Vec<(f32, usize)> = candidates.iter()
+            .filter(|&&idx| idx < self.keys.len())
+            .map(|&idx| (cosine_sim(query, &self.keys[idx]), idx))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+
+        // Update hits/last_access voor gekozen entries
+        let result: Vec<(f32, String)> = scored.into_iter()
+            .map(|(sim, idx)| {
+                self.hits[idx] = self.hits[idx].saturating_add(1);
+                self.last_access_tick[idx] = current_tick;
+                (sim, self.values[idx].clone())
+            })
+            .collect();
+        result
+    }
+
+    /// Zoek top-K meest relevante feiten voor een query (read-only, legacy API)
     pub fn retrieve(&self, query: &[f32; DIM], top_k: usize) -> Vec<(f32, &str)> {
         if self.keys.is_empty() { return Vec::new(); }
 

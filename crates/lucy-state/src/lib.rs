@@ -501,6 +501,10 @@ pub struct Field {
     /// Hoeveel opeenvolgende adapt_dynamics calls het veld identiek bleef
     #[serde(default)]
     pub boredom_streak: u32,
+    /// v2.6.7 B3: geset door adapt_dynamics als het veld traag/bored is.
+    /// main.rs gebruikt dit als trigger voor extra consolidation-replay (dream).
+    #[serde(default)]
+    pub is_sluggish_flag: bool,
 
     // === v0.9: Attention + Working Memory ===
 
@@ -523,6 +527,20 @@ pub struct Field {
     /// Ticks sinds laatste write per slot
     #[serde(skip)]
     pub wm_ages: Vec<u32>,
+
+    // === v2.6.7: Depth-3 concept-clustering ===
+
+    /// Concept-centroids — k-means clustering van depth-3 phi-vectoren.
+    /// Vec<Vec<f32>> (elk binnenste Vec heeft lengte DIM) voor serde-compat.
+    /// Gebruikt in hierarchical_prediction als top-down prior voor depth-2 punten.
+    /// Grow/shrink via compute_concept_centroids() elke consolidation_interval.
+    #[serde(default)]
+    pub concept_centroids: Vec<Vec<f32>>,
+
+    /// Cluster-assignment per depth-3 punt (index = point_id, value = centroid_idx).
+    /// Niet geserialiseerd — wordt elke cycle opnieuw berekend.
+    #[serde(skip)]
+    pub concept_assignments: Vec<u16>,
 
     // === v2.0: Bewustzijns-metrieken (veld-level) ===
 
@@ -961,11 +979,14 @@ impl Field {
             last_boredom_tension: 0.0,
             last_boredom_curiosity: 0.0,
             boredom_streak: 0,
+            is_sluggish_flag: false,
             attn_weights: None,
             attn_context: Vec::new(),
             working_memory: Vec::new(),
             wm_gates: Vec::new(),
             wm_ages: Vec::new(),
+            concept_centroids: Vec::new(),
+            concept_assignments: Vec::new(),
             adaptive: AdaptiveParams::default(),
             temporal_history: Vec::new(),
             causal_log: Vec::new(),

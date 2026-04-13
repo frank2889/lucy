@@ -73,6 +73,56 @@ impl HttpClient {
         })
     }
 
+    /// GET met custom headers (voor APIs die auth-tokens verwachten)
+    pub async fn get_with_headers(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
+        let start = std::time::Instant::now();
+        let mut req = self.client.get(url);
+        for (k, v) in extra_headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+
+        let status = resp.status().as_u16();
+        let headers: HashMap<String, String> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if body.len() > 5_000_000 {
+            return Err(format!("Response te groot: {} bytes (max 5MB)", body.len()));
+        }
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        Ok(HttpResponse { status, headers, body, latency_ms })
+    }
+
+    /// POST met custom headers (voor APIs zoals DDG AI Chat die vqd-tokens gebruiken)
+    pub async fn post_with_headers(&self, url: &str, body: &[u8], content_type: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
+        let start = std::time::Instant::now();
+        let mut req = self.client.post(url)
+            .header("Content-Type", content_type)
+            .body(body.to_vec());
+        for (k, v) in extra_headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+
+        let status = resp.status().as_u16();
+        let headers: HashMap<String, String> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if body.len() > 5_000_000 {
+            return Err(format!("Response te groot: {} bytes (max 5MB)", body.len()));
+        }
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        Ok(HttpResponse { status, headers, body, latency_ms })
+    }
+
     /// POST request — Lucy's handen naar het internet
     pub async fn post(&self, url: &str, body: &[u8], content_type: &str) -> Result<HttpResponse, String> {
         let start = std::time::Instant::now();

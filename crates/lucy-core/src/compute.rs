@@ -172,6 +172,9 @@
             if !point.phi[d].is_finite() {
                 point.phi[d] = 0.0;
             }
+            // v2.6.7 A1: Magnitude clamp — voorkomt explosie cascade (phi → phi_var → KL → F → tension → ∞)
+            // Was alleen in apply_layer_norm elke 10 ticks — te laat.
+            point.phi[d] = point.phi[d].clamp(-field.clamp_range, field.clamp_range);
         }
 
         // Layer norm verplaatst naar apply_layer_norm() — wordt elke 10 ticks aangeroepen
@@ -396,7 +399,10 @@
         // │ Tension moet het HUIDIGE signaal reflecteren.           │
         // └─────────────────────────────────────────────────────────┘
         let basal_tension = n_couplings * 0.001 + 0.001;
-        point.tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
+        // v2.6.7 A2: anti-Inf safety clamp (niet gedragslimiet) — was geëxplodeerd naar 1e34
+        let raw_tension = free_energy + compute_cost + basal_tension;
+        let safe_tension = if raw_tension.is_finite() { raw_tension } else { basal_tension };
+        point.tension = safe_tension.clamp(basal_tension, f32::MAX / 1e6);
         point.tension_ema = ema_decay * old_tension_ema + (1.0 - ema_decay) * point.tension;
 
         // ┌─────────────────────────────────────────────────────────┐
@@ -621,6 +627,8 @@
             + (avg_curiosity < 0.1) as u8
             + (avg_pred_error < 0.02) as u8;
         let is_sluggish = !is_dead && sluggish_signals >= 2;
+        // v2.6.7 B3: publiek in field zodat main.rs kan triggeren op dream-replay
+        field.is_sluggish_flag = is_sluggish;
 
         // SAFEGUARD LEVEL 3 (v2.6.6): BOREDOM ATTRACTOR — tension/curiosity zitten vast
         // Lucy bleef 500K ticks hangen op tension=0.0141, curiosity=0.1000 — fixed point.
@@ -665,11 +673,11 @@
         field.clamp_range = (max_phi * 2.0).clamp(1.0, 5.0);
 
         // noise_amplitude: CRITICAL voor veld-activiteit
-        // v2.6.6: bored veld krijgt forse kick (0.12), sluggish boost naar 0.08
-        // was 0.02 → te zwak, Lucy bleef 500K ticks vast op tension=0.0141
-        field.noise_amplitude = if is_dead { 0.03 }
-            else if is_bored { 0.12 }
-            else if is_sluggish { 0.08 }
+        // v2.6.7 A4: veld-relatief (was vaste 0.12/0.08) — schaalt automatisch met field.clamp_range
+        // zodat boredom-kick niet cascadeert bij kleine clamp_range en niet te zwak is bij grote.
+        field.noise_amplitude = if is_dead { (field.clamp_range * 0.03).clamp(0.005, 0.1) }
+            else if is_bored { (field.clamp_range * 0.04).clamp(0.005, 0.1) }
+            else if is_sluggish { (field.clamp_range * 0.02).clamp(0.005, 0.08) }
             else { (avg_tension * 0.5).clamp(0.005, 0.03) };
 
         if is_dead {
@@ -711,11 +719,15 @@
                 let flags = field.points[id].flags;
                 if flags & (FLAG_INPUT | FLAG_OUTPUT) != 0 { continue; }
                 // Random phi kick — kleine amplitude maar gericht, niet breed
+                // v2.6.7 A3: magnitude veld-relatief (was 0.3 vast → +-4.8 totaal → cascade)
+                let kick_amp = field.clamp_range * 0.05;
                 for d in 0..DIM {
                     let mut hh = DefaultHasher::new();
                     (seed, i, d).hash(&mut hh);
                     let r = ((hh.finish() as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                    field.points[id].phi[d] += r * 0.3;
+                    field.points[id].phi[d] += r * kick_amp;
+                    // Clamp direct na kick zodat we niet alsnog uit range raken
+                    field.points[id].phi[d] = field.points[id].phi[d].clamp(-field.clamp_range, field.clamp_range);
                 }
                 kicked += 1;
             }
@@ -993,6 +1005,8 @@
                 // v2.4: sparsity penalty conditioneel — alleen boven ruis-niveau
                 let sparse_pen = if point.phi[d].abs() > field.noise_amplitude { alpha * point.phi[d].signum() } else { 0.0 };
                 new_phi[d] = point.phi[d] - lambda * grad[d] - sparse_pen;
+                // v2.6.7 A1: NaN guard vóór clamp (NaN.clamp geeft NaN)
+                if !new_phi[d].is_finite() { new_phi[d] = 0.0; }
                 new_phi[d] = new_phi[d].clamp(-clamp_range, clamp_range);
             }
 
@@ -1027,7 +1041,10 @@
             let free_energy = kl_div + blanket_surprise;
 
             let basal_tension = n_couplings as f32 * 0.001 + 0.001;
-            let tension = (free_energy + compute_cost + basal_tension).max(basal_tension);
+            // v2.6.7 A2: anti-Inf safety clamp
+            let raw_tension = free_energy + compute_cost + basal_tension;
+            let safe_tension = if raw_tension.is_finite() { raw_tension } else { basal_tension };
+            let tension = safe_tension.clamp(basal_tension, f32::MAX / 1e6);
             let tension_ema = ema_decay * point.tension_ema + (1.0 - ema_decay) * tension;
 
             // dF/dt — de temporele afgeleide waaruit emoties volgen
@@ -1834,6 +1851,43 @@
         tick_all(field);
 
         field.reflection_count += 1;
+
+        // === v2.6.7 B1: SELF-EP auto-encoder ===
+        // Lucy traint zichzelf om haar eigen staat te voorspellen.
+        // Pure weight-update via micro_ep, geen storage. Hier groeit zelfbewustzijn.
+        let s = self_state_input(field);
+        // Check dat self-state niet degenerated is
+        let s_norm: f32 = s.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if s_norm.is_finite() && s_norm > 0.01 {
+            micro_ep(field, &[s], &[s]);
+        }
+
+        // === v2.6.7 B2: WM-SEQUENCE TRAINING ===
+        // Leert temporele overgangen uit eigen ervaring: WM[i] → WM[i+1].
+        // Alleen bij voldoende gevulde WM slots (tension_gate + enough history).
+        if !field.working_memory.is_empty() && field.wm_gates.len() == field.working_memory.len() {
+            let wm_len = field.working_memory.len();
+            // Pak 4 willekeurige opeenvolgende slot-paren, gebruik reflection_count als seed
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let seed = field.reflection_count;
+            for i in 0..4 {
+                let mut h = DefaultHasher::new();
+                (seed, i).hash(&mut h);
+                let start = (h.finish() as usize) % wm_len.saturating_sub(1).max(1);
+                let next = (start + 1) % wm_len;
+                // Alleen trainen als beide slots actief waren (gate > threshold)
+                if field.wm_gates[start] > 0.05 && field.wm_gates[next] > 0.05 {
+                    let src = field.working_memory[start];
+                    let tgt = field.working_memory[next];
+                    let src_norm: f32 = src.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let tgt_norm: f32 = tgt.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if src_norm.is_finite() && src_norm > 0.01 && tgt_norm.is_finite() && tgt_norm > 0.01 {
+                        micro_ep(field, &[src], &[tgt]);
+                    }
+                }
+            }
+        }
     }
 
     // === v0.7: EDGE OF CHAOS — Spectral radius monitoring + auto-tuning ===
@@ -1938,6 +1992,13 @@
         // Hoge coherentie = het systeem is gesynchroniseerd = top-down feedback mag sterker
         // Was: vaste 0.01 (te zwak voor recurrent processing, Lamme 2006)
         let hier_strength = (0.02 + 0.18 * field.oscillation_coherence).min(0.2); // 0.02-0.20
+
+        // v2.6.7 E2: concept-centroids als extra top-down prior voor depth-2 punten
+        // Als er centroids bestaan, vind de dichtste per punt en gebruik als extra bias.
+        // Stroom: sensory (0) → processing (1) → concept-grounded (2) → abstract (3+centroids)
+        let has_centroids = !field.concept_centroids.is_empty();
+        let centroid_strength = hier_strength * 0.5; // helft van laag-bias — concept is secundair
+
         for i in 0..field.active_set.len() {
             let id = field.active_set[i];
             let p = &field.points[id as usize];
@@ -1946,13 +2007,135 @@
             if depth_count[d - 1] == 0 { continue; }
 
             // Prediction target = gemiddelde van laag eronder
-            let target = &depth_sum[d - 1];
+            let target = depth_sum[d - 1];
+
+            // v2.6.7 E2: voor depth-2 punten, vind dichtste concept-centroid (cosine)
+            let concept_target: Option<&Vec<f32>> = if has_centroids && d == 2 {
+                let phi = &p.phi;
+                let mut best_idx = 0usize;
+                let mut best_sim = f32::NEG_INFINITY;
+                for (ci, cent) in field.concept_centroids.iter().enumerate() {
+                    if cent.len() != DIM { continue; }
+                    // Cosine (phi has unit-ish norm na layer_norm, cent ook)
+                    let mut dot = 0.0f32;
+                    for dim in 0..DIM { dot += phi[dim] * cent[dim]; }
+                    if dot > best_sim {
+                        best_sim = dot;
+                        best_idx = ci;
+                    }
+                }
+                field.concept_centroids.get(best_idx)
+            } else { None };
+
             let point = &mut field.points[id as usize];
             for dim in 0..DIM {
                 // Zachte bias: prediction schuift richting target van lagere laag
                 point.prediction[dim] += hier_strength * (target[dim] - point.prediction[dim]);
+                // Extra concept-prior voor depth-2
+                if let Some(ct) = concept_target {
+                    point.prediction[dim] += centroid_strength * (ct[dim] - point.prediction[dim]);
+                }
             }
         }
+    }
+
+    // === v2.6.7 E1: DEPTH-3 CONCEPT-CLUSTERING ===
+
+    /// Mini-batch k-means over depth-3 phi-vectoren → concept-centroids.
+    /// Centroids groeien/krimpen adaptief: k = clamp(n_depth3 / 100, 32, 256).
+    /// Update via EMA (niet volledige hercomputatie) — stabieler over tijd.
+    /// Trigger: elke field.consolidation_interval (~elke 200-5000 ticks adaptief).
+    ///
+    /// Waarom: depth-3 = ~14.6K abstracte punten. Clusteren compresseert kennis
+    /// naar ~100-200 semantische concept-centroids. Die dienen als top-down prior
+    /// in hierarchical_prediction (E2). Intelligentie zit in de structuur, niet in
+    /// meer entries.
+    pub fn compute_concept_centroids(field: &mut Field) {
+        // Verzamel depth-3 phi's (alleen actieve, finite)
+        let depth3_phis: Vec<[f32; DIM]> = field.active_set.iter()
+            .filter_map(|&id| {
+                let p = &field.points[id as usize];
+                if p.depth == 3 && p.phi[0].is_finite() {
+                    Some(p.phi)
+                } else { None }
+            })
+            .collect();
+
+        if depth3_phis.len() < 64 {
+            return; // te weinig data voor zinvolle clustering
+        }
+
+        // Adaptieve k
+        let k = (depth3_phis.len() / 100).clamp(32, 256);
+
+        // Init centroids: als we er al hebben, hergebruik (EMA update).
+        // Anders: neem k willekeurige phi's als start.
+        if field.concept_centroids.is_empty() || field.concept_centroids.len() != k {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            field.concept_centroids = (0..k).map(|i| {
+                let mut h = DefaultHasher::new();
+                (field.tick, i).hash(&mut h);
+                let idx = (h.finish() as usize) % depth3_phis.len();
+                depth3_phis[idx].to_vec()
+            }).collect();
+        }
+
+        // Mini-batch k-means: 3 passes is genoeg met EMA
+        let mut assignments = vec![0u16; depth3_phis.len()];
+        for _pass in 0..3 {
+            // Assign
+            for (i, phi) in depth3_phis.iter().enumerate() {
+                let mut best = 0usize;
+                let mut best_sim = f32::NEG_INFINITY;
+                for (ci, cent) in field.concept_centroids.iter().enumerate() {
+                    let mut dot = 0.0f32;
+                    for d in 0..DIM { dot += phi[d] * cent[d]; }
+                    if dot > best_sim {
+                        best_sim = dot;
+                        best = ci;
+                    }
+                }
+                assignments[i] = best as u16;
+            }
+            // Update centroids (EMA: 70% oud, 30% nieuwe cluster-gemiddelde)
+            let mut sums: Vec<[f32; DIM]> = vec![[0.0f32; DIM]; k];
+            let mut counts = vec![0u32; k];
+            for (i, phi) in depth3_phis.iter().enumerate() {
+                let ci = assignments[i] as usize;
+                counts[ci] += 1;
+                for d in 0..DIM { sums[ci][d] += phi[d]; }
+            }
+            for ci in 0..k {
+                if counts[ci] > 0 {
+                    let inv = 1.0 / counts[ci] as f32;
+                    for d in 0..DIM {
+                        let new_mean = sums[ci][d] * inv;
+                        field.concept_centroids[ci][d] = 0.7 * field.concept_centroids[ci][d] + 0.3 * new_mean;
+                    }
+                }
+            }
+        }
+
+        // Sla assignments op (for E3 EWC-boost)
+        field.concept_assignments = vec![u16::MAX; field.points.len()];
+        let mut idx = 0;
+        for &id in field.active_set.iter() {
+            let p = &field.points[id as usize];
+            if p.depth == 3 && p.phi[0].is_finite() {
+                if idx < assignments.len() && (id as usize) < field.concept_assignments.len() {
+                    field.concept_assignments[id as usize] = assignments[idx];
+                }
+                idx += 1;
+            }
+        }
+
+        tracing::info!(
+            k = k,
+            n_points = depth3_phis.len(),
+            tick = field.tick,
+            "Concept-centroids ge-updatet"
+        );
     }
 
     // === v0.7: NEUROMODULATIE — 4 signalen die het hele veld sturen ===
@@ -2790,8 +2973,19 @@
             })
             .collect();
 
+        // v2.6.7 E3: concept-aware importance boost.
+        // Couplings binnen zelfde cluster (depth-3 → depth-3 zelfde concept): ×1.5
+        // Cross-concept couplings: ×0.7. Lucy beschermt haar concept-structuur.
+        let has_assignments = !field.concept_assignments.is_empty();
+
         // Stap 2: bereken per-coupling importance en schrijf terug
         for (idx, eps, neighbors) in &active_data {
+            // Zoek concept van bron-punt (als depth-3)
+            let src_concept: Option<u16> = if has_assignments && *idx < field.concept_assignments.len() {
+                let c = field.concept_assignments[*idx];
+                if c == u16::MAX { None } else { Some(c) }
+            } else { None };
+
             for (ci, neighbor_phi) in neighbors {
                 // Per-coupling gradient: hoe sterk correleert de error met dit verschil?
                 let mut grad = 0.0f32;
@@ -2799,7 +2993,22 @@
                     grad += eps[d] * (field.points[*idx].phi[d] - neighbor_phi[d]);
                 }
                 grad /= DIM as f32;
-                let fisher = grad * grad; // Fisher Information ≈ gradient²
+                let mut fisher = grad * grad; // Fisher Information ≈ gradient²
+
+                // v2.6.7 E3: concept-aware modulatie
+                if let Some(sc) = src_concept {
+                    let tgt_idx = field.points[*idx].couplings[*ci].target as usize;
+                    if tgt_idx < field.concept_assignments.len() {
+                        let tc = field.concept_assignments[tgt_idx];
+                        if tc != u16::MAX {
+                            if tc == sc {
+                                fisher *= 1.5; // intra-concept: bescherm harder
+                            } else {
+                                fisher *= 0.7; // cross-concept: laat makkelijker veranderen
+                            }
+                        }
+                    }
+                }
 
                 let coupling = &mut field.points[*idx].couplings[*ci];
                 // Importance tracking met dynamische rate

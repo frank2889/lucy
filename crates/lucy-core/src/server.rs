@@ -360,6 +360,8 @@ async fn ask_handler(
     let q = question.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_token = cancel.clone();
+    // v2.6.7 E5: bewaar vocab_arc clone voor interactie-log na spawn_blocking
+    let vocab_for_log = vocab_arc.clone();
 
     let query_result = tokio::time::timeout(
         std::time::Duration::from_secs(30), // v2.1: Meer tijd voor query processing
@@ -487,6 +489,26 @@ async fn ask_handler(
         tension = format!("{:.4}", result.final_tension),
         "Lucy answered from field dynamics"
     );
+
+    // v2.6.7 E5: Interactie-log in retrieval store.
+    // (query_embedding, response_text). Future queries dichtbij deze vraag
+    // kunnen Lucy's eigen eerdere antwoorden terugvinden via cosine similarity.
+    // learning_value = 0.5 (neutraal-positief, interacties zijn waardevol).
+    {
+        let question_embs = encoding::encode_text_readonly(&vocab_for_log, &question);
+        if !question_embs.is_empty() {
+            let mut q_emb = [0.0f32; DIM];
+            for e in &question_embs {
+                for d in 0..DIM { q_emb[d] += e[d]; }
+            }
+            let n = question_embs.len() as f32;
+            for d in 0..DIM { q_emb[d] /= n; }
+            let combined = format!("V: {}\nA: {}", question, result.answer);
+            let current_tick = state.field_handle.snapshot.load().tick;
+            let mut ret = state.retrieval.write().await;
+            ret.insert_with_value(&q_emb, &combined, 0.5, current_tick);
+        }
+    }
 
     Json(json!({
         "answer": result.answer,

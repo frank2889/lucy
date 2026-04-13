@@ -70,6 +70,14 @@ pub struct Explorer {
     pub tokens_processed: u64,
     /// Woorden die Lucy interessant vindt — O(1) lookup
     pub interests: HashSet<String>,
+    /// v2.6.7 D2: Reward-EMA per domein — Lucy leert zelf welke bronnen nuttig zijn.
+    /// Update na elke learn_from_text met satisfaction_delta.
+    #[serde(default)]
+    pub domain_score: HashMap<String, f32>,
+    /// v2.6.7 C2: Per-provider success rate EMA voor AI-teacher rotatie.
+    /// Key = provider-naam, value = EMA van (satisfaction_delta > 0).
+    #[serde(default)]
+    pub provider_score: HashMap<String, f32>,
 }
 
 impl Explorer {
@@ -92,14 +100,27 @@ impl Explorer {
     }
 
     /// v2.5: Diversifieer de frontier — voorkom domein-monoculture
-    /// Elk domein mag maximaal 20% van de frontier beslaan.
-    /// Over-vertegenwoordigde domeinen worden getrimd.
+    /// v2.6.7 D1: Strenger als een domein > 50% van visited is (monocultuur-alarm).
+    ///   Normaal: max 20% per domein.
+    ///   Monocultuur: max 10% per domein (knelt de dominante bron af).
     pub fn diversify_frontier(&mut self) {
         if self.frontier.len() < 20 { return; }
 
-        let max_per_domain = self.frontier.len() / 5; // max 20%
+        // v2.6.7 D1: Detecteer monocultuur in visited
+        let mut visited_counts: HashMap<String, usize> = HashMap::new();
+        for v in &self.visited {
+            *visited_counts.entry(extract_domain(v)).or_default() += 1;
+        }
+        let visited_total = self.visited.len().max(1);
+        let top_visited_frac = visited_counts.values()
+            .max().copied().unwrap_or(0) as f32 / visited_total as f32;
+        let monoculture = top_visited_frac > 0.5;
+
+        let divisor = if monoculture { 10 } else { 5 }; // 10% bij monocultuur, 20% normaal
+        let max_per_domain = (self.frontier.len() / divisor).max(1);
         let mut domain_counts: HashMap<String, usize> = HashMap::new();
         let mut keep: VecDeque<String> = VecDeque::new();
+        let pre_len = self.frontier.len();
 
         for url in self.frontier.drain(..) {
             let domain = extract_domain(&url);
@@ -108,14 +129,34 @@ impl Explorer {
                 *count += 1;
                 keep.push_back(url);
             }
-            // Anders: URL wordt gedropt (te veel van dit domein)
         }
 
-        let trimmed = self.frontier.len().saturating_sub(keep.len());
+        let trimmed = pre_len.saturating_sub(keep.len());
         self.frontier = keep;
         if trimmed > 0 {
-            tracing::info!(trimmed, remaining = self.frontier.len(), "Frontier gediversifieerd");
+            tracing::info!(
+                trimmed, remaining = self.frontier.len(),
+                monoculture, top_visited_frac = format!("{:.2}", top_visited_frac),
+                "Frontier gediversifieerd"
+            );
         }
+    }
+
+    /// v2.6.7 D2: Update domain reward-EMA na learn_from_text.
+    /// satisfaction_delta > 0 = pagina hielp Lucy; < 0 = ruis.
+    /// Lucy leert zelf welke bronnen nuttig zijn zonder blacklist.
+    pub fn update_domain_score(&mut self, url: &str, satisfaction_delta: f32) {
+        let domain = extract_domain(url);
+        let entry = self.domain_score.entry(domain).or_insert(0.0);
+        // EMA: 90% history, 10% nieuw signaal
+        *entry = 0.9 * *entry + 0.1 * satisfaction_delta.clamp(-1.0, 1.0);
+    }
+
+    /// v2.6.7 D2: Score-based tie-breaker voor next_url.
+    /// Hoger = beter. Nul als onbekend domein (neutral).
+    pub fn domain_value(&self, url: &str) -> f32 {
+        let domain = extract_domain(url);
+        self.domain_score.get(&domain).copied().unwrap_or(0.0)
     }
 }
 
@@ -127,6 +168,8 @@ impl Explorer {
             pages_read: 0,
             tokens_processed: 0,
             interests: HashSet::new(),
+            domain_score: HashMap::new(),
+            provider_score: HashMap::new(),
         }
     }
 
@@ -158,14 +201,19 @@ impl Explorer {
             *domain_counts.entry(domain).or_default() += 1;
         }
 
-        // Zoek de frontier-URL waarvan het domein het MINST bezocht is
+        // v2.6.7 D2: combined score — novelty (minst bezocht) + domain reward (satisfaction-EMA)
+        // Lucy kiest domeinen die én nieuw zijn én waar ze in het verleden van leerde.
         let mut best_idx = 0;
-        let mut best_score = usize::MAX;
+        let mut best_score = f32::NEG_INFINITY;
         for (i, url) in self.frontier.iter().enumerate() {
             let domain = extract_domain(url);
-            let count = domain_counts.get(&domain).copied().unwrap_or(0);
-            if count < best_score {
-                best_score = count;
+            let count = domain_counts.get(&domain).copied().unwrap_or(0) as f32;
+            let novelty = 1.0 / (count + 1.0); // hoger = minder bezocht
+            let reward = self.domain_score.get(&domain).copied().unwrap_or(0.0);
+            // Totaalscore: novelty dominant, reward als tie-breaker (×0.2)
+            let score = novelty + 0.2 * reward;
+            if score > best_score {
+                best_score = score;
                 best_idx = i;
             }
         }
@@ -174,7 +222,18 @@ impl Explorer {
     }
 
     /// Haal een verse URL uit sources.txt (de diverse bronnen)
+    /// v2.6.7 D3: trek sources.txt automatisch af zodra Lucy genoeg domeinen heeft ontdekt.
+    /// Bij 50+ unieke visited-domeinen: 50% kans om sources.txt te skippen → generate_curiosity_url wint.
     fn fresh_source_url(&mut self) -> Option<String> {
+        let unique_domains: std::collections::HashSet<String> = self.visited.iter()
+            .map(|u| extract_domain(u)).collect();
+        if unique_domains.len() >= 50 {
+            use rand::Rng;
+            let mut rng = rand::rng();
+            if rng.random_range(0..2) == 0 {
+                return None; // Laat generate_curiosity_url het overnemen
+            }
+        }
         let path = std::path::Path::new("data/sources.txt");
         if !path.exists() { return None; }
         let content = std::fs::read_to_string(path).ok()?;

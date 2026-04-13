@@ -91,6 +91,7 @@ mod thinker;
 mod field_handle;
 mod backup;
 mod poster;
+mod ai_teacher;
 mod replica_manager;
 mod federation;
 mod server;
@@ -394,6 +395,11 @@ async fn main() {
     let (explore_url_tx, mut explore_url_rx) = mpsc::channel::<String>(16);
     let (explore_result_tx, mut explore_result_rx) = mpsc::channel::<ExploreResult>(16);
 
+    // v2.6.7 C1: AI-teacher channels — non-blocking pattern zoals explore
+    // Request: (question, provider). Response: (provider, Result<answer_text>).
+    let (teacher_req_tx, mut teacher_req_rx) = mpsc::channel::<(String, String)>(4);
+    let (teacher_resp_tx, mut teacher_resp_rx) = mpsc::channel::<(String, Result<String, String>)>(4);
+
     // v2.0: Training thread channels
     let (train_chunk_tx, train_chunk_rx) = std::sync::mpsc::channel::<lucy_state::TrainingChunk>();
     let (weight_delta_tx, weight_delta_rx) = std::sync::mpsc::channel::<Vec<WeightDelta>>();
@@ -441,6 +447,31 @@ async fn main() {
             };
 
             let _ = explore_result_tx.send(ExploreResult { url, body, status }).await;
+        }
+    });
+
+    // === v2.6.7 C1: AI-teacher task — niet-blocking DDG AI Chat calls ===
+    tokio::spawn(async move {
+        let http = lucy_io::http::HttpClient::new();
+        while let Some((question, provider)) = teacher_req_rx.recv().await {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                async {
+                    match provider.as_str() {
+                        "ddg_chat" => ai_teacher::query_ddg_chat(&http, &question).await,
+                        "ddg_lite" => ai_teacher::query_ddg_lite(&http, &question).await,
+                        other => Err(format!("unknown provider: {}", other)),
+                    }
+                }
+            ).await;
+
+            let answer = match result {
+                Ok(Ok(a)) => Ok(a),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err("timeout".to_string()),
+            };
+
+            let _ = teacher_resp_tx.send((provider, answer)).await;
         }
     });
 
@@ -876,6 +907,24 @@ async fn main() {
                     compute::compute_expected_free_energy(&mut field);    // Active Inference EFE
                     compute::anti_hebbian_decorrelation(&mut field);
                     nan_check(&field, "after_consciousness_metrics");
+
+                    // v2.6.7 B3: Extra dream-replay bij traag veld (consolidatie zonder nieuwe input)
+                    // Hergebruikt bestaand replay-systeem; geen nieuwe infrastructuur.
+                    if field.is_sluggish_flag {
+                        if let Ok(mut replay) = shared.replay.try_write() {
+                            let _ = replay.replay_one(&mut field);
+                            let _ = replay.replay_one(&mut field);
+                            tracing::trace!(tick = field.tick, "dream_replay: 2× bij sluggish veld");
+                        }
+                    }
+                }
+
+                // v2.6.7 E1: Depth-3 concept-clustering (mini-batch k-means + EMA update)
+                // Elke 2000 ticks (zwaar, parallel via rayon intern). Feed top-down priors
+                // naar hierarchical_prediction in E2 en EWC importance in E3.
+                if tick > 0 && tick % 2000 == 0 {
+                    compute::compute_concept_centroids(&mut field);
+                    nan_check(&field, "after_concept_centroids");
                 }
 
                 // v2.6: Synaptic homeostasis — intelligent vergeten (Tononi & Cirelli 2006)
@@ -932,6 +981,29 @@ async fn main() {
             if tick % 100 == 0 && field.last_thought.is_some() {
                 compute::reflect_tick(&mut field);
                 nan_check(&field, "after_reflect");
+
+                // v2.6.7 E5: Self-state archive in retrieval store (alleen elke 500 ticks,
+                // anders explodeert de store). Dit bouwt een zelfmodel op uit eigen ervaring.
+                if tick % 500 == 0 {
+                    let s = compute::self_state_input(&field);
+                    let s_norm: f32 = s.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if s_norm.is_finite() && s_norm > 0.01 {
+                        let snippet = format!(
+                            "ik_ben[tick={} tension={:.3} curiosity={:.3} satisfaction={:.3} frustration={:.3} dopamine={:.3} phi={:.4} refl={}]",
+                            field.tick,
+                            field.active_set.iter().map(|&id| field.points[id as usize].tension).sum::<f32>() / field.active_set.len().max(1) as f32,
+                            field.active_set.iter().map(|&id| field.points[id as usize].curiosity).sum::<f32>() / field.active_set.len().max(1) as f32,
+                            field.active_set.iter().map(|&id| field.points[id as usize].satisfaction).sum::<f32>() / field.active_set.len().max(1) as f32,
+                            field.active_set.iter().map(|&id| field.points[id as usize].frustration).sum::<f32>() / field.active_set.len().max(1) as f32,
+                            field.dopamine,
+                            field.integrated_info_avg,
+                            field.reflection_count,
+                        );
+                        if let Ok(mut ret) = shared.retrieval.try_write() {
+                            ret.insert_with_value(&s, &snippet, 0.3, tick);
+                        }
+                    }
+                }
             }
 
             // 2b. Exploratie-ruis
@@ -1122,6 +1194,76 @@ async fn main() {
             }
         }
 
+        // === v2.6.7 C1: AI-teacher cycle (non-blocking) ===
+        // Emit request bij interval-trigger. Response komt terug via andere channel.
+        if tick > 0 && tick % field.teacher_interval == 0 && tick % 10 == 0 {
+            // tick % 10 == 0 extra om zeker te zijn dat we niet elk tick misfiren
+            // bij extreem lage teacher_interval
+            if let Ok(explorer_guard) = shared.explorer.try_read() {
+                let question = ai_teacher::formulate_question(&explorer_guard);
+                let provider = {
+                    // Lightweight provider pick zonder mutable ref
+                    let ddg_chat = explorer_guard.provider_score.get("ddg_chat").copied().unwrap_or(0.5);
+                    let ddg_lite = explorer_guard.provider_score.get("ddg_lite").copied().unwrap_or(0.5);
+                    if ddg_chat >= ddg_lite { "ddg_chat".to_string() } else { "ddg_lite".to_string() }
+                };
+                drop(explorer_guard);
+                // try_send: als queue vol, skip deze cycle (niet blokkerend)
+                let _ = teacher_req_tx.try_send((question.clone(), provider.clone()));
+                tracing::info!(tick, interval = field.teacher_interval, provider = %provider, question = %question, "AI-teacher: vraag gestuurd");
+            }
+        }
+
+        // Verwerk AI-teacher antwoorden (non-blocking)
+        while let Ok((provider, answer_result)) = teacher_resp_rx.try_recv() {
+            // Meet pre-satisfaction
+            let sat_pre: f32 = if !field.active_set.is_empty() {
+                field.active_set.iter()
+                    .map(|&id| field.points[id as usize].satisfaction)
+                    .sum::<f32>() / field.active_set.len() as f32
+            } else { 0.0 };
+
+            match answer_result {
+                Ok(answer) if !ai_teacher::is_garbage(&answer) => {
+                    // Train op antwoord — dit is HET bootstrap-moment
+                    let n_trained = learner::learn_from_text(&mut field, &mut vocab, &answer);
+
+                    let sat_post: f32 = if !field.active_set.is_empty() {
+                        field.active_set.iter()
+                            .map(|&id| field.points[id as usize].satisfaction)
+                            .sum::<f32>() / field.active_set.len() as f32
+                    } else { 0.0 };
+                    let sat_delta = sat_post - sat_pre;
+
+                    // URL-extractie
+                    if let Ok(mut explorer_guard) = shared.explorer.try_write() {
+                        explorer_guard.discover_urls(&answer);
+                        ai_teacher::update_teacher_schedule(&mut field, &mut explorer_guard, &provider, true, sat_delta);
+                    }
+
+                    tracing::info!(
+                        provider = %provider, n_trained, sat_delta,
+                        interval = field.teacher_interval,
+                        preview = %answer.chars().take(80).collect::<String>(),
+                        "AI-teacher: leerde"
+                    );
+                }
+                Ok(_) => {
+                    // Garbage antwoord
+                    if let Ok(mut explorer_guard) = shared.explorer.try_write() {
+                        ai_teacher::update_teacher_schedule(&mut field, &mut explorer_guard, &provider, false, 0.0);
+                    }
+                    tracing::warn!(provider = %provider, "AI-teacher: garbage antwoord");
+                }
+                Err(e) => {
+                    if let Ok(mut explorer_guard) = shared.explorer.try_write() {
+                        ai_teacher::update_teacher_schedule(&mut field, &mut explorer_guard, &provider, false, 0.0);
+                    }
+                    tracing::warn!(provider = %provider, error = %e, "AI-teacher: call faalde");
+                }
+            }
+        }
+
         // Verwerk exploration resultaten (non-blocking)
         while let Ok(result) = explore_result_rx.try_recv() {
           if let Ok(mut explorer) = shared.explorer.try_write() {
@@ -1178,6 +1320,13 @@ async fn main() {
                         // v2.6: Text cap 2000→8000 (was: 60% van pagina weggegooid)
                         let capped: String = text.chars().take(8000).collect();
                         if let Some(clean) = learner::filter_content(&capped) {
+                            // v2.6.7 D2: meet satisfaction pre-learning voor reward-EMA
+                            let sat_pre: f32 = if !field.active_set.is_empty() {
+                                field.active_set.iter()
+                                    .map(|&id| field.points[id as usize].satisfaction)
+                                    .sum::<f32>() / field.active_set.len() as f32
+                            } else { 0.0 };
+
                             explorer.absorb_interests(&clean);
                             let token_ids = vocab.tokenize(&clean);
                             explorer.tokens_processed += token_ids.len() as u64;
@@ -1196,7 +1345,16 @@ async fn main() {
                                 });
                             }
 
-                            // Retrieval store
+                            // v2.6.7 D2: post-learning satisfaction → domain reward-EMA
+                            let sat_post: f32 = if !field.active_set.is_empty() {
+                                field.active_set.iter()
+                                    .map(|&id| field.points[id as usize].satisfaction)
+                                    .sum::<f32>() / field.active_set.len() as f32
+                            } else { 0.0 };
+                            let sat_delta = sat_post - sat_pre;
+                            explorer.update_domain_score(&result.url, sat_delta);
+
+                            // Retrieval store — v2.6.7 E4: met learning_value + tick
                             let embs = crate::encoding::encode_text_readonly(&vocab, &clean);
                             if !embs.is_empty() {
                                 let mut avg = [0.0f32; lucy_state::DIM];
@@ -1204,7 +1362,7 @@ async fn main() {
                                 let n = embs.len() as f32;
                                 for d in 0..lucy_state::DIM { avg[d] /= n; }
                                 if let Ok(mut ret) = shared.retrieval.try_write() {
-                                    ret.insert(&avg, &clean);
+                                    ret.insert_with_value(&avg, &clean, sat_delta, tick);
                                 }
                             }
 
