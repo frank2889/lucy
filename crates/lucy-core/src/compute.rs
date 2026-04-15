@@ -46,7 +46,23 @@
     use smallvec::SmallVec;
     use rayon::prelude::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use crate::encoding::Vocabulary;
+
+    // v2.6.12 Fase-2 — GNW ignition cap observability.
+    // Module-level atomics (thread-safe, snapshot-compat want geen Field-velden).
+    // Reset bij process-restart, wat prima is: we meten alleen deze run.
+    //
+    // IGNITION_CAP is bewust HARDE clamp (geen sigmoid):
+    //   - huidige runaway live: 24326 (bij tick 493450, v2.6.11)
+    //   - vóór top-K was: 21030 (2026-04-15 collapse)
+    //   - 500 = ~5–10× normale dynamic range, ruim onder runaway-regime
+    //   - kleinst mogelijke ingreep: direct zichtbaar of runaway verdwijnt
+    pub const IGNITION_CAP: f32 = 500.0;
+    pub static IGNITION_CAP_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static IGNITION_SAMPLES: AtomicU64 = AtomicU64::new(0);
+    /// f32-bits van de meest recente pre-clamp `new_is` — puur observability
+    pub static IGNITION_LAST_RAW_BITS: AtomicU32 = AtomicU32::new(0);
 
     /// Wrapper voor raw pointers zodat ze via rayon par_iter gestuurd kunnen worden.
     /// SAFETY: alleen gebruiken wanneer elke thread naar een uniek index schrijft.
@@ -3501,8 +3517,38 @@
         // === Stap 4: IGNITION! Broadcast + zelfversterking + inhibitie ===
         field.ignition_active = true;
         let fe = field.fe_tracking_rate;
-        let new_is = (1.0 - fe) * field.ignition_strength + fe * ignition_product;
-        field.ignition_strength = if new_is.is_finite() { new_is } else { 0.0 }; // v2.6.5: NaN guard
+        let new_is_raw = (1.0 - fe) * field.ignition_strength + fe * ignition_product;
+        // v2.6.5 NaN guard blijft staan als eerste laag verdediging.
+        let new_is_safe = if new_is_raw.is_finite() { new_is_raw } else { 0.0 };
+        // v2.6.12 Fase 2: HARDE CAP op ignition_strength.
+        // Reden: top-K (Fase 1) herstelde differentiatie (cv ≈ 0.15) maar adresseerde
+        // de positive-feedback loop niet — IS klom naar 24326 (hoger dan pre-fix 21030)
+        // omdat winner_score * (1 + avg_support) multiplicatief is zonder bound.
+        // Harde clamp i.p.v. sigmoid: directer te evalueren in prod, geen verborgen
+        // middengebied-effecten. 500 = ruim boven normaal dynamic range, ruim onder
+        // runaway. Evidence-based — niet speculatief.
+        let was_capped = new_is_safe > IGNITION_CAP;
+        let clamped = new_is_safe.clamp(0.0, IGNITION_CAP);
+        field.ignition_strength = clamped;
+        // Observability — atomics zodat concurrent ticks correct tellen
+        IGNITION_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        if was_capped {
+            IGNITION_CAP_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+        IGNITION_LAST_RAW_BITS.store(new_is_safe.to_bits(), Ordering::Relaxed);
+        // Log throttled — niet elke tick, wel vaak genoeg rond deploy-verificatie
+        if was_capped && field.tick % 200 == 0 {
+            tracing::warn!(
+                tick = field.tick,
+                raw = new_is_safe,
+                clamped = IGNITION_CAP,
+                winner_score,
+                avg_support,
+                ignition_product,
+                "IGNITION CAP hit — runaway geclampt naar {}",
+                IGNITION_CAP
+            );
+        }
 
         // Broadcast sterkte = proportioneel aan ignition sterkte (niet vast)
         let broadcast_strength = (field.noise_amplitude * ignition_product).min(0.5);

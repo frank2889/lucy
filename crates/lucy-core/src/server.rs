@@ -1391,6 +1391,16 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
     // op de volgende GNW cycle.
     let in_collapse = scores.len() >= 64 && d3_ratio > 0.5 && score_cv < 0.05;
 
+    // v2.6.12: cap observability — atomics uitlezen vóór json! macro
+    let ign_cap_hits = crate::compute::IGNITION_CAP_HITS.load(std::sync::atomic::Ordering::Relaxed);
+    let ign_samples = crate::compute::IGNITION_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+    let ign_raw = f32::from_bits(
+        crate::compute::IGNITION_LAST_RAW_BITS.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    let ign_cap_ratio: f32 = if ign_samples > 0 {
+        ign_cap_hits as f32 / ign_samples as f32
+    } else { 0.0 };
+
     Json(json!({
         "tick": f.tick,
         "phase": format!("{:?}", f.phase),
@@ -1433,6 +1443,11 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
         // growth) — de échte drift-metric is `score_cv`. Collapse triggert bij
         // cv < 0.05 én ratio > 0.5 (dat laatste is in praktijk altijd waar).
         // Watch `score_cv` voor gezondheid, `ignition_strength` voor runaway.
+        //
+        // v2.6.12: Fase-2 cap observability. Raw (pre-clamp), clamped (=
+        // field.ignition_strength want bij runaway steeds gelijk aan CAP), en
+        // cumulatieve cap-hit ratio sinds proces-start. Als ratio daalt → cap
+        // doet z'n werk én het systeem stabiliseert eronder.
         "gnw_stats": {
             "depth3_total": n_depth3_total,
             "depth3_active": n_depth3_active,
@@ -1441,6 +1456,12 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
             "score_cv": score_cv,
             "n_candidates": scores.len(),
             "collapse_condition_met": in_collapse,
+            "ignition_cap": crate::compute::IGNITION_CAP,
+            "ignition_strength_raw": ign_raw,
+            "ignition_strength_clamped": f.ignition_strength,
+            "ignition_cap_hits_total": ign_cap_hits,
+            "ignition_samples_total": ign_samples,
+            "ignition_cap_hit_ratio": ign_cap_ratio,
         },
         "goals": f.goals.iter().take(5).map(|g| {
             json!({

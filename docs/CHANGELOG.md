@@ -1,5 +1,57 @@
 # Lucy Changelog
 
+## v2.6.12 (2026-04-15) — Fase 2: harde cap op ignition_strength
+
+**Evidence-based, niet speculatief.** Live observatie na v2.6.11 deploy:
+
+- `score_cv = 0.1456` — gezond, top-K (Fase 1) herstelde differentiatie ✓
+- `ignition_strength = 24326` — **hoger dan pre-fix 21030**, runaway ging door ✗
+
+Reden: top-K reduceert candidates tot 256, maar de gekozen winner heeft gemiddeld *hogere* score (je selecteert de top 5%). Daardoor is `winner_score * (1 + avg_support)` cumulatief zonder bound en zakt de EMA `(1-fe) * IS + fe * product` niet: IS klimt door. Fase 1 adresseert differentiatie, niet positive feedback.
+
+### Fix — smal en geïsoleerd
+
+Alleen bounded update op `ignition_strength`. Geen softmax, geen goal-logica, geen escape-aanpassing. Causaliteit intact.
+
+```rust
+let new_is_raw = (1.0 - fe) * field.ignition_strength + fe * ignition_product;
+let new_is_safe = if new_is_raw.is_finite() { new_is_raw } else { 0.0 };
+field.ignition_strength = new_is_safe.clamp(0.0, 500.0);
+```
+
+Harde clamp i.p.v. sigmoid: kleiner, beter interpreteerbaar in prod, geen verborgen middengebied-effecten. `500.0` = ~5–10× normaal dynamisch bereik, ruim onder runaway-regime. Als 500 te laag blijkt kan het evidence-based omhoog.
+
+### Observability (atomics, geen Field-velden, snapshot-compat)
+
+- `IGNITION_CAP_HITS` — hoeveel updates werden geclampt
+- `IGNITION_SAMPLES` — totaal aantal ignition-updates
+- `IGNITION_LAST_RAW_BITS` — laatste pre-clamp waarde (voor trend)
+
+Expose in `/telemetry.gnw_stats`:
+
+- `ignition_cap` — constante (500.0)
+- `ignition_strength_raw` — pre-clamp
+- `ignition_strength_clamped` — `field.ignition_strength` (≤ 500.0)
+- `ignition_cap_hits_total` / `ignition_samples_total`
+- `ignition_cap_hit_ratio` — daalt als systeem onder de cap stabiliseert
+
+Log WARN `"IGNITION CAP hit"` throttled elke 200 ticks bij hit.
+
+### Succescriteria (evaluatie vlak vóór, rond en 10–20 min ná tick 500K)
+
+- `score_cv` blijft gezond (> 0.05)
+- `ignition_strength_clamped` ≤ 500 (definitieaxiomatisch — check dat `raw` daalt)
+- `ignition_cap_hit_ratio` daalt naar ~0 na stabilisatie (systeem stopt met tegen cap duwen)
+- Tick progression blijft normaal (≥ 1 tps)
+- `phase` verlaat Idle op natuurlijke momenten
+- Geen terugval naar `collapse_condition_met=True`
+
+### Niet in deze release
+
+Softmax-normalisatie, goal-cooldown, escape-aanpassing. Blijven standby — alleen activeren als deze cap onvoldoende is.
+
+---
+
 ## v2.6.11 (2026-04-15) — Deploy-hardening + FieldV0 schema-bridge
 
 **Aanleiding:** de v2.6.10 deploy liep vast omdat:
