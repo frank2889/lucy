@@ -134,6 +134,16 @@ async fn main() {
         tracing::error!("PANIC: {}", info);
     }));
 
+    // v2.6.11: startup-banner met precieze build-identificatie. Voorkomt dat we
+    // weer maanden denken dat v2.6.x draait terwijl het eigenlijk een oudere
+    // binary is die nooit vervangen is.
+    tracing::info!(
+        version = env!("LUCY_VERSION"),
+        git_sha = env!("LUCY_GIT_SHA"),
+        built_at = env!("LUCY_BUILD_TIME"),
+        schema = lucy_state::snapshot_header::CURRENT_SCHEMA_VERSION,
+        "Lucy binary start"
+    );
     tracing::info!("Lucy v0.9 — Field Intelligence + RAG + Attention + Working Memory — waking up...");
 
     let root = PathBuf::from(".");

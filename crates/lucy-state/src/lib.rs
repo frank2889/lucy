@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod snapshot_header;
+pub mod schema_v0;
 pub mod schema_v1;
 
 pub use snapshot_header::{SnapshotHeader, SnapshotFormat, CURRENT_SCHEMA_VERSION,
@@ -779,6 +780,114 @@ impl From<schema_v1::FieldV1> for Field {
     }
 }
 
+impl From<schema_v0::FieldV0> for Field {
+    /// v2.6.5-era FieldV0 → current Field. De 4 v2.6.6 boredom/sluggish-velden
+    /// en v2.6.7 concept-clustering ontbreken in v0 en krijgen defaults.
+    /// Alle v0 data wordt EXACT gemapped (geen veld-verlies). Gebruikt voor
+    /// snapshots die pre-v2.6.6 productie hebben geschreven (incl. de b89ab6e
+    /// binary die per ongeluk maandenlang in de Docker image zat).
+    fn from(v0: schema_v0::FieldV0) -> Self {
+        Field {
+            points: v0.points,
+            active_set: v0.active_set,
+            tick: v0.tick,
+            total_energy: v0.total_energy,
+            economy: v0.economy,
+            phase: v0.phase,
+            clamps: v0.clamps,
+            input_ids: v0.input_ids,
+            output_ids: v0.output_ids,
+            last_thought: v0.last_thought,
+            reflection_count: v0.reflection_count,
+            dopamine: v0.dopamine,
+            norepinephrine: v0.norepinephrine,
+            serotonin: v0.serotonin,
+            acetylcholine: v0.acetylcholine,
+            spectral_radius: v0.spectral_radius,
+            chaos_target: v0.chaos_target,
+            current_intention: v0.current_intention,
+            intention_strength: v0.intention_strength,
+            rnd_frozen: v0.rnd_frozen,
+            rnd_predictor: v0.rnd_predictor,
+            kappa: v0.kappa,
+            omega: v0.omega,
+            lambda: v0.lambda,
+            beta: v0.beta,
+            alpha: v0.alpha,
+            rho: v0.rho,
+            mu: v0.mu,
+            growth_threshold: v0.growth_threshold,
+            ema_decay: v0.ema_decay,
+            emo_decay: v0.emo_decay,
+            error_tracking_rate: v0.error_tracking_rate,
+            fe_tracking_rate: v0.fe_tracking_rate,
+            kl_scale: v0.kl_scale,
+            clamp_range: v0.clamp_range,
+            settle_epsilon: v0.settle_epsilon,
+            noise_amplitude: v0.noise_amplitude,
+            think_interval: v0.think_interval,
+            reflect_interval: v0.reflect_interval,
+            max_goals: v0.max_goals,
+            learn_interval: v0.learn_interval,
+            explore_interval: v0.explore_interval,
+            consolidation_interval: v0.consolidation_interval,
+            snapshot_interval: v0.snapshot_interval,
+            growth_interval: v0.growth_interval,
+            sampling_temperature: v0.sampling_temperature,
+            sampling_top_p: v0.sampling_top_p,
+            repetition_penalty: v0.repetition_penalty,
+            goals: v0.goals,
+            last_think_tick: v0.last_think_tick,
+            last_reflect_tick: v0.last_reflect_tick,
+            teacher_interval: v0.teacher_interval,
+            teacher_success_streak: v0.teacher_success_streak,
+            // --- v2.6.6 velden (niet in v0) → defaults ---
+            last_boredom_tension: 0.0,
+            last_boredom_curiosity: 0.0,
+            boredom_streak: 0,
+            is_sluggish_flag: false,
+            attn_weights: v0.attn_weights,
+            attn_context: v0.attn_context,
+            working_memory: v0.working_memory,
+            wm_gates: v0.wm_gates,
+            wm_ages: v0.wm_ages,
+            // --- v2.6.7 concept-clustering (niet in v0) → leeg ---
+            concept_centroids: Vec::new(),
+            concept_assignments: Vec::new(),
+            global_oscillation_phase: v0.global_oscillation_phase,
+            oscillation_coherence: v0.oscillation_coherence,
+            integrated_info_avg: v0.integrated_info_avg,
+            power_law_exponent: v0.power_law_exponent,
+            is_critical: v0.is_critical,
+            avg_free_energy: v0.avg_free_energy,
+            theta_phase: v0.theta_phase,
+            theta_gamma_coupling: v0.theta_gamma_coupling,
+            branching_ratio_avg: v0.branching_ratio_avg,
+            ignition_active: v0.ignition_active,
+            ignition_strength: v0.ignition_strength,
+            avg_expected_free_energy: v0.avg_expected_free_energy,
+            adaptive: v0.adaptive,
+            temporal_history: v0.temporal_history,
+            causal_log: v0.causal_log,
+            goal_history: v0.goal_history,
+            pages_read: v0.pages_read,
+            tokens_processed: v0.tokens_processed,
+            snapshot_version: v0.snapshot_version,
+            field_dim: v0.field_dim,
+            n_input: v0.n_input,
+            n_hidden: v0.n_hidden,
+            n_output: v0.n_output,
+            // --- Nieuwe v2.6.8+ velden → defaults ---
+            concept_priors_enabled: true,
+            concept_priors_disabled_until_tick: 0,
+            concept_audit_log: Vec::new(),
+            self_ep_audit: Vec::new(),
+            self_metrics: SelfMetrics::default(),
+            provenance_counts: [0u64; 6],
+        }
+    }
+}
+
 /// v1.0: Parameters die Lucy zelf aanpast — geen hardcoded magic numbers meer.
 /// Defaults komen overeen met de oude hardcoded waarden zodat bestaande snapshots
 /// ongewijzigd laden (serde default).
@@ -1493,37 +1602,72 @@ impl Field {
                 }
             }
             SnapshotFormat::Legacy => {
-                // Pre-v2.6.9: geen header. Probeer FieldV1 (v2.6.7-era layout).
+                // Pre-v2.6.9: geen header. Probeer achtereenvolgens FieldV1 (v2.6.7),
+                // FieldV0 (v2.6.5) en tot slot current Field.
+                //
+                // Strict parsing: we gebruiken `deserialize_from(reader)` i.p.v.
+                // `deserialize(&bytes)` omdat we willen weten of er trailing bytes
+                // overblijven — anders zou een v2.6.7-snapshot per ongeluk kunnen
+                // "parsen" als FieldV0 (die is korter) met corrupte waarden. Daarom
+                // vereisen we: bytes.len() == bytes verbruikt door deserialize.
+                use std::io::Cursor;
+
+                fn try_strict<T: serde::de::DeserializeOwned>(
+                    bytes: &[u8],
+                ) -> Result<T, String> {
+                    let mut cur = Cursor::new(bytes);
+                    let val = bincode::deserialize_from(&mut cur)
+                        .map_err(|e| format!("decode: {}", e))?;
+                    let consumed = cur.position() as usize;
+                    if consumed != bytes.len() {
+                        return Err(format!(
+                            "trailing {} bytes na decode (verbruikt {}/{}) — schema mismatch",
+                            bytes.len() - consumed, consumed, bytes.len()
+                        ));
+                    }
+                    Ok(val)
+                }
+
                 tracing::warn!(
-                    "Legacy snapshot gedetecteerd (geen magic header) — probeer FieldV1 schema"
+                    "Legacy snapshot gedetecteerd (geen magic header) — probeer schema-ladder"
                 );
-                match bincode::deserialize::<schema_v1::FieldV1>(&bytes) {
-                    Ok(v1) => {
-                        tracing::info!(
-                            tick = v1.tick,
-                            points = v1.points.len(),
-                            "Legacy FieldV1 geladen — migreer naar current"
-                        );
-                        Field::from(v1)
-                    }
-                    Err(v1_err) => {
-                        // Laatste poging: misschien een heel oude snapshot die niet volgens
-                        // v1 layout is — probeer direct current Field (werkt soms bij geluk).
-                        match bincode::deserialize::<Self>(&bytes) {
-                            Ok(f) => {
-                                tracing::warn!(
-                                    "Legacy snapshot geladen via current struct (niet via v1) — mogelijk pre-v2.6.7"
-                                );
-                                f
-                            }
-                            Err(current_err) => {
-                                return Err(format!(
-                                    "Legacy load faalde: FieldV1 error: {}. Current error: {}",
-                                    v1_err, current_err
-                                ).into());
-                            }
-                        }
-                    }
+
+                // Ladder: v1 (v2.6.7) → v0 (v2.6.5) → current. Strikt per poging.
+                // Voorrang aan meer-gespecialiseerde schema's zodat subset-matches
+                // (bv. FieldV0 die een prefix is van FieldV1) niet per ongeluk winnen.
+                if let Ok(v1) = try_strict::<schema_v1::FieldV1>(&bytes) {
+                    tracing::info!(
+                        tick = v1.tick,
+                        points = v1.points.len(),
+                        schema = "v1 (v2.6.7-era)",
+                        "Legacy snapshot geladen — migreer naar current"
+                    );
+                    Field::from(v1)
+                } else if let Ok(v0) = try_strict::<schema_v0::FieldV0>(&bytes) {
+                    tracing::info!(
+                        tick = v0.tick,
+                        points = v0.points.len(),
+                        schema = "v0 (v2.6.5-era)",
+                        "Legacy snapshot geladen — migreer naar current"
+                    );
+                    Field::from(v0)
+                } else if let Ok(f) = try_strict::<Self>(&bytes) {
+                    tracing::warn!(
+                        "Legacy snapshot parst als CURRENT struct (geen migratie nodig)"
+                    );
+                    f
+                } else {
+                    // Alle schemas gefaald — herproduceer elke error voor diagnostiek
+                    let v1_err = try_strict::<schema_v1::FieldV1>(&bytes).err()
+                        .unwrap_or_else(|| "?".into());
+                    let v0_err = try_strict::<schema_v0::FieldV0>(&bytes).err()
+                        .unwrap_or_else(|| "?".into());
+                    let cur_err = try_strict::<Self>(&bytes).err()
+                        .unwrap_or_else(|| "?".into());
+                    return Err(format!(
+                        "Legacy load faalde op alle schemas — V1: {} | V0: {} | current: {}",
+                        v1_err, v0_err, cur_err
+                    ).into());
                 }
             }
         };

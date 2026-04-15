@@ -1,5 +1,74 @@
 # Lucy Changelog
 
+## v2.6.11 (2026-04-15) — Deploy-hardening + FieldV0 schema-bridge
+
+**Aanleiding:** de v2.6.10 deploy liep vast omdat:
+
+1. Prod draaide al *maanden* op v2.6.5 (binary `b89ab6e`, Apr 11) terwijl iedereen
+   dacht dat v2.6.9 live was. Geen `/version` endpoint → niemand kon dat zien.
+2. `docker cp /lucy/crates lucy:/lucy/crates` nestelt de map als
+   `/lucy/crates/crates/` (docker-cp valstrik) → `cargo build` faalt op missende
+   Cargo.toml → deploy ging toch door met oude binary.
+3. `FieldV1`-migratie is geschreven voor v2.6.7-era, maar de prod-snapshot was
+   v2.6.5-era (mist 4 boredom/sluggish velden + concept-clustering). Bincode is
+   positie-gebaseerd, `#[serde(default)]` werkt niet voor ontbrekende bytes → alle
+   5 backups faalden met dezelfde bool-fout op byte-offset.
+4. Pre-deploy save race'de met code-sync → snapshot corrupt geschreven.
+
+**Fixes (structureel, niet cosmetisch):**
+
+### Schema-bridge v2.6.5 → current
+
+- **`schema_v0::FieldV0`** — bit-precieze kopie van v2.6.5 Field layout (mist de
+  4 v2.6.6-boredom-velden + v2.6.7-concept_centroids die FieldV1 wél heeft).
+- **`impl From<FieldV0> for Field`** — expliciete migratie, alle data preserved,
+  ontbrekende velden krijgen documenteerde defaults.
+- **`Field::load` schema-ladder**: probeer v1 → v0 → current. *Strict mode*:
+  verwerpt trailing-bytes zodat FieldV0 niet per ongeluk een v2.6.7 snapshot
+  "parsed" met corrupte waarden.
+- **Testruns**: `verify_snapshot` op de echte 80MB prod-snapshot → matcht
+  FieldV0 strikt (20933 points, tick 492750, 0 trailing bytes).
+
+### Deploy-hardening
+
+- **`deploy.sh` rewrite**:
+  - `set -euo pipefail` — nooit meer stil-doorgaan na failure.
+  - `docker cp .../. dest/` i.p.v. `docker cp ... dest/` — fixt de nesting-bug.
+  - Pre-deploy save + `sleep 5` *vóór* code-sync begint — geen race meer.
+  - **Dry-run `verify_snapshot`** op productie-snapshot *voor* we de container
+    stoppen. Als nieuwe binary de snapshot niet kan lezen: deploy aborts.
+  - **Post-deploy smoke test**: `/version` git_sha moet veranderd zijn, `tick`
+    moet bewegen, `active` mag niet terug naar bootstrap-niveau (8704).
+  - **Rolling binaries**: `/lucy/binaries/lucy-core.<timestamp>.prev` bewaart
+    laatste 3 builds; `bash deploy.sh rollback` zet de vorige terug.
+  - Expliciete exit-codes bij elke check — niet alleen warnings.
+
+### Version stamping
+
+- **`build.rs`** — bakt `LUCY_VERSION`, `LUCY_GIT_SHA`, `LUCY_BUILD_TIME` env-vars
+  in de binary. Rebuild-triggers op `.git/HEAD`, `.git/index`, `CHANGELOG.md`.
+  `+dirty` marker als working tree unclean.
+- **`/version` endpoint** — JSON met version, git_sha, built_at, schema_version,
+  supported_legacy_schemas, target/os.
+- **Startup-log**: eerste INFO-line toont versie+sha+buildtime+schema. Nooit meer
+  raden wat er draait.
+
+### Tooling
+
+- **`verify_snapshot` bin** (`snapshot_check`) — dry-run load, JSON-output,
+  exit-codes. Gebruikbaar in CI én in deploy.sh. Gebruik:
+  `cargo run -p snapshot_check --bin verify_snapshot -- <pad>`.
+
+### Wat dit voorkomt
+
+- Maanden durend "dachten we v2.6.9 draait" — `/version` laat het direct zien.
+- Stille deploy-failures — `set -e` + smoke-test dwingt rollback af.
+- Snapshot-corruptie door race — save-flush vóór sync.
+- Data-loss door schema-breek — dry-run verify vóór stop.
+- "Ik moet een oudere binary terughalen uit de Docker image" — rolling backups.
+
+---
+
 ## v2.6.10 (2026-04-15) — Decision-collapse fix: top-K sparsity + diversity detector
 
 **Doel:** Lucy zat op tick 500.000 bevroren in een **harde attractor** (0 ticks in

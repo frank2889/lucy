@@ -189,6 +189,7 @@ pub fn spawn_server(state: SharedState) {
             .route("/retrieval_metrics", get(retrieval_metrics_handler))
             .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
             .route("/plugins", get(plugins_list_handler))
+            .route("/version", get(version_handler))
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
             .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
@@ -1406,6 +1407,20 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
 }
 
 /// /plugins — List available dashboard plugins (from data/plugins/)
+/// v2.6.11: Unambiguous version endpoint — bouwtijd, git-sha en schema-versie.
+/// Geen guesswork meer over wat er in prod draait.
+async fn version_handler() -> Json<Value> {
+    Json(json!({
+        "version": env!("LUCY_VERSION"),
+        "git_sha": env!("LUCY_GIT_SHA"),
+        "built_at": env!("LUCY_BUILD_TIME"),
+        "schema_version": lucy_state::snapshot_header::CURRENT_SCHEMA_VERSION,
+        "supported_legacy_schemas": ["v0 (v2.6.5-era)", "v1 (v2.6.7-era)"],
+        "rustc_target": std::env::consts::ARCH,
+        "os": std::env::consts::OS,
+    }))
+}
+
 async fn plugins_list_handler() -> Json<Value> {
     let plugin_dir = std::path::Path::new("data/plugins");
     let mut plugins = Vec::new();
