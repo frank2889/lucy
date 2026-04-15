@@ -88,8 +88,12 @@ ssh "$SERVER" "mkdir -p /lucy/data-safety-backup && docker cp lucy:/lucy/data/. 
 # ─── Pre-deploy save (na backup, niet tijdens sync) ───────────────────────────
 if [ -n "$TOKEN" ]; then
     step "3. Pre-deploy save (flush naar disk)"
-    curl -s --max-time 20 -X POST http://209.38.36.51:3000/admin/pre-deploy \
-        -H "Authorization: Bearer $TOKEN" | head -c 200; echo
+    # Best-effort: draaiende binary kan oud zijn en dit endpoint niet kennen,
+    # of /telemetry kan traag reageren. We willen de deploy NIET aborten op een
+    # save-timeout — de safety backup is al gemaakt in stap 2.
+    SAVE_RESP=$(curl -sS --max-time 30 -X POST http://209.38.36.51:3000/admin/pre-deploy \
+        -H "Authorization: Bearer $TOKEN" 2>&1 || true)
+    log "Save response: $(echo "$SAVE_RESP" | head -c 200)"
     # Wacht tot save zeker klaar is VOORDAT we code gaan syncen — voorkomt race
     # die vandaag de snapshot corrupteerde.
     sleep 5

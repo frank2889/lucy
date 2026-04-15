@@ -3240,6 +3240,26 @@
     /// - Punt moet depth 3 zijn (hoogste abstractie)
     /// - Activatie moet "zelf-versterkend" zijn (recurrente buren ook actief)
     /// - Winner-take-all: sterkste signaal onderdrukt de rest
+    ///
+    /// # ONTWERPREGEL (v2.6.11, na selection-collapse op tick 500K)
+    ///
+    /// **Geen enkele wijziging in deze functie mag leiden tot volledige activatie
+    /// zonder competitie.** Concrete eisen voor elke toekomstige edit:
+    ///
+    /// 1. `candidates.len()` na filtering moet een harde bovengrens hebben (nu: top 5%,
+    ///    min 8, max 256). Verwijder top-K niet zonder vervangende sparsity.
+    /// 2. Als `d3_ratio = active_depth3 / total_depth3 > 0.5` én `score_cv < 0.05`,
+    ///    MOET er een structurele fail-safe triggeren (nu: hard kick amplitude
+    ///    = `clamp_range`). Geen uniforme broadcast toestaan in die conditie.
+    /// 3. Voor scoring: multiplicatieve terms zonder bound zijn verboden. Toekomstige
+    ///    `ignition_score = a * b * c` uitbreidingen moeten `.clamp()` of softmax
+    ///    hebben, anders runaway zoals ignition_strength=21030 (2026-04-15 incident).
+    /// 4. Winner-take-all selectie bij gelijke scores mag niet deterministisch zijn op
+    ///    memory-order (dat is geen selectie, dat is toeval).
+    ///
+    /// Als een PR deze regel breekt, verdient hij veto op architectuurgronden —
+    /// ongeacht hoe elegant de nieuwe code is. Het systeem kan alleen denken als
+    /// het kan kiezen.
     pub fn global_workspace_broadcast(field: &mut Field) {
         // === Stap 1: Competitie — zoek kandidaten voor ignition ===
         // Depth 3 punten met hoge activatie = kandidaten voor bewust worden
@@ -3288,6 +3308,21 @@
         } else {
             0.0
         };
+
+        // v2.6.11 ONTWERP-INVARIANT — "geen volledige activatie zonder competitie".
+        // Vroege waarschuwing: ratio 0.7–0.5 is al ongezond sparse-verlies, ook als
+        // cv nog acceptabel is. WARN alvorens de collapse-detector moet kicken.
+        // Throttle op tick%500 om log-spam te vermijden.
+        if d3_ratio > 0.7 && score_cv >= 0.05 && field.tick % 500 == 0 {
+            tracing::warn!(
+                tick = field.tick,
+                d3_active = n_depth3_active,
+                d3_total = n_depth3_total,
+                d3_ratio = format!("{:.3}", d3_ratio),
+                score_cv = format!("{:.4}", score_cv),
+                "INVARIANT drift: d3_ratio > 0.7 maar cv nog ok — vroege waarschuwing voor collapse"
+            );
+        }
 
         // v2.6.10 PUNT 3: DIVERSITY-COLLAPSE DETECTOR
         // Structurele degeneratie-check (niet heuristiek op tension/curiosity):
@@ -3347,8 +3382,22 @@
             return;
         }
 
-        // Debug: log elke 1000 ticks (v2.6.10: uitgebreid met collapse-signalen)
-        if field.tick % 1000 == 0 {
+        // Debug: elke 1000 ticks, MAAR elke 100 ticks in "risk-zones" rond
+        // milestone-getallen (500K, 1M, 2M, ...). Daar liep het systeem historisch
+        // vast, dus we willen 10× meer observability-dichtheid in de 1000-tick
+        // band eromheen. Dit is observe-only, geen gedragswijziging.
+        let in_risk_zone = {
+            let t = field.tick;
+            let zone_size = 500u64;
+            let nearest_million = ((t + zone_size) / 1_000_000) * 1_000_000;
+            let nearest_half_million = ((t + zone_size) / 500_000) * 500_000;
+            let d_m = t.abs_diff(nearest_million);
+            let d_h = t.abs_diff(nearest_half_million);
+            nearest_million > 0 && d_m < zone_size
+                || nearest_half_million > 0 && d_h < zone_size
+        };
+        let log_interval: u64 = if in_risk_zone { 100 } else { 1000 };
+        if field.tick % log_interval == 0 {
             tracing::info!(
                 candidates = n_cand,
                 depth3_active = n_depth3_active,
@@ -3358,6 +3407,7 @@
                 score_var = format!("{:.6}", score_var),
                 score_cv = format!("{:.4}", score_cv),
                 top_score = candidates.first().map(|c| c.1).unwrap_or(0.0),
+                risk_zone = in_risk_zone,
                 "GNW ignition check"
             );
         }

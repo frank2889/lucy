@@ -1360,6 +1360,37 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
         .map(|&id| f.points[id as usize].couplings.len())
         .sum();
 
+    // v2.6.11: GNW-stats runtime-computed zodat het dashboard live kan zien of
+    // selectiecompetitie actief is. Ontwerpregel: "geen volledige activatie
+    // zonder competitie" wordt hier meetbaar. Zonder deze cijfers was de
+    // differentiatie-collapse van 2026-04-15 alleen zichtbaar via docker logs.
+    let mut n_depth3_total = 0usize;
+    let mut n_depth3_active = 0usize;
+    let mut scores: Vec<f32> = Vec::with_capacity(256);
+    for p in f.points.iter() {
+        if p.depth != 3 { continue; }
+        n_depth3_total += 1;
+        // is_active: FLAG_ACTIVE = bit 0
+        if (p.flags & 1) == 0 { continue; }
+        n_depth3_active += 1;
+        let phi_norm: f32 = p.phi.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let s = phi_norm * (1.0 + p.phi_integrated) * (1.0 + p.expected_free_energy * 0.5);
+        if s > 0.0001 { scores.push(s); }
+    }
+    let d3_ratio = if n_depth3_total > 0 {
+        n_depth3_active as f32 / n_depth3_total as f32
+    } else { 0.0 };
+    let (score_mean, score_cv) = if scores.len() > 1 {
+        let mean = scores.iter().sum::<f32>() / scores.len() as f32;
+        let var = scores.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / scores.len() as f32;
+        (mean, if mean > 1e-6 { var.sqrt() / mean } else { 0.0 })
+    } else { (0.0, 0.0) };
+    // Invariant-schending (ontwerpregel): d3_ratio ≥ 0.5 én score_cv < 0.05
+    // = selectie-collapse. Als dit waar is hoort de collapse detector gefuurd te
+    // hebben; als we dit in telemetry zien staan we dus effectief al te wachten
+    // op de volgende GNW cycle.
+    let in_collapse = scores.len() >= 64 && d3_ratio > 0.5 && score_cv < 0.05;
+
     Json(json!({
         "tick": f.tick,
         "phase": format!("{:?}", f.phase),
@@ -1395,6 +1426,18 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
             "ignition_active": f.ignition_active,
             "ignition_strength": f.ignition_strength,
             "expected_free_energy": f.avg_expected_free_energy,
+        },
+        // v2.6.11: GNW sparsity-stats — observability voor de ontwerpregel
+        // "geen volledige activatie zonder competitie". Zonder deze velden was
+        // de differentiatie-collapse alleen in docker logs te zien.
+        "gnw_stats": {
+            "depth3_total": n_depth3_total,
+            "depth3_active": n_depth3_active,
+            "d3_ratio": d3_ratio,
+            "score_mean": score_mean,
+            "score_cv": score_cv,
+            "n_candidates": scores.len(),
+            "collapse_condition_met": in_collapse,
         },
         "goals": f.goals.iter().take(5).map(|g| {
             json!({
