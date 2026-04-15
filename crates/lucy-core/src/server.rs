@@ -1428,8 +1428,11 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
             "expected_free_energy": f.avg_expected_free_energy,
         },
         // v2.6.11: GNW sparsity-stats — observability voor de ontwerpregel
-        // "geen volledige activatie zonder competitie". Zonder deze velden was
-        // de differentiatie-collapse alleen in docker logs te zien.
+        // "geen volledige activatie zonder competitie".
+        // d3_ratio is typisch ~1.0 in gezonde operatie (FLAG_ACTIVE is persistent na
+        // growth) — de échte drift-metric is `score_cv`. Collapse triggert bij
+        // cv < 0.05 én ratio > 0.5 (dat laatste is in praktijk altijd waar).
+        // Watch `score_cv` voor gezondheid, `ignition_strength` voor runaway.
         "gnw_stats": {
             "depth3_total": n_depth3_total,
             "depth3_active": n_depth3_active,

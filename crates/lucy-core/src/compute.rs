@@ -3310,18 +3310,30 @@
         };
 
         // v2.6.11 ONTWERP-INVARIANT — "geen volledige activatie zonder competitie".
-        // Vroege waarschuwing: ratio 0.7–0.5 is al ongezond sparse-verlies, ook als
-        // cv nog acceptabel is. WARN alvorens de collapse-detector moet kicken.
-        // Throttle op tick%500 om log-spam te vermijden.
-        if d3_ratio > 0.7 && score_cv >= 0.05 && field.tick % 500 == 0 {
-            tracing::warn!(
-                tick = field.tick,
-                d3_active = n_depth3_active,
-                d3_total = n_depth3_total,
-                d3_ratio = format!("{:.3}", d3_ratio),
-                score_cv = format!("{:.4}", score_cv),
-                "INVARIANT drift: d3_ratio > 0.7 maar cv nog ok — vroege waarschuwing voor collapse"
-            );
+        // Observatie live (prod 2026-04-15): d3_ratio is ~1.0 in gezonde operatie
+        // omdat FLAG_ACTIVE persistent is — ratio alleen is géén drift-signaal.
+        // Echte drift-metrics:
+        //   (a) score_cv glijdt richting 0.05 (collapse-threshold)  → selectie collapseert
+        //   (b) ignition_strength > 5000 aanhoudend                 → positieve feedback runaway
+        // Beide WARN op tick%500 (geen spam, wel vroegtijdig zichtbaar).
+        if field.tick % 500 == 0 {
+            if n_cand >= 64 && score_cv < 0.08 && score_cv >= 0.05 {
+                tracing::warn!(
+                    tick = field.tick,
+                    score_cv = format!("{:.4}", score_cv),
+                    n_cand,
+                    ignition_strength = field.ignition_strength,
+                    "INVARIANT drift: score_cv nadert collapse-threshold (0.05) — differentiatie zakt"
+                );
+            }
+            if field.ignition_strength > 5000.0 {
+                tracing::warn!(
+                    tick = field.tick,
+                    ignition_strength = field.ignition_strength,
+                    score_cv = format!("{:.4}", score_cv),
+                    "INVARIANT runaway: ignition_strength > 5000 — positieve feedback zonder bound"
+                );
+            }
         }
 
         // v2.6.10 PUNT 3: DIVERSITY-COLLAPSE DETECTOR
