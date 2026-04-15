@@ -3243,10 +3243,16 @@
     pub fn global_workspace_broadcast(field: &mut Field) {
         // === Stap 1: Competitie — zoek kandidaten voor ignition ===
         // Depth 3 punten met hoge activatie = kandidaten voor bewust worden
-        let mut candidates: SmallVec<[(usize, f32, [f32; DIM]); 8]> = SmallVec::new();
+        // v2.6.10: Vec i.p.v. SmallVec — grote depth-3 populaties spillten toch naar heap
+        let mut candidates: Vec<(usize, f32, [f32; DIM])> = Vec::with_capacity(64);
 
+        let mut n_depth3_total = 0u32;
+        let mut n_depth3_active = 0u32;
         for (i, p) in field.points.iter().enumerate() {
-            if p.depth != 3 || !p.is_active() { continue; }
+            if p.depth != 3 { continue; }
+            n_depth3_total += 1;
+            if !p.is_active() { continue; }
+            n_depth3_active += 1;
             let phi_norm: f32 = p.phi.iter().map(|v| v * v).sum::<f32>().sqrt();
 
             // Ignition vereist: hoge activatie + hoge geïntegreerde informatie + hoge EFE
@@ -3262,12 +3268,95 @@
             }
         }
 
-        // Debug: log elke 1000 ticks
+        // v2.6.10 OBSERVABILITY: score-statistieken voor collapse-detectie
+        // Lucy zat op tick 500K vast met 15667/15667 depth-3 nodes actief, identieke scores.
+        // Zonder variance in scores is er geen gradient → geen keuze → decision collapse.
+        let n_cand = candidates.len();
+        let (score_mean, score_var, score_cv) = if n_cand > 1 {
+            let sum: f32 = candidates.iter().map(|c| c.1).sum();
+            let mean = sum / n_cand as f32;
+            let var: f32 = candidates.iter()
+                .map(|c| { let d = c.1 - mean; d * d })
+                .sum::<f32>() / n_cand as f32;
+            let cv = if mean > 1e-6 { var.sqrt() / mean } else { 0.0 };
+            (mean, var, cv)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let d3_ratio = if n_depth3_total > 0 {
+            n_depth3_active as f32 / n_depth3_total as f32
+        } else {
+            0.0
+        };
+
+        // v2.6.10 PUNT 3: DIVERSITY-COLLAPSE DETECTOR
+        // Structurele degeneratie-check (niet heuristiek op tension/curiosity):
+        //   - >50% van depth-3 nodes tegelijk actief  → geen sparsity meer
+        //   - score coefficient of variation < 0.05   → alle kandidaten gelijkwaardig
+        // Beiden tegelijk = winner-take-all is willekeurig = systeem kan niet meer kiezen.
+        // Reactie: hard kick (20% van depth-3, full clamp_range amplitude, random directions)
+        // en skip deze ignition-cycle zodat de verstoring zich kan settelen.
+        let is_collapsed = n_cand >= 64 && d3_ratio > 0.5 && score_cv < 0.05;
+        if is_collapsed {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let amp = field.clamp_range; // volledige range — v2.6.6-kick was 5% hiervan
+            let seed = field.tick;
+            // 20% van de huidige candidates krijgen een brede random kick
+            let n_kick = (n_cand / 5).max(16).min(2048);
+            let mut kicked = 0usize;
+            for k in 0..n_kick {
+                let mut h = DefaultHasher::new();
+                // hex-salt voorkomt collisie met boredom-kick hashes (seed,i,d)
+                (seed, k, 0xC011A5E_u64).hash(&mut h);
+                let idx = (h.finish() as usize) % n_cand;
+                let pid = candidates[idx].0;
+                // skip clamped + input/output (zoals boredom-kick)
+                if field.clamps.contains_key(&(pid as u32)) { continue; }
+                let flags = field.points[pid].flags;
+                if flags & (FLAG_INPUT | FLAG_OUTPUT) != 0 { continue; }
+                for d in 0..DIM {
+                    let mut hh = DefaultHasher::new();
+                    (seed, k, d).hash(&mut hh);
+                    let r = ((hh.finish() as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                    field.points[pid].phi[d] += r * amp;
+                    field.points[pid].phi[d] =
+                        field.points[pid].phi[d].clamp(-field.clamp_range, field.clamp_range);
+                }
+                kicked += 1;
+            }
+            // Reset ignition state — volgende tick begint schoon
+            field.ignition_active = false;
+            let fe = field.fe_tracking_rate;
+            let decayed = (1.0 - fe) * field.ignition_strength;
+            field.ignition_strength = if decayed.is_finite() { decayed } else { 0.0 };
+            // Reset boredom streak zodat heuristiek-kick niet dubbel vuurt
+            field.boredom_streak = 0;
+            tracing::error!(
+                tick = field.tick,
+                d3_active = n_depth3_active,
+                d3_total = n_depth3_total,
+                d3_ratio = format!("{:.3}", d3_ratio),
+                score_mean = format!("{:.4}", score_mean),
+                score_cv = format!("{:.4}", score_cv),
+                candidates = n_cand,
+                kicked,
+                amp = format!("{:.3}", amp),
+                "DIVERSITY COLLAPSE — decision collapse gedetecteerd, structurele kick uitgedeeld"
+            );
+            return;
+        }
+
+        // Debug: log elke 1000 ticks (v2.6.10: uitgebreid met collapse-signalen)
         if field.tick % 1000 == 0 {
-            let n_d3 = field.points.iter().filter(|p| p.depth == 3 && p.is_active()).count();
             tracing::info!(
-                candidates = candidates.len(),
-                depth3_active = n_d3,
+                candidates = n_cand,
+                depth3_active = n_depth3_active,
+                depth3_total = n_depth3_total,
+                d3_ratio = format!("{:.3}", d3_ratio),
+                score_mean = format!("{:.4}", score_mean),
+                score_var = format!("{:.6}", score_var),
+                score_cv = format!("{:.4}", score_cv),
                 top_score = candidates.first().map(|c| c.1).unwrap_or(0.0),
                 "GNW ignition check"
             );
@@ -3277,6 +3366,34 @@
             field.ignition_active = false;
             field.ignition_strength = 0.0;
             return;
+        }
+
+        // v2.6.10 PUNT 1: TOP-K SPARSITY
+        // Competitie vereist dat er verliezers zijn. Wanneer alle depth-3 actieve nodes
+        // candidate zijn (15667 in prod) en scores homogeniseren, werkt lateral inhibition
+        // niet meer. Oplossing: selecteer top 5% als competerende kandidaten (min 8, max 256).
+        // De rest ontvangt geen ignition-boost en wordt via broadcast-inhibitie gedempt.
+        let k_raw = ((n_cand as f32) * 0.05).ceil() as usize;
+        let k = k_raw.max(8).min(256).min(n_cand);
+        let cutoff_score = if k < n_cand {
+            // O(n) quickselect — veel sneller dan full sort op 15000+ items
+            candidates.select_nth_unstable_by(k - 1, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let c = candidates[k - 1].1;
+            candidates.truncate(k);
+            c
+        } else {
+            0.0
+        };
+
+        if field.tick % 1000 == 0 {
+            tracing::info!(
+                k = k,
+                cutoff = format!("{:.4}", cutoff_score),
+                pruned = n_cand.saturating_sub(k),
+                "GNW top-K sparsity"
+            );
         }
 
         // === Stap 2: Winner-Take-All — sterkste kandidaat wint ===

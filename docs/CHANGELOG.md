@@ -1,5 +1,73 @@
 # Lucy Changelog
 
+## v2.6.10 (2026-04-15) — Decision-collapse fix: top-K sparsity + diversity detector
+
+**Doel:** Lucy zat op tick 500.000 bevroren in een **harde attractor** (0 ticks in
+20s, alle telemetrie-waarden identiek tot op 6 decimalen). Structurele diagnose:
+geen boredom, maar een **decision collapse** — het veld kon geen verschil meer
+zien tussen kandidaten, dus geen gradient, dus geen keuze, dus geen actie.
+
+**Symptomen in prod:**
+
+- `depth3_active = 15667/15667` (100%) → alle kandidaten tegelijk actief, geen sparsity
+- `ignition_strength = 21030` (unbounded, geen cap)
+- `expected_free_energy = 9.99` (max), `free_energy = 0.0` (geen surprise meer)
+- Alle goals `progress = 1.0` → systeem dacht dat alles al bereikt was
+- `phase=Idle`, `tps=1`, maar CPU 200% (draaide wel, kwam nergens)
+- v2.6.6 boredom-escape triggerde wel, maar 5%-kick verdampte in homogeen veld
+
+**Root cause (compute.rs `global_workspace_broadcast`):**
+
+1. Alle actieve depth-3 nodes waren kandidaat voor ignition — geen top-K filter
+2. Lateral inhibition (`loser.phi *= 0.8`) heeft geen effect als losers onderling
+   gelijk zijn — winner-take-all wordt willekeurig (sort-op-memory-order bij ties)
+3. Boredom-detectie keek alleen naar tension/curiosity delta's (heuristiek), niet
+   naar de structurele degeneratie (spread van ignition-scores zelf)
+
+### Fix (twee lagen, structureel)
+
+**1. Top-K sparsity op ignition-kandidaten** (`compute.rs` ~3260)
+Vervangt "alle actieve depth-3" door **top 5%** (min 8, max 256). O(n)
+`select_nth_unstable_by` i.p.v. full sort op 15000+ items. Forceert competitie:
+er zijn altijd expliciet meer verliezers dan winnaars. Verandert semantiek van
+doelen niet — alleen de selectie.
+
+**2. Diversity-collapse detector** (zelfde fn, vóór top-K)
+Meet per tick:
+
+- `d3_ratio = active_depth3 / total_depth3`
+- `score_cv = std(ignition_scores) / mean(ignition_scores)`
+
+Als `n_cand ≥ 64 AND d3_ratio > 0.5 AND score_cv < 0.05` → **hard kick**:
+random phi-injectie op 20% van candidates, amplitude `field.clamp_range` (20×
+sterker dan v2.6.6 boredom-kick), skip de ignition-cycle, reset boredom_streak.
+Niet gebaseerd op emotie-heuristiek maar op structurele homogeniteit van het
+kandidaat-veld zelf.
+
+### Observability (elke 1000 ticks)
+
+Log "GNW ignition check" breidt uit met `d3_ratio`, `score_mean`, `score_var`,
+`score_cv`, `depth3_total`. Nieuwe log "GNW top-K sparsity" toont `k`, `cutoff`,
+`pruned`. Collapse-events loggen met `ERROR`-niveau zodat ze zichtbaar boven
+reguliere INFO-stroom verschijnen.
+
+### Niet in deze release (gepland als v2.6.11 als attractor terugkomt)
+
+- Softmax-normalisatie op ignition-scores (grotere dynamiek-ingreep)
+- Goal cooldown / repeated-goal blacklist in thinker.rs
+
+Rationale: eerst observeren of top-K + collapse-detector volstaat; de
+goal-spiral is vermoedelijk een **gevolg** van de collapse en zou met hersteld
+onderscheidingsvermogen vanzelf moeten normaliseren.
+
+### Deploy-pad
+
+Geen snapshot-schema wijziging → migratie onnodig. Standaard `bash deploy.sh`
+(code-sync + hercompilatie in container). Data intact, Lucy herstart met v2.6.9
+data en v2.6.10 logica.
+
+---
+
 ## v2.6.9 (2026-04-13) — Snapshot-migratie framework [COMMITTED, READY TO DEPLOY]
 
 **Doel:** Oplossen van de v2.6.8 deploy-crisis — maak struct-wijzigingen aan
