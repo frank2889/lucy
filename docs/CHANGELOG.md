@@ -1,5 +1,48 @@
 # Lucy Changelog
 
+## v2.6.13 (2026-04-15) — Evaluatie-observability: winner turnover + goal latency
+
+Observe-only toevoeging voor het 500K evaluatievenster. Géén gedragswijziging.
+Conform Frank's regel "niet meer fixen op vermoedens; alleen op vooraf
+gedefinieerde trigger-condities en live gemeten data".
+
+### Nieuwe metrics in `/telemetry`
+
+**Winner turnover** (in `gnw_stats`):
+
+- `winner_repeats` — aantal ignitions waarbij winner gelijk is aan vorige
+- `winner_switches` — aantal verschillende winners over ignitions
+- `winner_turnover_ratio` = `switches / (switches + repeats)`
+
+Hoge ratio = diverse winners (gezond). Lage ratio = oligarchie — top-K dwingt
+sparsity af maar dezelfde paar nodes blijven winnen. Signaal dat top-K-selectie
+formeel werkt maar de onderliggende selectie degenereerd kan zijn.
+
+**Goal completion latency** (nieuwe sectie `goal_stats`):
+
+- `complete_total` — totaal voltooide goals
+- `mean_latency_ticks` — gemiddelde leeftijd bij completion
+- `meta_learning_spawn_total` / `meta_learning_complete_total`
+- `meta_learning_mean_latency_ticks` — specifiek voor `think:meta_learning`
+- `repeat_events_total` — hoe vaak nieuwe spawn een description was die al 2+
+  keer in de laatste 5 spawns voorkwam (indicator voor spiraling)
+
+### Implementatie
+
+Atomics op module-niveau in `compute.rs` (`WINNER_LAST_ID`, `WINNER_REPEATS`,
+`WINNER_SWITCHES`) en `thinker.rs` (`GOAL_COMPLETE_TOTAL`, `GOAL_LATENCY_SUM_TICKS`,
+`META_LEARN_*`, `GOAL_REPEAT_EVENTS`, `RECENT_GOAL_DESCS: Mutex<Vec<String>>`).
+Geen `Field`-wijziging → geen schema-impact.
+
+### Doel
+
+Drie meetpunten rond tick 500K (vlak vóór, rond, 10-20 min ná) kunnen nu
+rapporteren op 12+ signalen inclusief turnover en latency. Daarmee beslissen
+of Fase 3 (goal-cooldown) of softmax nodig zijn. Vooraf gedefinieerde
+succescriteria staan in `INCIDENT_500K_DECISION_COLLAPSE.md`.
+
+---
+
 ## v2.6.12 (2026-04-15) — Fase 2: harde cap op ignition_strength
 
 **Evidence-based, niet speculatief.** Live observatie na v2.6.11 deploy:

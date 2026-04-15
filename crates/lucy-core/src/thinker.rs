@@ -24,6 +24,22 @@ use crate::encoding::{self, Vocabulary};
 use crate::journal::{Journal, EmotionSnapshot};
 use crate::learner::Explorer;
 use rand::Rng;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+// v2.6.13 Evaluatie-observability: goal completion latency.
+// Vraag die we beantwoorden: completen goals (met name `think:meta_learning`)
+// instant recursief, of in gezonde tempo? Observe-only, geen gedragswijziging.
+pub static GOAL_COMPLETE_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static GOAL_LATENCY_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
+pub static META_LEARN_SPAWN_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static META_LEARN_COMPLETE_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static META_LEARN_LATENCY_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
+/// Aantal repeated goals binnen laatste 5 spawns (teller van herhalings-events).
+pub static GOAL_REPEAT_EVENTS: AtomicU64 = AtomicU64::new(0);
+/// Ring-buffer van laatste 5 spawn-descriptions voor repeat-detectie.
+/// Mutex-locked maar wordt max 1x per goal-creation aangeraakt — niet hot-path.
+pub static RECENT_GOAL_DESCS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 // v2.3: Geen hardcoded constanten meer.
 // THINK_INTERVAL, REFLECT_INTERVAL, MAX_GOALS → field.think_interval, field.reflect_interval, field.max_goals
@@ -248,6 +264,21 @@ pub fn generate_goal(
 
     field.goals.push(goal);
 
+    // v2.6.13 observability: goal spawn tracking + repeat detectie
+    if description.contains("meta_learning") {
+        META_LEARN_SPAWN_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Ok(mut recent) = RECENT_GOAL_DESCS.lock() {
+        // Tel repeat events: als description al 2+ keer in laatste 5 voorkomt,
+        // tellen we deze spawn als repeat-event (d.w.z. 3e of hoger voorkomen).
+        let occurrences = recent.iter().filter(|d| d.as_str() == description.as_str()).count();
+        if occurrences >= 2 {
+            GOAL_REPEAT_EVENTS.fetch_add(1, Ordering::Relaxed);
+        }
+        recent.push(description.clone());
+        if recent.len() > 5 { recent.remove(0); }
+    }
+
     // Zet als actieve intentie
     field.current_intention = Some(goal_embedding);
     // Intentie sterkte schaalt met noise_amplitude — zelfde schaal als veldactiviteit
@@ -335,9 +366,16 @@ pub fn reflect(
         }
     }
 
-    // Log voltooide doelen
+    // Log voltooide doelen + v2.6.13 observability: latency-atomics
     for &i in &completed_indices {
         let desc = field.goals[i].description.clone();
+        let goal_age = field.tick.saturating_sub(field.goals[i].created_tick);
+        GOAL_COMPLETE_TOTAL.fetch_add(1, Ordering::Relaxed);
+        GOAL_LATENCY_SUM_TICKS.fetch_add(goal_age, Ordering::Relaxed);
+        if desc.contains("meta_learning") {
+            META_LEARN_COMPLETE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            META_LEARN_LATENCY_SUM_TICKS.fetch_add(goal_age, Ordering::Relaxed);
+        }
         journal_thought(journal, field.tick,
             &format!("goal_complete:{}", desc));
     }

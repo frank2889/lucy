@@ -64,6 +64,14 @@
     /// f32-bits van de meest recente pre-clamp `new_is` — puur observability
     pub static IGNITION_LAST_RAW_BITS: AtomicU32 = AtomicU32::new(0);
 
+    // v2.6.13 Evaluatie-observability: winner turnover.
+    // Hoge switches/(repeats+switches) = echte variatie in winnerset (gezond).
+    // Lage turnover = stabiele oligarchie — signaal dat top-K selectie wel
+    // bindend is maar dezelfde paar winners keeps winning. Sentinel u32::MAX.
+    pub static WINNER_LAST_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+    pub static WINNER_REPEATS: AtomicU64 = AtomicU64::new(0);
+    pub static WINNER_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
     /// Wrapper voor raw pointers zodat ze via rayon par_iter gestuurd kunnen worden.
     /// SAFETY: alleen gebruiken wanneer elke thread naar een uniek index schrijft.
     #[derive(Clone, Copy)]
@@ -3479,6 +3487,21 @@
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (winner_id, winner_score, winner_phi) = candidates[0];
+
+        // v2.6.13 Evaluatie-observability: winner turnover.
+        // Meet of top-K competitie diverse winners kiest of stabiele oligarchie.
+        // Een gezond systeem switcht vaak; vastzitten op dezelfde winner = top-K
+        // dwingt vorm van sparsity af maar de onderliggende selectie blijft degenereerd.
+        let prev_winner = WINNER_LAST_ID.load(Ordering::Relaxed);
+        let winner_u32 = winner_id as u32;
+        if prev_winner != u32::MAX {
+            if prev_winner == winner_u32 {
+                WINNER_REPEATS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                WINNER_SWITCHES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        WINNER_LAST_ID.store(winner_u32, Ordering::Relaxed);
 
         // === Stap 3: Ignition check — is het signaal sterk genoeg? ===
         // Ignition = zelfversterkende activatie. Check: hebben de buren van de winnaar

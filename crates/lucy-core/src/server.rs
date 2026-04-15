@@ -1401,6 +1401,26 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
         ign_cap_hits as f32 / ign_samples as f32
     } else { 0.0 };
 
+    // v2.6.13: winner turnover (compute.rs) + goal latency (thinker.rs)
+    let win_repeats = crate::compute::WINNER_REPEATS.load(std::sync::atomic::Ordering::Relaxed);
+    let win_switches = crate::compute::WINNER_SWITCHES.load(std::sync::atomic::Ordering::Relaxed);
+    let win_turnover_ratio: f32 = {
+        let total = win_repeats + win_switches;
+        if total > 0 { win_switches as f32 / total as f32 } else { 0.0 }
+    };
+    let goal_complete_total = crate::thinker::GOAL_COMPLETE_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let goal_latency_sum = crate::thinker::GOAL_LATENCY_SUM_TICKS.load(std::sync::atomic::Ordering::Relaxed);
+    let goal_mean_latency: f32 = if goal_complete_total > 0 {
+        goal_latency_sum as f32 / goal_complete_total as f32
+    } else { 0.0 };
+    let ml_spawn = crate::thinker::META_LEARN_SPAWN_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let ml_complete = crate::thinker::META_LEARN_COMPLETE_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let ml_latency_sum = crate::thinker::META_LEARN_LATENCY_SUM_TICKS.load(std::sync::atomic::Ordering::Relaxed);
+    let ml_mean_latency: f32 = if ml_complete > 0 {
+        ml_latency_sum as f32 / ml_complete as f32
+    } else { 0.0 };
+    let goal_repeat_events = crate::thinker::GOAL_REPEAT_EVENTS.load(std::sync::atomic::Ordering::Relaxed);
+
     Json(json!({
         "tick": f.tick,
         "phase": format!("{:?}", f.phase),
@@ -1462,6 +1482,22 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
             "ignition_cap_hits_total": ign_cap_hits,
             "ignition_samples_total": ign_samples,
             "ignition_cap_hit_ratio": ign_cap_ratio,
+            // v2.6.13: winner turnover — switches/(switches+repeats) over proces-leven.
+            // Hoog = diverse winners (gezond). Laag = oligarchie (top-K dwingt sparsity
+            // af maar zelfde paar nodes winnen).
+            "winner_repeats": win_repeats,
+            "winner_switches": win_switches,
+            "winner_turnover_ratio": win_turnover_ratio,
+        },
+        // v2.6.13: goal completion latency — geeft aan of goals instant recursief
+        // completen (=collapse-symptoom) of in gezonde tempo.
+        "goal_stats": {
+            "complete_total": goal_complete_total,
+            "mean_latency_ticks": goal_mean_latency,
+            "meta_learning_spawn_total": ml_spawn,
+            "meta_learning_complete_total": ml_complete,
+            "meta_learning_mean_latency_ticks": ml_mean_latency,
+            "repeat_events_total": goal_repeat_events,
         },
         "goals": f.goals.iter().take(5).map(|g| {
             json!({
