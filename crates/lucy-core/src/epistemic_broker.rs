@@ -158,6 +158,9 @@ pub fn urls_for_concept(concept: &str) -> Vec<String> {
         format!("https://archive.org/wayback/available?url=en.wikipedia.org/wiki/{}", safe),
         // NASA Open Data
         format!("https://data.nasa.gov/api/views?q={}", q),
+        // CERN Open Data — 80K+ particle physics datasets (LHC, Higgs, dark matter, exotica)
+        format!("https://opendata.cern.ch/api/records/?q={}&type=Dataset&size=5", q),
+        format!("https://opendata.cern.ch/api/records/?q={}&type=Documentation&size=5", q),
         // World Bank data
         format!("https://search.worldbank.org/api/v2/wds?qterm={}&rows=5", q),
         // Our World in Data
@@ -358,10 +361,13 @@ mod tests {
     #[test]
     fn test_urls_for_concept() {
         let urls = urls_for_concept("consciousness");
-        assert_eq!(urls.len(), 3);
-        assert!(urls[0].contains("wikipedia"));
-        assert!(urls[1].contains("arxiv"));
-        assert!(urls[2].contains("semanticscholar"));
+        // v2.8.0: Function now returns 35 URLs (was: 3 in old stale test)
+        assert!(urls.len() > 30, "Expected 30+ URLs for concept, got {}", urls.len());
+        // Check that CERN is included
+        assert!(urls.iter().any(|url| url.contains("opendata.cern.ch")), "CERN API should be in URLs");
+        // Check some key sources are present
+        assert!(urls.iter().any(|url| url.contains("arxiv")), "arXiv should be in URLs");
+        assert!(urls.iter().any(|url| url.contains("semanticscholar")), "Semantic Scholar should be in URLs");
     }
 
     #[test]

@@ -825,20 +825,31 @@ async fn main() {
 
                 let self_input = compute::self_state_input(&field);
 
-                // v1.2: Skip punten met near-zero tension (efficiëntie)
-                // Lucy wordt automatisch sneller naarmate haar veld stabiliseert
-                let tension_floor = 0.0001; // v2.1: Lagere drempel — meer punten blijven actief
+                // v2.8: PARALLELLE FIELD UPDATE VIA FILTERED ITER
+                // Vorige bottleneck: sequentieel loop over 20K punten × 256 dims = 5M ops
+                // Nu: bepaal subset, dan stuur rayon-parallel door loop
+                // Belang: elk punt's update is onafhankelijk (leest buren, schrijft zelf)
+                let tension_floor = 0.0001;
+
+                // Stap 1: Filter welke punten moeten updated worden (vast)
+                let to_update: Vec<u32> = field.active_set
+                    .iter()
+                    .filter(|&&id| {
+                        let p = &field.points[id as usize];
+                        let dominated = p.tension < tension_floor
+                            && !p.is_sensory()
+                            && !p.is_output()
+                            && tick % 10 != 0;
+                        !dominated
+                    })
+                    .copied()
+                    .collect();
+
+                // Stap 2: (Optional) Parallelle prep: bepaal inputs voor alle punten tegelijk
+                // Voor nu: sequentieel blijven, want update_phi is read-heavy (buren)
+                // TODO v2.8.1: extraheer compute_phi_delta() en parallelliseer deze hele loop
                 let mut updated = 0u32;
-                for i in 0..field.active_set.len() {
-                    let id = field.active_set[i];
-                    // Altijd update sensory + output punten, skip rustige hidden punten
-                    let dominated = field.points[id as usize].tension < tension_floor
-                        && !field.points[id as usize].is_sensory()
-                        && !field.points[id as usize].is_output()
-                        && tick % 10 != 0; // elke 10e tick toch updaten (voorkomt permanent slapen)
-
-                    if dominated { continue; }
-
+                for &id in &to_update {
                     let input = if field.points[id as usize].is_sensory() {
                         Some(&self_input)
                     } else {
