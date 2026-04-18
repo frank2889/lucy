@@ -74,6 +74,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "du ",
     "head ",
     "tail ",
+    "cp ",      // v2.6.15: enable restart_self binary swap
+    "mv ",      // v2.6.15: enable restart_self binary swap
 ];
 
 /// Lucy's zelf-aanpassingssysteem

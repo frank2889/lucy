@@ -300,7 +300,9 @@
             let ewc_pen = ewc_penalty(coupling, field.kl_scale);
             // v1.0: Broadcast couplings krijgen 2× learning rate (dragen bewust signaal)
             let lr = if coupling.broadcast { eta * 2.0 } else { eta };
-            coupling.weight -= lr * dw + mu * coupling.momentum + lr * ewc_pen;
+            // v2.6.15 fix: use momentum directly (already blended on line 298),
+            // don't double-apply mu factor by using dw again
+            coupling.weight -= lr * coupling.momentum + lr * ewc_pen;
 
             // v2.6: Free Energy-gebaseerd vergeten (Friston precision weighting op synapsen)
             // decay ∝ avg_F / importance — onbelangrijke weights vervagen, belangrijke overleven
@@ -3301,9 +3303,14 @@
 
             // Ignition vereist: hoge activatie + hoge geïntegreerde informatie + hoge EFE
             // Dit combineert sterkte (phi), integratie (IIT), en relevantie (Active Inference)
-            let ignition_score = phi_norm
+            let mut ignition_score = phi_norm
                 * (1.0 + p.phi_integrated)     // IIT boost: geïntegreerd = bewuster
                 * (1.0 + p.expected_free_energy * 0.5); // EFE boost: relevante info wint
+
+            // v2.6.15: novelty-gated ignition — punten met hoge RND-score (verrassing)
+            // krijgen een multiplicatieve boost (geen andere winners als iets verrassends gebeurt)
+            let novelty_boost = 1.0 + p.curiosity * 0.3;
+            ignition_score *= novelty_boost;
 
             // v2.5.2: GEEN candidate filter — alle depth-3 actieve punten zijn kandidaat
             // De winnaar-selectie bepaalt wie ignite, niet een absolute drempel
@@ -3482,6 +3489,11 @@
             );
         }
 
+        // v2.6.15 winner-refractory: voorkomen dat dezelfde concept elke tick wint
+        if field.winner_refractory_until > field.tick {
+            candidates.retain(|(id, _, _)| *id as u32 != field.last_winner_id);
+        }
+
         // === Stap 2: Winner-Take-All — sterkste kandidaat wint ===
         // Bewuste ervaring is exclusief: maar één representatie tegelijk
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -3502,6 +3514,10 @@
             }
         }
         WINNER_LAST_ID.store(winner_u32, Ordering::Relaxed);
+
+        // v2.6.15: Zet refractory period (50 ticks) zodat dezelfde winner niet direct herignite
+        field.last_winner_id = winner_u32;
+        field.winner_refractory_until = field.tick + 50;
 
         // === Stap 3: Ignition check — is het signaal sterk genoeg? ===
         // Ignition = zelfversterkende activatie. Check: hebben de buren van de winnaar
@@ -3677,7 +3693,10 @@
             }
 
             field.points[id as usize].rnd_score = score;
-            field.points[id as usize].curiosity += 0.1 * score;
+            // v2.6.15 fix: novelty should blend via EMA, not unbounded additive accumulation
+            let rnd_influence = (0.1 * score).min(0.5);
+            field.points[id as usize].curiosity =
+                (field.points[id as usize].curiosity * 0.95 + rnd_influence * 0.05).clamp(0.0, 1.0);
 
             // Train predictor om frozen te benaderen (gradient descent)
             for j in 0..RND_DIM {

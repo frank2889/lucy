@@ -1,5 +1,122 @@
 # Lucy Changelog
 
+## v2.6.15 (2026-04-18) — Leren + Levendigheid: momentum-fix, curiosity-EMA, goal-dedup, winner-refractory
+
+Volledige code-review van drie Opus-agents ontdekte zes geverifieerde bugs die leren en
+gedrag structureel ondergraven. Drie kleine fixes (Groep A) + twee architecturale
+levendigheids-wins (Groep B1). Geen breaking changes; schema backwards-compatible via
+`#[serde(default)]`.
+
+### Groep A — Leer- en systeemhygiene-bugs
+
+Drie echte bugs in compute.rs en thinker.rs die weights en selectie-logica knakten:
+
+- **Fix A1 — Dubbele momentum-applicatie** (compute.rs:303): momentum werd twee keer
+  meegewogen. Weights convergeren nu correct naar attractor via exponential moving average.
+  Zie [ADR 0004](decisions/0004-momentum-rnd-curiosity-fix.md).
+
+- **Fix A2 — Onbegrensde RND-curiosity** (compute.rs:3680): accumulation zonder EMA-structuur.
+  Nu: EMA-blend (95% old, 5% new) consistent met dopamine/serotonin. Verrassing triggert
+  exponentiële decay-curve, niet runaway. Zie [ADR 0004](decisions/0004-momentum-rnd-curiosity-fix.md).
+
+- **Fix A3 — Goal-deduplicatie blokkeert spawn niet** (thinker.rs:274): RECENT_GOAL_DESCS
+  telde duplicaten maar `push` gebeurde altijd. Nu: `return None` op tweede voorkomen.
+  Voorkomt `think:meta_learning`-spirals. Zie [ADR 0006](decisions/0006-goal-dedup-tick-manipulation-whitelist.md).
+
+- **Fix A4 — Self-modify whitelist blokkeert `cp`/`mv`** (self_modify.rs:65): restart_self
+  kon binaries niet swappen. Nu: `cp` en `mv` toegevoegd. Self-evolutie (recompile → restart)
+  werkt end-to-end. Zie [ADR 0006](decisions/0006-goal-dedup-tick-manipulation-whitelist.md).
+
+- **Fix A5 — Tick-manipulatie overwrijft interval-triggers** (main.rs:1202): `/decide_action`
+  sprong naar volgende explore-moment, sloeg ticks over. Nu: `return` zonder tick-overwrite.
+  Risk-zone-logging, boredom-check, alle interval-triggers vuren op correct moment.
+  Zie [ADR 0006](decisions/0006-goal-dedup-tick-manipulation-whitelist.md).
+
+### Groep B1 — Levendigheid: winner-refractory + novelty-gated ignition
+
+Architecturale gap: zelfde GNW-concept kon elke tick winnen (87.5% cap-hit ratio) ondanks
+top-K sparsity. RND-novelty werd berekend maar niet gekoppeld aan selectie.
+
+Twee wijzigingen: refractory period (50 ticks) blokkeert vorige winner, novelty-boost
+multiplicatief op ignition_score. Gevolg: verrassing → hoger curiosity → ander concept wint.
+
+- **Field-struct uitbreiding** (lucy-state/lib.rs): `last_winner_id`, `winner_refractory_until`
+  met `#[serde(default)]` (backwards-compatible).
+- **Refractory check + novelty-boost** (compute.rs:3495-3523): na top-K, filter vorige winner.
+  Novelty-multiplicatieve boost op ignition_score.
+
+Verificatie: `winner_turnover_ratio` stijgt van ~0.35 naar ~0.5+ (minder oligarchie).
+Zie [ADR 0005](decisions/0005-winner-refractory-novelty-ignition.md).
+
+### Schema-impact
+
+Twee nieuwe u64-velden op Field via `#[serde(default)]` → existerende snapshots laden zonder
+migratie. Geen FieldV2-bridge nodig.
+
+---
+
+## v2.6.14 (2026-04-18) — Hygiëne-fixes: /version, goal-completion, deploy-guard
+
+Drie losse fixes die tijdens een status-check aan het licht kwamen. Eén emotie-
+paradox (frustration=0.99 vastgepind) bleek een secundair gevolg van de
+goal-completion bug — dus geen aparte ingreep.
+
+### Fix 1 — /version endpoint gaf "v0.0.0" / "unknown"
+
+Root cause: `Dockerfile` kopieerde `Cargo.toml` + `crates/` naar de builder,
+maar niet `.git/` of `docs/CHANGELOG.md`. `build.rs` valt in die volgorde terug
+op git-sha → CHANGELOG top-line → `"v0.0.0"`. Zonder CHANGELOG: alles mist.
+
+Fix: `COPY docs/ docs/` toegevoegd aan builder-stage. `build.rs` kan nu de
+human-readable versie uit `docs/CHANGELOG.md` lezen. Git_sha blijft `"unknown"`
+(geen `.git/` in container) — indien nodig later via `--build-arg` injecteren.
+
+Risico dat hiermee wordt afgedicht: exact het scenario uit `deploy.sh` v2.6.11
+("maandenlang dachten we dat v2.6.9 draaide, was v2.6.5").
+
+### Fix 2 — Goal-completion zombie-bug
+
+Root cause: `crates/lucy-core/src/thinker.rs` had een vroege-skip
+`if goal.progress >= 1.0 { continue; }` bovenin de evaluatie-loop. Goals die in
+een vorige `reflect()`-cyclus `progress=1.0` bereikten, werden dáár weggefilterd
+vóór ze aan `completed_indices` konden worden toegevoegd. Gevolg:
+
+- `GOAL_COMPLETE_TOTAL` werd nooit opgehoogd
+- `GOAL_LATENCY_SUM_TICKS` bleef op 0 → `mean_latency_ticks=0.0`
+- Zombie-goals bleven eeuwig in `field.goals` met `progress=1.0`
+- `/telemetry` toonde 5 goals waarvan meerdere met progress=1.0, maar
+  `goal_stats.complete_total=0`
+
+Fix: vroege-skip verwijderd. De al bestaande check op regel 322 (`if
+goal.progress >= 1.0 → push + continue`) werd daarmee dode code; nu is hij
+weer de feitelijke afhandeling.
+
+**Knock-on op emoties**: zonder completions steeg `control_belief` niet, dus de
+EMA van stuckness convergeerde naar 1.0 → `frustration=0.99`. Na deze fix
+zouden frustration en satisfaction weer moeten bewegen (te verifiëren na
+deploy).
+
+### Fix 3 — deploy.sh guard tegen "unknown == unknown"
+
+Root cause: `deploy.sh` regel 198 checkte `[ "$POST_SHA" = "$PRE_SHA" ]` om
+deploy-mislukking te detecteren. Als `/version` `"unknown"` teruggeeft (Fix 1
+nog niet uitgerold, of toekomstige build-breuk), dan is `"unknown" = "unknown"`
+altijd waar → valse positief → `abort "Deploy onverlopen"` zonder feitelijke
+deploy-mislukking.
+
+Fix: extra conditie `[ "$POST_SHA" != "unknown" ]`. Als sha onbekend is:
+log-warning, maar niet aborteren. De andere guards (tick niet 0, active-count
+behouden, tick beweegt na 20s) dekken de rest af.
+
+### Niet gewijzigd — d3_ratio=1.0
+
+Tijdens de status-check viel op dat `depth3_active == depth3_total` (21452/21452,
+ratio 1.0). Eerste reflex: competitie-invariant breuk. Correctie: sinds v2.6.11
+(7269bda) is vastgelegd dat `d3_ratio` statisch wordt na growth — alle depth-3
+concepten zijn ooit FLAG_ACTIVE geweest en dat blijft zo. De echte drift-metrics
+zijn `score_cv` (0.217 = gezond) en `winner_turnover_ratio` (0.35 = gezond).
+Top-K sparsity dwingt selectie af uit de 21452 kandidaten; Lucy kán nog kiezen.
+
 ## v2.6.13 (2026-04-15) — Evaluatie-observability: winner turnover + goal latency
 
 Observe-only toevoeging voor het 500K evaluatievenster. Géén gedragswijziging.

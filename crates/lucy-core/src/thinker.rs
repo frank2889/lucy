@@ -269,11 +269,11 @@ pub fn generate_goal(
         META_LEARN_SPAWN_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
     if let Ok(mut recent) = RECENT_GOAL_DESCS.lock() {
-        // Tel repeat events: als description al 2+ keer in laatste 5 voorkomt,
-        // tellen we deze spawn als repeat-event (d.w.z. 3e of hoger voorkomen).
+        // v2.6.15 fix: block spawn if goal already exists in recent 5
         let occurrences = recent.iter().filter(|d| d.as_str() == description.as_str()).count();
         if occurrences >= 2 {
             GOAL_REPEAT_EVENTS.fetch_add(1, Ordering::Relaxed);
+            return None;  // prevent goal spiral
         }
         recent.push(description.clone());
         if recent.len() > 5 { recent.remove(0); }
@@ -314,11 +314,11 @@ pub fn reflect(
     let mut abandoned_indices = Vec::new();
 
     for (i, goal) in field.goals.iter_mut().enumerate() {
-        if goal.progress >= 1.0 { continue; }
-
         let age = tick.saturating_sub(goal.created_tick);
 
-        // v2.5: Voltooide goals meteen opruimen
+        // v2.5: Voltooide goals meteen opruimen (ook goals die al eerder 1.0
+        // bereikten — v2.6.14 fix: vroege-skip verwijderd die deze goals
+        // onbereikbaar maakte, waardoor ze noch geteld noch opgeruimd werden).
         if goal.progress >= 1.0 {
             completed_indices.push(i);
             continue;

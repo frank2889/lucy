@@ -603,6 +603,14 @@ pub struct Field {
     #[serde(default)]
     pub ignition_strength: f32,
 
+    /// Laastse winnaarpunt-ID in GNW ignition
+    #[serde(default)]
+    pub last_winner_id: u32,
+
+    /// Tick tot wanneer de huidge winner in refractory is (minstens 50 ticks)
+    #[serde(default)]
+    pub winner_refractory_until: u64,
+
     /// Gemiddelde Expected Free Energy G — stuurt exploratie vs exploitatie
     #[serde(default)]
     pub avg_expected_free_energy: f32,
@@ -756,6 +764,8 @@ impl From<schema_v1::FieldV1> for Field {
             branching_ratio_avg: v1.branching_ratio_avg,
             ignition_active: v1.ignition_active,
             ignition_strength: v1.ignition_strength,
+            last_winner_id: 0,  // v2.6.15: default for legacy snapshots
+            winner_refractory_until: 0,  // v2.6.15: default for legacy snapshots
             avg_expected_free_energy: v1.avg_expected_free_energy,
             adaptive: v1.adaptive,
             temporal_history: v1.temporal_history,
@@ -865,6 +875,8 @@ impl From<schema_v0::FieldV0> for Field {
             branching_ratio_avg: v0.branching_ratio_avg,
             ignition_active: v0.ignition_active,
             ignition_strength: v0.ignition_strength,
+            last_winner_id: 0,  // v2.6.15: default for legacy snapshots
+            winner_refractory_until: 0,  // v2.6.15: default for legacy snapshots
             avg_expected_free_energy: v0.avg_expected_free_energy,
             adaptive: v0.adaptive,
             temporal_history: v0.temporal_history,
@@ -1247,6 +1259,8 @@ impl Field {
             branching_ratio_avg: 0.0,
             ignition_active: false,
             ignition_strength: 0.0,
+            last_winner_id: 0,  // v2.6.15
+            winner_refractory_until: 0,  // v2.6.15
             avg_expected_free_energy: 0.0,
             current_intention: None,
             intention_strength: 0.0,
