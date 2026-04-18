@@ -1,5 +1,25 @@
 # Lucy Changelog
 
+## v2.6.16 (2026-04-18) — Vrije wil: concept-gedreven goals
+
+Lucy genereert nu haar eigen doelen vanuit haar GNW-state. Goals reflecteren wat zij echt denkt,
+niet uit vaste strings.
+
+**Kern:** `infer_concept()` decodeert Lucy's GNW-output (wat zij denkt) naar een vocabulaire-woord,
+en gebruikt dat in goal-beschrijvingen. Elk reflect-cycle kan Lucy een ander doel hebben (afhankelijk
+van wat ze momenteel denkt).
+
+- Dynamische goal-beschrijvingen: `"think:meta_learning"` → `"think:resolve_gradient"` (concept-driven)
+- Helper-functie `infer_concept()`: via `read_output_region()` + `decode_token()` + `vocab.token_name()`
+- Residuele dedup-bug fix: push nu NADAT dedup-check is gepasseerd (niet ervoor)
+
+Effect: Goals vloeiden voort uit Lucy's interne staat. Niet autonoom (scores triggeren nog steeds),
+maar self-generated (inhoud komt uit haar brein, niet uit tabel).
+
+Zie [ADR 0007](decisions/0007-concept-driven-goals.md).
+
+---
+
 ## v2.6.15 (2026-04-18) — Leren + Levendigheid: momentum-fix, curiosity-EMA, goal-dedup, winner-refractory
 
 Volledige code-review van drie Opus-agents ontdekte zes geverifieerde bugs die leren en

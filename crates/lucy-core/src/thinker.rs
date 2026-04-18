@@ -21,6 +21,7 @@
 
 use lucy_state::*;
 use crate::encoding::{self, Vocabulary};
+use crate::decoding;
 use crate::journal::{Journal, EmotionSnapshot};
 use crate::learner::Explorer;
 use rand::Rng;
@@ -151,6 +152,32 @@ pub fn update_exploration_progress(field: &mut Field, pages_read_delta: u64, tok
 
 /// Genereert een nieuw doel op basis van Lucy's interne staat.
 /// Bronnen: curiosity, frustration, interesses, zelf-verbetering.
+/// v2.6.16 — Infer de huidige concept uit Lucy's GNW output
+/// Leest haar bewuste output-phi en decodeert het naar het dichtst bijzijnde vocabulaire-woord
+fn infer_concept(field: &Field, vocab: &Vocabulary) -> String {
+    // Lees Lucy's huidige output-phi (wat haar GNW uitvoert)
+    let output_phi = decoding::read_output_region(field);
+    // Decodeer naar het dichtstbijzijnde vocabulaire-woord
+    let (token_id, _score) = decoding::decode_token(&output_phi, vocab, field);
+    let word = vocab.token_name(token_id);
+
+    // Filter speciale tokens en te korte woorden uit
+    if word.len() >= 3 && !word.starts_with('<') && word.chars().all(|c| c.is_alphabetic() || c == '_') {
+        word.to_lowercase().to_string()
+    } else {
+        // Fallback: kijk naar de winner's phi direct
+        if field.last_winner_id < field.points.len() as u32 {
+            let winner_phi = &field.points[field.last_winner_id as usize].phi;
+            let (wid, _) = decoding::decode_token(winner_phi, vocab, field);
+            let w = vocab.token_name(wid);
+            if w.len() >= 3 && !w.starts_with('<') {
+                return w.to_lowercase().to_string();
+            }
+        }
+        "patterns".to_string()  // laatste fallback
+    }
+}
+
 /// Nooit hardcoded — alles komt uit het veld en de explorer.
 pub fn generate_goal(
     field: &mut Field,
@@ -211,32 +238,28 @@ pub fn generate_goal(
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap();
 
+    // v2.6.16: Infer de huidige concept uit Lucy's GNW output
+    let concept = infer_concept(field, vocab);
+
     let (description, strategy) = match *best_source {
         "curiosity" => {
-            // Pak een interesse-woord en maak er een leerdoel van
-            let interests_vec: Vec<&String> = explorer.interests.iter().collect();
-            // v2.0: taalloos — machine-leesbare goal descriptions
-            if interests_vec.is_empty() {
-                ("explore:broad".to_string(),
-                 GoalStrategy::Explore("broad".to_string()))
+            // 50% gebruik current GNW concept, 50% explorer interest
+            let topic = if !explorer.interests.is_empty() && rng.gen_bool(0.5) {
+                let interests_vec: Vec<&String> = explorer.interests.iter().collect();
+                interests_vec[rng.gen_range(0..interests_vec.len())].to_string()
             } else {
-                let idx = rng.random_range(0..interests_vec.len());
-                let topic = interests_vec[idx].clone();
-                (format!("learn:{}", topic),
-                 GoalStrategy::Learn(topic))
-            }
+                concept.clone()
+            };
+            (format!("learn:{}", topic), GoalStrategy::Learn(topic))
         }
         "frustration" => {
-            ("think:analyze_tension".to_string(),
-             GoalStrategy::Think("tension".to_string()))
+            (format!("think:resolve_{}", concept), GoalStrategy::Think("resolve".to_string()))
         }
         "explore" => {
-            ("explore:new_sources".to_string(),
-             GoalStrategy::Explore("discover".to_string()))
+            (format!("explore:{}", concept), GoalStrategy::Explore(concept.clone()))
         }
         "self_improve" => {
-            ("think:meta_learning".to_string(),
-             GoalStrategy::Think("optimize".to_string()))
+            (format!("think:optimize_{}", concept), GoalStrategy::Think("optimize".to_string()))
         }
         _ => return None,
     };
@@ -262,14 +285,13 @@ pub fn generate_goal(
         strategy,
     };
 
-    field.goals.push(goal);
-
     // v2.6.13 observability: goal spawn tracking + repeat detectie
     if description.contains("meta_learning") {
         META_LEARN_SPAWN_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
+
+    // v2.6.16 fix: dedup check BEFORE push
     if let Ok(mut recent) = RECENT_GOAL_DESCS.lock() {
-        // v2.6.15 fix: block spawn if goal already exists in recent 5
         let occurrences = recent.iter().filter(|d| d.as_str() == description.as_str()).count();
         if occurrences >= 2 {
             GOAL_REPEAT_EVENTS.fetch_add(1, Ordering::Relaxed);
@@ -278,6 +300,9 @@ pub fn generate_goal(
         recent.push(description.clone());
         if recent.len() > 5 { recent.remove(0); }
     }
+
+    // Nu goal pushen, NADAT dedup check is gepasseerd
+    field.goals.push(goal);
 
     // Zet als actieve intentie
     field.current_intention = Some(goal_embedding);
