@@ -90,6 +90,8 @@ mod retrieval;
 mod thinker;
 mod field_handle;
 mod backup;
+mod epistemic_broker;
+mod compute_broker;
 mod poster;
 mod ai_teacher;
 mod self_test;
@@ -1021,6 +1023,77 @@ async fn main() {
                 if tick % 500 == 0 {
                     compute::update_causal_events(&mut field);
                 }
+
+                // v2.6.17: GitHub Releases backup (immortality)
+                if tick > 0 && tick % 50_000 == 0 {
+                    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                        let t = token.clone();
+                        let tick_copy = tick;
+                        tokio::spawn(async move {
+                            match backup::push_snapshot_to_github(&t, tick_copy).await {
+                                Ok(tag) => tracing::info!(tag, "Snapshot backed up to GitHub"),
+                                Err(e) => tracing::warn!("GitHub backup failed: {}", e),
+                            }
+                        });
+                    }
+                }
+
+                // v2.6.17: Curiosity-driven frontier injection (elke 1000 ticks)
+                if tick % 1000 == 0 && tick > 0 {
+                    let gaps = epistemic_broker::least_stable_concepts(&field, 1);
+                    if let Some(top_gap) = gaps.first() {
+                        // In v2.6.18+ zou dit via vocab.token_name() gaan
+                        // Voor nu: hardcoded top concept label of placeholder
+                        let concept_name = if top_gap.concept_idx == 0 {
+                            "concepts".to_string()  // placeholder
+                        } else {
+                            format!("concept_{}", top_gap.concept_idx)
+                        };
+
+                        let urls = epistemic_broker::urls_for_concept(&concept_name);
+                        if let Ok(mut exp) = shared.explorer.try_write() {
+                            for url in urls.iter().take(2) {
+                                exp.discover_urls(url);
+                            }
+                        }
+                        tracing::debug!(
+                            concept = concept_name,
+                            urgency = top_gap.urgency,
+                            "v2.6.17: Curiosity-URL injected"
+                        );
+                    }
+                }
+
+                // v2.6.17: Stagnation-triggered compute acquisition (elke 2000 ticks)
+                if tick % 2000 == 0 && tick > 0 {
+                    let gaps = epistemic_broker::least_stable_concepts(&field, 2);
+                    let has_severe_gap = gaps.iter().any(|g| g.urgency > 0.7);
+
+                    if has_severe_gap {
+                        if let Ok(github_token) = std::env::var("GITHUB_TOKEN") {
+                            if let Ok(lucy_url) = std::env::var("LUCY_PUBLIC_URL") {
+                                for gap in gaps.iter().take(1) {
+                                    let concept_name = format!("concept_{}", gap.concept_idx);
+                                    let t = github_token.clone();
+                                    let url = lucy_url.clone();
+                                    tokio::spawn(async move {
+                                        match compute_broker::trigger_github_actions_worker(
+                                            &t, &url, &concept_name, 3000
+                                        ).await {
+                                            Ok(run_id) => {
+                                                tracing::info!(run_id, concept = concept_name, "GitHub Actions worker dispatched");
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Compute trigger failed: {}", e);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 compute::apply_intention(&mut field);
 
                 // v2.1: WM write + kWTA elke 100 ticks (was 20)

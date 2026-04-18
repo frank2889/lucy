@@ -190,6 +190,9 @@ pub fn spawn_server(state: SharedState) {
             .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
             .route("/plugins", get(plugins_list_handler))
             .route("/version", get(version_handler))
+            // v2.6.17: Epistemic awareness + autonomy endpoints
+            .route("/admin/epistemic", get(epistemic_handler))
+            .route("/admin/proposals", get(proposals_handler))
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
             .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
@@ -1544,4 +1547,57 @@ async fn plugins_list_handler() -> Json<Value> {
     }
 
     Json(json!({ "plugins": plugins }))
+}
+
+// v2.6.17: Epistemic awareness endpoint
+async fn epistemic_handler(State(state): State<SharedState>) -> Json<Value> {
+    let field_guard = state.field_handle.snapshot.load();
+    if !field_guard.points.is_empty() {
+        let gaps = crate::epistemic_broker::least_stable_concepts(&field_guard, 5);
+
+        let gaps_json: Vec<Value> = gaps
+            .iter()
+            .map(|g| {
+                json!({
+                    "concept_idx": g.concept_idx,
+                    "drift": g.drift,
+                    "silhouette": g.silhouette,
+                    "urgency": g.urgency,
+                })
+            })
+            .collect();
+
+        let maybe_proposal = crate::epistemic_broker::maybe_propose_parameter_change(&field_guard);
+        let proposal_json = maybe_proposal
+            .map(|p| {
+                json!({
+                    "tick": p.tick,
+                    "observation": p.observation,
+                    "hypothesis": p.hypothesis,
+                    "proposed_change": p.proposed_change,
+                    "confidence": p.confidence,
+                })
+            })
+            .unwrap_or(Value::Null);
+
+        Json(json!({
+            "is_stuck": gaps.first().map(|g| g.urgency > 0.7).unwrap_or(false),
+            "gaps": gaps_json,
+            "current_proposal": proposal_json,
+            "tick": field_guard.tick,
+        }))
+    } else {
+        Json(json!({
+            "error": "field snapshot unavailable"
+        }))
+    }
+}
+
+// v2.6.17: Parameter proposals endpoint (stubs for now)
+async fn proposals_handler() -> Json<Value> {
+    // TODO: persist proposals to data/proposals.json and serve them
+    Json(json!({
+        "proposals": [],
+        "note": "proposal persistence coming in v2.6.18"
+    }))
 }

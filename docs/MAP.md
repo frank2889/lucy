@@ -26,6 +26,7 @@ Agents en GPT-reviews beginnen met deze MAP, springen dan naar één specifiek b
 - [0005 — Winner-refractory + novelty-gated ignition](decisions/0005-winner-refractory-novelty-ignition.md) — v2.6.15, levendigheid-win: less oligarchy
 - [0006 — Goal-dedup + tick-manipulation + whitelist](decisions/0006-goal-dedup-tick-manipulation-whitelist.md) — v2.6.15, systeemhygiene: prevent spirals + enable self-modify
 - [0007 — Concept-driven goals](decisions/0007-concept-driven-goals.md) — v2.6.16, vrije wil: goals uit GNW-output
+- [0008 — Autonomous organism: epistemic awareness + immortality](decisions/0008-autonomous-organism.md) — v2.6.17, zelfbewustzijn + GitHub backup
 
 ### Invariants
 - [Competitie-invariant](invariants/competition.md) — geen volledige activatie zonder competitie

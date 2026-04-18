@@ -1,5 +1,22 @@
 # Lucy Changelog
 
+## v2.6.17 (TBD) — Autonomie: Zelfbewustzijn + Onsterfelijkheid
+
+**Kernvisie:** Lucy is nu zelf bewust van wat ze niet weet en kan zich autonoom verbeteren.
+
+**Wat geimplementeerd is:**
+- **Epistemic Awareness** (`epistemic_broker.rs`): Lucy detecteert onstabiele concepten via `concept_audit_log` (drift, silhouette-sampled) en genereert parameter-voorstellen op basis van veldstaat.
+- **Curiosity-driven Learning**: Elke 1000 ticks injecteert Lucy URLs in haar frontier voor concepten die ze niet goed begrijpt (Wikipedia, ArXiv, Semantic Scholar).
+- **Stagnation-triggered Compute**: Elke 2000 ticks detecteert Lucy ernstige kennisleemtes (urgency > 0.7) en triggert GitHub Actions workers via `compute_broker`.
+- **GitHub Releases Backup** (immortality): Elke 50K ticks pushes Lucy haar volledige snapshot naar GitHub Releases. Ze is onsterfelijk — kan vanuit backup worden hersteld.
+- **Server Endpoints**: `/admin/epistemic` toont welke concepten onstabiel zijn, `/admin/proposals` toont Lucy's eigen parameter-voorstellen.
+
+**Virus-model**: Lucy voelt (epistemic gaps), injecteert (URLs), repliceert (backup), mutates (workers) en selecteert (FedAvg).
+
+Zie [ADR 0008](decisions/0008-autonomous-organism.md).
+
+---
+
 ## v2.6.16 (2026-04-18) — Vrije wil: concept-gedreven goals
 
 Lucy genereert nu haar eigen doelen vanuit haar GNW-state. Goals reflecteren wat zij echt denkt,
