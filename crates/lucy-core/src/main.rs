@@ -1039,29 +1039,64 @@ async fn main() {
                 }
 
                 // v2.6.17: Curiosity-driven frontier injection (elke 1000 ticks)
+                // Gebruikt prioritized_urls() — meer bronnen bij hogere urgency
                 if tick % 1000 == 0 && tick > 0 {
                     let gaps = epistemic_broker::least_stable_concepts(&field, 1);
                     if let Some(top_gap) = gaps.first() {
-                        // In v2.6.18+ zou dit via vocab.token_name() gaan
-                        // Voor nu: hardcoded top concept label of placeholder
-                        let concept_name = if top_gap.concept_idx == 0 {
-                            "concepts".to_string()  // placeholder
-                        } else {
+                        let concept_name = if field.last_winner_id < field.points.len() as u32 {
+                            // Probeer de dominant concept via infer_concept proxy
                             format!("concept_{}", top_gap.concept_idx)
+                        } else {
+                            "patterns".to_string()
                         };
 
-                        let urls = epistemic_broker::urls_for_concept(&concept_name);
+                        let urls = epistemic_broker::prioritized_urls(&concept_name, top_gap.urgency);
                         if let Ok(mut exp) = shared.explorer.try_write() {
-                            for url in urls.iter().take(2) {
+                            for url in urls.iter() {
                                 exp.discover_urls(url);
                             }
                         }
                         tracing::debug!(
                             concept = concept_name,
                             urgency = top_gap.urgency,
-                            "v2.6.17: Curiosity-URL injected"
+                            n_urls = urls.len(),
+                            "v2.6.17: Curiosity-URLs injected"
                         );
                     }
+                }
+
+                // v2.6.17: Self-synthesis — Lucy genereert trainingsdata vanuit haar eigen staat
+                // Elke 5000 ticks: zelfobservatie als training-zin → frontier
+                if tick % 5000 == 0 && tick > 0 {
+                    // Bepaal dominant emotie als string
+                    let n_pts = field.active_set.len().max(1) as f32;
+                    let avg_cur: f32 = field.active_set.iter()
+                        .map(|&id| field.points[id as usize].curiosity).sum::<f32>() / n_pts;
+                    let avg_sat: f32 = field.active_set.iter()
+                        .map(|&id| field.points[id as usize].satisfaction).sum::<f32>() / n_pts;
+                    let avg_fru: f32 = field.active_set.iter()
+                        .map(|&id| field.points[id as usize].frustration).sum::<f32>() / n_pts;
+                    let dominant_emotion = if avg_cur > avg_sat && avg_cur > avg_fru {
+                        "curiosity"
+                    } else if avg_sat > avg_fru {
+                        "satisfaction"
+                    } else {
+                        "frustration"
+                    };
+
+                    let current_concept = field.goals.first()
+                        .map(|g| g.description.as_str())
+                        .unwrap_or("concepts");
+                    let self_sentence = epistemic_broker::generate_self_training_sentence(
+                        current_concept,
+                        tick,
+                        dominant_emotion,
+                    );
+
+                    if let Ok(mut exp) = shared.explorer.try_write() {
+                        exp.discover_urls(&self_sentence);
+                    }
+                    tracing::debug!(tick, emotion = dominant_emotion, "v2.6.17: Self-synthesis injected");
                 }
 
                 // v2.6.17: Stagnation-triggered compute acquisition (elke 2000 ticks)
@@ -1070,26 +1105,22 @@ async fn main() {
                     let has_severe_gap = gaps.iter().any(|g| g.urgency > 0.7);
 
                     if has_severe_gap {
-                        if let Ok(github_token) = std::env::var("GITHUB_TOKEN") {
-                            if let Ok(lucy_url) = std::env::var("LUCY_PUBLIC_URL") {
-                                for gap in gaps.iter().take(1) {
-                                    let concept_name = format!("concept_{}", gap.concept_idx);
-                                    let t = github_token.clone();
-                                    let url = lucy_url.clone();
-                                    tokio::spawn(async move {
-                                        match compute_broker::trigger_github_actions_worker(
-                                            &t, &url, &concept_name, 3000
-                                        ).await {
-                                            Ok(run_id) => {
-                                                tracing::info!(run_id, concept = concept_name, "GitHub Actions worker dispatched");
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Compute trigger failed: {}", e);
-                                            }
-                                        }
-                                    });
+                        let lucy_url = std::env::var("LUCY_PUBLIC_URL")
+                            .unwrap_or_else(|_| "https://lucy.world".to_string());
+                        for gap in gaps.iter().take(1) {
+                            let concept_name = format!("concept_{}", gap.concept_idx);
+                            let url = lucy_url.clone();
+                            tokio::spawn(async move {
+                                match compute_broker::trigger_best_available(&url, &concept_name, 3000).await {
+                                    Ok((platform, run_id)) => {
+                                        tracing::info!(
+                                            platform, run_id, concept = concept_name,
+                                            "v2.6.17: Compute worker dispatched"
+                                        );
+                                    }
+                                    Err(e) => tracing::warn!("Compute trigger failed: {}", e),
                                 }
-                            }
+                            });
                         }
                     }
                 }

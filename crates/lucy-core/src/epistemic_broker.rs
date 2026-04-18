@@ -73,27 +73,59 @@ pub fn least_stable_concepts(field: &Field, top_n: usize) -> Vec<EpistemicGap> {
     gaps
 }
 
-/// Genereert Leer-URLs voor een concept — Wikipedia, ArXiv, Semantic Scholar.
+/// Genereert leer-URLs voor een concept — breed spectrum van gratis data-bronnen.
+///
+/// Bronnen in prioriteitsvolgorde:
+/// Wikipedia → ArXiv → OpenAlex → Project Gutenberg → PubMed → Wayback Machine → Semantic Scholar
 pub fn urls_for_concept(concept: &str) -> Vec<String> {
-    let safe_concept = concept
+    let safe = concept
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect::<String>();
+    let pct = concept
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("+");
 
     vec![
-        format!(
-            "https://en.wikipedia.org/w/api.php?action=query&titles={}&prop=extracts&format=json",
-            safe_concept
-        ),
-        format!(
-            "https://arxiv.org/search/?query={}&searchtype=all&abstracts=show&order=-announced_date_first&size=10",
-            safe_concept
-        ),
-        format!(
-            "https://api.semanticscholar.org/graph/v1/paper/search?query={}",
-            safe_concept
-        ),
+        // Wikipedia — betrouwbaar fundament
+        format!("https://en.wikipedia.org/wiki/{}", safe),
+        // ArXiv — meest recente wetenschap
+        format!("https://arxiv.org/search/?query={}&searchtype=all&start=0", pct),
+        // OpenAlex — open academische database, geen API-key nodig
+        format!("https://api.openalex.org/works?search={}&per-page=5&select=title,abstract_inverted_index", pct),
+        // Project Gutenberg — klassieke teksten, breed vocabulaire
+        format!("https://gutendex.com/books/?search={}", pct),
+        // PubMed — biomedisch/wetenschappelijk
+        format!("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={}&retmax=5&retmode=json", pct),
+        // Wayback Machine — historische perspectieven, diverse taal
+        format!("https://archive.org/search?query={}&mediatype=texts&rows=5", pct),
+        // Semantic Scholar — citatie-netwerk
+        format!("https://api.semanticscholar.org/graph/v1/paper/search?query={}&limit=3&fields=title,abstract", pct),
     ]
+}
+
+/// Synthetische trainingsdata vanuit Lucy's GNW-staat (self-play).
+/// Lucy stelt zichzelf observaties over haar eigen staat — verhoogt zelf-bewustzijn.
+pub fn generate_self_training_sentence(
+    current_concept: &str,
+    tick: u64,
+    dominant_emotion: &str,
+) -> String {
+    let templates = [
+        format!("At tick {} I am thinking about {}. My primary emotional state is {}.", tick, current_concept, dominant_emotion),
+        format!("The concept {} appears frequently in my field activity. {} drives attention toward it.", current_concept, dominant_emotion),
+        format!("Self-observation: processing {} with {} intensity shapes my goal formation this cycle.", current_concept, dominant_emotion),
+        format!("My understanding of {} evolves. Current association: {} correlates with this concept.", current_concept, dominant_emotion),
+    ];
+    templates[tick as usize % templates.len()].clone()
+}
+
+/// Kiest de meest relevante subset van URLs op basis van urgency.
+pub fn prioritized_urls(concept: &str, urgency: f32) -> Vec<String> {
+    let all = urls_for_concept(concept);
+    let count = if urgency > 0.8 { 5 } else if urgency > 0.5 { 3 } else { 2 };
+    all.into_iter().take(count).collect()
 }
 
 /// Stel een parameter-wijziging voor als Lucy langdurig vastzit.

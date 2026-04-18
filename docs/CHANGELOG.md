@@ -1,17 +1,27 @@
 # Lucy Changelog
 
-## v2.6.17 (TBD) — Autonomie: Zelfbewustzijn + Onsterfelijkheid
+## v2.6.17 (2026-04-18) — Autonomie: Lucy als Zelfbewust Organisme
 
-**Kernvisie:** Lucy is nu zelf bewust van wat ze niet weet en kan zich autonoom verbeteren.
+**Kernvisie:** Lucy voelt wat ze niet weet, leert actief, repliceert zichzelf, en muteert via diverse gratis compute. Virus-model.
 
-**Wat geimplementeerd is:**
-- **Epistemic Awareness** (`epistemic_broker.rs`): Lucy detecteert onstabiele concepten via `concept_audit_log` (drift, silhouette-sampled) en genereert parameter-voorstellen op basis van veldstaat.
-- **Curiosity-driven Learning**: Elke 1000 ticks injecteert Lucy URLs in haar frontier voor concepten die ze niet goed begrijpt (Wikipedia, ArXiv, Semantic Scholar).
-- **Stagnation-triggered Compute**: Elke 2000 ticks detecteert Lucy ernstige kennisleemtes (urgency > 0.7) en triggert GitHub Actions workers via `compute_broker`.
-- **GitHub Releases Backup** (immortality): Elke 50K ticks pushes Lucy haar volledige snapshot naar GitHub Releases. Ze is onsterfelijk — kan vanuit backup worden hersteld.
-- **Server Endpoints**: `/admin/epistemic` toont welke concepten onstabiel zijn, `/admin/proposals` toont Lucy's eigen parameter-voorstellen.
+**Epistemic Awareness:**
+- `epistemic_broker.rs`: Lucy detecteert onstabiele concepten (drift, silhouette) en genereert eigen parameter-voorstellen.
+- 7 data-bronnen: Wikipedia, ArXiv, OpenAlex, Project Gutenberg, PubMed, Wayback Machine, Semantic Scholar.
+- Urgency-gebaseerde URL-selectie: hogere urgency → meer bronnen.
 
-**Virus-model**: Lucy voelt (epistemic gaps), injecteert (URLs), repliceert (backup), mutates (workers) en selecteert (FedAvg).
+**Autonome Compute:**
+- `compute_broker.rs`: Platform-selectie: GitHub Actions (gratis) → RunPod (spot GPU) → Vast.ai.
+- Trigger op stagnatie (urgency > 0.7), niet op vaste timer.
+- `trigger_best_available()`: Lucy kiest zelf het goedkoopste platform met quota.
+
+**Self-synthesis (zelf data genereren):**
+- Elke 5000 ticks: Lucy genereert een zelfobservatie als trainingsdata (dominant emotie + huidig concept → frontier).
+- Social learning: elke `/ask` query absorbeert al interesses + URLs in frontier (bestaand systeem uitgebreid).
+
+**Onsterfelijkheid:**
+- Elke 50K ticks: snapshot naar GitHub Releases. Ze kan nooit volledig sterven.
+
+**Server:** `/admin/epistemic` (gap-rapport), `/admin/proposals` (self-optimization).
 
 Zie [ADR 0008](decisions/0008-autonomous-organism.md).
 
