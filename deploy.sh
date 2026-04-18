@@ -201,11 +201,14 @@ POST_ACTIVE=$(echo "$TEL1" | python3 -c "import sys,json; print(json.load(sys.st
 log "Post → git_sha=$POST_SHA version=$POST_VER tick=$POST_TICK active=$POST_ACTIVE"
 
 # Check 1: versie-bump
-if [ "$POST_SHA" = "$PRE_SHA" ] && [ "$POST_SHA" != "unknown" ] && [ "$MODE" = "deploy" ]; then
+# Skip als PRE_SHA = "?" (Lucy was down voor deploy — geen baseline, vergelijking zinloos)
+if [ "$PRE_SHA" = "?" ]; then
+    log "ℹ PRE_SHA=? (Lucy was down vóór deploy) — SHA-vergelijking overgeslagen. Vertrouw op POST_VER."
+elif [ "$POST_SHA" = "$PRE_SHA" ] && [ "$POST_SHA" != "unknown" ] && [ "$MODE" = "deploy" ]; then
     log "⚠ git_sha onveranderd ($POST_SHA) — nieuwe binary draait NIET. Rollback nodig."
     abort "Deploy onverlopen: binary is niet vervangen"
 elif [ "$POST_SHA" = "unknown" ] && [ "$MODE" = "deploy" ]; then
-    log "⚠ git_sha = 'unknown' — kan versie-bump niet verifiëren. Vertrouw op tick/active-checks + POST_VER."
+    log "ℹ git_sha = 'unknown' (geen git in container) — vertrouw op POST_VER=$POST_VER."
 fi
 
 # Check 2: data intact (tick moet >= PRE_TICK, niet terugvallen naar 0)
