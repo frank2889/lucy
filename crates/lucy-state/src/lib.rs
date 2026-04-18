@@ -603,12 +603,12 @@ pub struct Field {
     #[serde(default)]
     pub ignition_strength: f32,
 
-    /// Laastse winnaarpunt-ID in GNW ignition
-    #[serde(default)]
+    /// Laastse winnaarpunt-ID in GNW ignition (transient — reset bij restart)
+    #[serde(skip)]
     pub last_winner_id: u32,
 
-    /// Tick tot wanneer de huidge winner in refractory is (minstens 50 ticks)
-    #[serde(default)]
+    /// Tick tot wanneer de huidge winner in refractory is (transient — reset bij restart)
+    #[serde(skip)]
     pub winner_refractory_until: u64,
 
     /// Gemiddelde Expected Free Energy G — stuurt exploratie vs exploitatie
