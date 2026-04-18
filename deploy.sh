@@ -159,6 +159,8 @@ else
     ssh "$SERVER" "docker cp /lucy/Cargo.toml lucy:/lucy/Cargo.toml"
     ssh "$SERVER" "docker cp /lucy/Cargo.lock lucy:/lucy/Cargo.lock"
     ssh "$SERVER" "docker cp /lucy/lucy-dashboard/dist/. lucy:/lucy/dashboard/"
+    # docs/ nodig voor build.rs (versie-stamping via CHANGELOG.md)
+    ssh "$SERVER" "docker exec lucy mkdir -p /lucy/docs && docker cp /lucy/docs/. lucy:/lucy/docs/"
 
     step "8. Lucy hercompileert (cargo build --release)"
     ssh -o ServerAliveInterval=15 "$SERVER" "
