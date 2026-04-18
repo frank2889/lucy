@@ -18,6 +18,18 @@ pub struct EpistemicGap {
     pub urgency: f32,            // drift * (1 - silhouette) — leer-prioriteit
 }
 
+/// Lucy's voorstel om een van haar eigen natuurkunde-vergelijkingen te wijzigen.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PhysicsProposal {
+    pub tick: u64,
+    pub formula: String,          // "emo_decay", "error_tracking_rate", "fe_tracking_rate", etc.
+    pub current_value: f32,
+    pub proposed_value: f32,
+    pub rationale: String,        // waarom Lucy dit wil proberen
+    pub evidence_metric: String,  // welke metric te meten (avg_tension, avg_curiosity, etc.)
+    pub baseline: f32,            // metric-waarde op moment van voorstel
+}
+
 /// Geeft de top-N meest onstabiele concepten terug, gesorteerd op urgency.
 pub fn least_stable_concepts(field: &Field, top_n: usize) -> Vec<EpistemicGap> {
     if field.concept_audit_log.is_empty() {
@@ -260,6 +272,82 @@ pub fn maybe_propose_parameter_change(field: &Field) -> Option<ParameterProposal
     }
 
     // Standaard: geen voorstel
+    None
+}
+
+/// Genereert physics-voorstellen op basis van veldmetrics.
+/// Lucy detecteert wanneer haar eigen vergelijkingen suboptimaal zijn.
+pub fn maybe_propose_physics_change(field: &Field) -> Option<PhysicsProposal> {
+    let tick = field.tick;
+
+    // Check 1: emo_decay — als veld traag reageert (low avg_tension + low avg_pred_error)
+    // dan kunnen we emo_decay verlagen voor snellere emotie-response
+    let avg_tension = field.active_set.iter()
+        .map(|&id| field.points[id as usize].tension)
+        .sum::<f32>() / field.active_set.len().max(1) as f32;
+    let avg_curiosity = field.active_set.iter()
+        .map(|&id| field.points[id as usize].curiosity)
+        .sum::<f32>() / field.active_set.len().max(1) as f32;
+
+    if avg_tension < 0.08 && avg_curiosity < 0.15 && field.tick > 20_000 {
+        let proposed = (field.emo_decay * 0.8).max(0.4);
+        return Some(PhysicsProposal {
+            tick,
+            formula: "emo_decay".to_string(),
+            current_value: field.emo_decay,
+            proposed_value: proposed,
+            rationale: format!(
+                "veld traag: avg_tension={:.4}, avg_curiosity={:.4} — emo_decay verlagen voor snellere response",
+                avg_tension, avg_curiosity
+            ),
+            evidence_metric: "avg_tension".to_string(),
+            baseline: avg_tension,
+        });
+    }
+
+    // Check 2: error_tracking_rate — als prediction_error consistent hoog (instabiliteit)
+    // dan sneller error tracken
+    let avg_pred_error = field.active_set.iter()
+        .map(|&id| {
+            let err_vec = field.points[id as usize].prediction;
+            err_vec.iter().map(|x| x * x).sum::<f32>()
+        })
+        .sum::<f32>() / field.active_set.len().max(1) as f32;
+
+    if avg_pred_error > 0.1 && field.tick > 30_000 {
+        let proposed = (field.error_tracking_rate * 1.3).min(0.15);
+        return Some(PhysicsProposal {
+            tick,
+            formula: "error_tracking_rate".to_string(),
+            current_value: field.error_tracking_rate,
+            proposed_value: proposed,
+            rationale: format!(
+                "persistente prediction-error: {:.4} — error_tracking_rate verhogen",
+                avg_pred_error
+            ),
+            evidence_metric: "avg_pred_error".to_string(),
+            baseline: avg_pred_error,
+        });
+    }
+
+    // Check 3: noise_amplitude — als oscillatie_coherence laag
+    // dan meer ruis injecteren voor meer exploratie
+    if field.oscillation_coherence < 0.25 && field.tick > 40_000 {
+        let proposed = (field.noise_amplitude * 1.15).min(0.4);
+        return Some(PhysicsProposal {
+            tick,
+            formula: "noise_amplitude".to_string(),
+            current_value: field.noise_amplitude,
+            proposed_value: proposed,
+            rationale: format!(
+                "zwakke oscillatie-binding: coherence={:.3} — noise_amplitude verhogen",
+                field.oscillation_coherence
+            ),
+            evidence_metric: "oscillation_coherence".to_string(),
+            baseline: field.oscillation_coherence,
+        });
+    }
+
     None
 }
 

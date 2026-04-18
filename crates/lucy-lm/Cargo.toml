@@ -1,0 +1,12 @@
+[package]
+name = "lucy-lm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+lucy-state = { path = "../lucy-state" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -15,6 +15,8 @@ pub enum FieldCommand {
     Save { respond: oneshot::Sender<bool> },
     /// v2.6.8 P2.2: Ablation-window toggle voor concept-priors
     SetConceptPriors { enabled: bool, until_delta_ticks: u64 },
+    /// v2.7.0: Veldgroei — voeg n nieuwe verborgen punten toe
+    GrowHidden { n: usize, respond: oneshot::Sender<usize> },
 }
 
 pub struct TrainResult {

@@ -309,7 +309,7 @@ async fn main() {
 
     // === Dagboek ===
     let journal_path = Path::new("data/journal.json");
-    let mut journal = if journal_path.exists() {
+    let journal = if journal_path.exists() {
         journal::Journal::load(journal_path).unwrap_or_else(|_| journal::Journal::new())
     } else {
         journal::Journal::new()
@@ -622,6 +622,12 @@ async fn main() {
                         field.concept_priors_disabled_until_tick = 0;
                         tracing::info!(tick = field.tick, enabled, "ABLATION: concept_priors toggled");
                     }
+                }
+                FieldCommand::GrowHidden { n, respond } => {
+                    // v2.7.0: Voeg n nieuwe verborgen punten toe
+                    growth::grow_hidden(&mut field, n);
+                    let _ = respond.send(n);
+                    tracing::info!(added = n, total = field.points.len(), "Field grew via admin command");
                 }
             }
         }

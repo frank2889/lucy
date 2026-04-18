@@ -69,7 +69,7 @@ use axum::{
     extract::State,
     http::{header, Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, Json, Response},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -80,6 +80,7 @@ use lucy_state::GoalStrategy;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::epistemic_broker;
 
 /// Cache-Control headers voor dashboard static assets.
 /// Gehashte assets (in /brain/assets/) krijgen immutable caching,
@@ -132,7 +133,7 @@ use crate::journal::Journal;
 use crate::self_modify::SelfModifier;
 use crate::gpu_manager::GpuEconomy;
 use crate::retrieval::{self, RetrievalStore};
-use crate::field_handle::{FieldHandle, FieldCommand, TrainResult};
+use crate::field_handle::{FieldHandle, FieldCommand};
 use crate::query;
 
 /// Gedeelde state — v1.0: Field via FieldHandle (dubbel-buffer), rest via RwLock
@@ -193,6 +194,8 @@ pub fn spawn_server(state: SharedState) {
             // v2.6.17: Epistemic awareness + autonomy endpoints
             .route("/admin/epistemic", get(epistemic_handler))
             .route("/admin/proposals", get(proposals_handler))
+            .route("/admin/physics-proposals", get(physics_proposals_handler))
+            .route("/admin/grow", post(admin_grow_handler))
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
             .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
@@ -1021,6 +1024,66 @@ async fn sense_handler(
         "tension": format!("{tension:.4}"),
         "output_norm": output.iter().map(|v| v * v).sum::<f32>().sqrt(),
     }))
+}
+
+/// /admin/physics-proposals — Lucy's voorstellen voor zelf-verbetering van haar fysica
+async fn physics_proposals_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let field = state.field_handle.snapshot.load();
+
+    // Genereer huidige physics-proposal (als aanwezig)
+    if let Some(proposal) = epistemic_broker::maybe_propose_physics_change(&field) {
+        Json(json!({
+            "proposal": {
+                "tick": proposal.tick,
+                "formula": proposal.formula,
+                "current_value": format!("{:.6}", proposal.current_value),
+                "proposed_value": format!("{:.6}", proposal.proposed_value),
+                "rationale": proposal.rationale,
+                "evidence_metric": proposal.evidence_metric,
+                "baseline": format!("{:.6}", proposal.baseline),
+            }
+        }))
+    } else {
+        Json(json!({
+            "proposal": null,
+            "status": "no changes needed"
+        }))
+    }
+}
+
+/// /admin/grow — Voeg verborgen punten toe aan het veld
+/// Trigger veldgroei, uitvoering via growth::grow_hidden()
+async fn admin_grow_handler(
+    State(state): State<SharedState>,
+    axum::Json(payload): axum::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let n_new = payload
+        .get("n")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(256) as usize;
+
+    // Voeg punten toe via command-based interface
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let cmd = FieldCommand::GrowHidden { n: n_new, respond: resp_tx };
+
+    if state.field_handle.commands.send(cmd).await.is_err() {
+        return Json(json!({
+            "error": "field command channel closed",
+            "added": 0
+        }));
+    }
+
+    // Wacht max 5 seconden op response
+    match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await {
+        Ok(Ok(result)) => Json(json!({
+            "added": result,
+            "total_points": state.field_handle.snapshot.load().points.len()
+        })),
+        _ => Json(json!({
+            "error": "growth operation timeout",
+            "added": 0
+        }))
+    }
 }
 
 /// /dashboard — Lucy's live dashboard

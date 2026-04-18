@@ -1521,6 +1521,100 @@ impl Field {
             p.flags |= FLAG_ACTIVE;
         }
     }
+
+    /// Groei het veld: voeg N nieuwe FieldPoints toe rondom een centroid.
+    /// Initialisatie: kopieert van centroid-nearest point + perturbatie.
+    pub fn grow(&mut self, centroid: &[f32; DIM], n_new: usize) {
+        // Vind het punt dat het dichtst bij de centroid ligt
+        let mut best_idx = 0;
+        let mut best_dist = f32::INFINITY;
+        for (i, p) in self.points.iter().enumerate() {
+            let dist: f32 = p.phi.iter()
+                .zip(centroid.iter())
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+
+        let template = self.points[best_idx].clone();
+
+        for step in 0..n_new {
+            // Clone template point, perturbeer phi
+            let mut new_point = template.clone();
+            for j in 0..DIM {
+                let salt = (best_idx as f32 * 31.0 + step as f32 * 17.0) * 7919.0;
+                let noise = ((salt * 13.0).fract() - 0.5) * 0.03;
+                new_point.phi[j] = centroid[j] + noise;
+            }
+            new_point.energy = 1.0;
+            new_point.curiosity = 0.5;
+            new_point.flags |= FLAG_ACTIVE;
+
+            let new_idx = self.points.len() as u32;
+            self.points.push(new_point);
+            self.n_hidden += 1;
+
+            // Koppel aan k=4 nearest neighbours
+            self.wire_to_nearest_k(new_idx, 4);
+        }
+    }
+
+    /// Koppel een punt aan zijn k nearest neighbours (cosine similarity).
+    fn wire_to_nearest_k(&mut self, idx: u32, k: usize) {
+        let idx_usize = idx as usize;
+        let phi_new = self.points[idx_usize].phi;
+
+        // Bereken cosine similarity met alle andere punten
+        let mut similarities: Vec<(u32, f32)> = self.points
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx_usize)
+            .map(|(i, p)| {
+                let dot: f32 = phi_new.iter()
+                    .zip(p.phi.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let norm_new: f32 = phi_new.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let norm_p: f32 = p.phi.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sim = if norm_new > 1e-6 && norm_p > 1e-6 {
+                    dot / (norm_new * norm_p)
+                } else {
+                    0.0
+                };
+                (i as u32, sim)
+            })
+            .collect();
+
+        // Sorteer descending op similarity
+        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Koppel aan top-k
+        for (other_idx, _) in similarities.iter().take(k) {
+            if self.points[idx_usize].couplings.len() < 16 {
+                self.points[idx_usize].couplings.push(Coupling {
+                    target: *other_idx,
+                    weight: 0.1,  // initieel zwak
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    /// Snoeien: verwijder koppelingen onder absolute drempel.
+    /// Identiek aan synaptische pruning in het brein.
+    pub fn prune_weak_couplings(&mut self, threshold: f32) -> usize {
+        let mut removed = 0;
+        for point in &mut self.points {
+            let before = point.couplings.len();
+            point.couplings.retain(|c| c.weight.abs() > threshold);
+            removed += before - point.couplings.len();
+        }
+        removed
+    }
 }
 
 // === Snapshot: save/load van volledige veldstaat ===

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/lucy-core",
     "crates/lucy-gpu",
-    "crates/lucy-io",
+    "crates/lucy-io", "crates/lucy-lm",
     "crates/lucy-state",
     "crates/snapshot_check",
 ]
@@ -27,3 +27,5 @@ bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rayon = "1.10"
 crc32fast = "1"
+candle-core = "0.8"
+candle-nn = "0.8"
