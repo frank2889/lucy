@@ -48,16 +48,19 @@ fn run_git(args: &[&str]) -> Option<String> {
 }
 
 fn read_changelog_top_version() -> Option<String> {
-    let candidates = ["../../docs/CHANGELOG.md", "../docs/CHANGELOG.md", "docs/CHANGELOG.md"];
-    for path in candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                // eerste regel in vorm "## v2.6.11 ..." → pak "v2.6.11"
-                if let Some(rest) = line.strip_prefix("## ") {
-                    if let Some(ver) = rest.split_whitespace().next() {
-                        if ver.starts_with('v') {
-                            return Some(ver.to_string());
-                        }
+    // Use CARGO_MANIFEST_DIR to be robust across different build contexts (local, Docker, CI)
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let manifest_path = std::path::PathBuf::from(manifest_dir);
+    let workspace_root = manifest_path.parent()?.parent()?;  // go from /lucy/crates/lucy-core to /lucy
+
+    let changelog_path = workspace_root.join("docs").join("CHANGELOG.md");
+    if let Ok(content) = std::fs::read_to_string(&changelog_path) {
+        for line in content.lines() {
+            // eerste regel in vorm "## v2.6.11 ..." → pak "v2.6.11"
+            if let Some(rest) = line.strip_prefix("## ") {
+                if let Some(ver) = rest.split_whitespace().next() {
+                    if ver.starts_with('v') {
+                        return Some(ver.to_string());
                     }
                 }
             }

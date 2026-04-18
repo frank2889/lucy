@@ -3,6 +3,7 @@ FROM rust:bookworm AS builder
 WORKDIR /lucy
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY docs/ docs/
 RUN cargo build --release -p lucy-core
 
 # Dashboard build
