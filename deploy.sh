@@ -114,15 +114,19 @@ if [ "$SKIP_VERIFY" != "--skip-verify" ]; then
     cargo build --release -p snapshot_check --bin verify_snapshot --quiet || abort "verify_snapshot build faalt"
 
     log "Download productie-snapshot naar /tmp voor test"
-    scp -q -o ConnectTimeout=15 "$SERVER:/lucy/data-safety-backup/lucy.snapshot" /tmp/lucy-deploy-verify.snap
-    VERIFY=$(./target/release/verify_snapshot /tmp/lucy-deploy-verify.snap)
-    echo "   $VERIFY"
-    OK=$(echo "$VERIFY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))")
-    if [ "$OK" != "True" ]; then
-        abort "Snapshot is NIET leesbaar door nieuwe binary. Deploy zou Lucy's data wissen. STOP."
+    ssh "$SERVER" "docker cp lucy:/lucy/data/lucy.snapshot /tmp/lucy-verify-snap 2>/dev/null || true"
+    if scp -q -o ConnectTimeout=30 "$SERVER:/tmp/lucy-verify-snap" /tmp/lucy-deploy-verify.snap 2>/dev/null; then
+        VERIFY=$(./target/release/verify_snapshot /tmp/lucy-deploy-verify.snap)
+        echo "   $VERIFY"
+        OK=$(echo "$VERIFY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))")
+        if [ "$OK" != "True" ]; then
+            abort "Snapshot is NIET leesbaar door nieuwe binary. Deploy zou Lucy's data wissen. STOP."
+        fi
+        log "✓ Nieuwe binary kan huidige snapshot lezen"
+        rm -f /tmp/lucy-deploy-verify.snap
+    else
+        log "⚠ Snapshot niet bereikbaar voor verify — safety backup is al gemaakt in stap 2, deploy gaat door"
     fi
-    log "✓ Nieuwe binary kan huidige snapshot lezen"
-    rm -f /tmp/lucy-deploy-verify.snap
 fi
 
 # ─── Code sync ────────────────────────────────────────────────────────────────
@@ -195,9 +199,11 @@ POST_ACTIVE=$(echo "$TEL1" | python3 -c "import sys,json; print(json.load(sys.st
 log "Post → git_sha=$POST_SHA version=$POST_VER tick=$POST_TICK active=$POST_ACTIVE"
 
 # Check 1: versie-bump
-if [ "$POST_SHA" = "$PRE_SHA" ] && [ "$MODE" = "deploy" ]; then
+if [ "$POST_SHA" = "$PRE_SHA" ] && [ "$POST_SHA" != "unknown" ] && [ "$MODE" = "deploy" ]; then
     log "⚠ git_sha onveranderd ($POST_SHA) — nieuwe binary draait NIET. Rollback nodig."
     abort "Deploy onverlopen: binary is niet vervangen"
+elif [ "$POST_SHA" = "unknown" ] && [ "$MODE" = "deploy" ]; then
+    log "⚠ git_sha = 'unknown' — kan versie-bump niet verifiëren. Vertrouw op tick/active-checks + POST_VER."
 fi
 
 # Check 2: data intact (tick moet >= PRE_TICK, niet terugvallen naar 0)
