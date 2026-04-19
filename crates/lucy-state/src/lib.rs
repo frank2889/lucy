@@ -49,14 +49,15 @@ use std::path::Path;
 pub mod snapshot_header;
 pub mod schema_v0;
 pub mod schema_v1;
+pub mod schema_v2;
 
 pub use snapshot_header::{SnapshotHeader, SnapshotFormat, CURRENT_SCHEMA_VERSION,
     HEADER_SIZE, MAGIC, detect_version};
 
 /// Dimensionaliteit van elke veldvector (Φ, P, M, embeddings).
-/// 64 is gekozen als balans: groot genoeg voor expressiviteit,
-/// klein genoeg voor snelheid op een $6/maand server.
-pub const DIM: usize = 256;
+/// v2.9.0+: 512 voor hogere expressiviteit. v2.8.x en eerder: 256.
+/// Schema-versioning handelt migratie af.
+pub const DIM: usize = 512;
 
 /// Fase waarin het veld zich bevindt
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -684,21 +685,29 @@ pub(crate) fn default_dim() -> usize { DIM }
 // === v2.6.9: Migratie van legacy schema's naar current Field ===
 
 impl From<schema_v1::FieldV1> for Field {
-    /// v2.6.7-era FieldV1 → current Field. Nieuwe v2.6.8+ velden → default.
-    /// Alle v1 data wordt EXACT gemapped (geen veld-verlies).
+    /// v2.6.7-era FieldV1 (DIM=256) → current Field (DIM=512).
+    /// Nieuwe v2.6.8+ velden → default. Pads 256-dim arrays to 512.
     fn from(v1: schema_v1::FieldV1) -> Self {
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
+            let mut vec512 = [0.0f32; 512];
+            vec512[..256].copy_from_slice(&vec256);
+            vec512
+        };
+
         Field {
-            // --- 1-op-1 gemapped vanuit v1 (identieke veldnamen) ---
+            // --- 1-op-1 gemapped vanuit v1 (identieke veldnamen, array-padding) ---
             points: v1.points,
             active_set: v1.active_set,
             tick: v1.tick,
             total_energy: v1.total_energy,
             economy: v1.economy,
             phase: v1.phase,
-            clamps: v1.clamps,
+            clamps: v1.clamps.into_iter()
+                .map(|(id, arr)| (id, pad_256_to_512(arr)))
+                .collect(),
             input_ids: v1.input_ids,
             output_ids: v1.output_ids,
-            last_thought: v1.last_thought,
+            last_thought: v1.last_thought.map(pad_256_to_512),
             reflection_count: v1.reflection_count,
             dopamine: v1.dopamine,
             norepinephrine: v1.norepinephrine,
@@ -706,7 +715,7 @@ impl From<schema_v1::FieldV1> for Field {
             acetylcholine: v1.acetylcholine,
             spectral_radius: v1.spectral_radius,
             chaos_target: v1.chaos_target,
-            current_intention: v1.current_intention,
+            current_intention: v1.current_intention.map(pad_256_to_512),
             intention_strength: v1.intention_strength,
             rnd_frozen: v1.rnd_frozen,
             rnd_predictor: v1.rnd_predictor,
@@ -747,8 +756,12 @@ impl From<schema_v1::FieldV1> for Field {
             boredom_streak: v1.boredom_streak,
             is_sluggish_flag: v1.is_sluggish_flag,
             attn_weights: v1.attn_weights,
-            attn_context: v1.attn_context,
-            working_memory: v1.working_memory,
+            attn_context: v1.attn_context.into_iter()
+                .map(|arr| pad_256_to_512(arr))
+                .collect(),
+            working_memory: v1.working_memory.into_iter()
+                .map(|arr| pad_256_to_512(arr))
+                .collect(),
             wm_gates: v1.wm_gates,
             wm_ages: v1.wm_ages,
             concept_centroids: v1.concept_centroids,
@@ -790,13 +803,171 @@ impl From<schema_v1::FieldV1> for Field {
     }
 }
 
+impl From<schema_v2::FieldV2> for Field {
+    /// v2.8.x FieldV2 (DIM=256) → current Field (DIM=512).
+    /// Pads 256-dim arrays ao 512 (rest=0). FieldPointV2 → FieldPoint met array-migration.
+    /// Clamps, last_thought, current_intention, attn_context, working_memory: pad [256] → [512].
+    fn from(v2: schema_v2::FieldV2) -> Self {
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
+            let mut vec512 = [0.0f32; 512];
+            vec512[..256].copy_from_slice(&vec256);
+            vec512
+        };
+
+        // Migrate FieldPointV2 → FieldPoint (pad arrays)
+        let migrated_points = v2.points.into_iter().map(|vp| {
+            FieldPoint {
+                phi: pad_256_to_512(vp.phi),
+                prediction: pad_256_to_512(vp.prediction),
+                memory: pad_256_to_512(vp.memory),
+                couplings: vp.couplings,
+                eta: vp.eta,
+                energy: vp.energy,
+                tension: vp.tension,
+                tension_ema: vp.tension_ema,
+                curiosity: vp.curiosity,
+                satisfaction: vp.satisfaction,
+                frustration: vp.frustration,
+                stuck_ticks: vp.stuck_ticks,
+                flags: vp.flags,
+                depth: vp.depth,
+                rnd_score: vp.rnd_score,
+                error_var: vp.error_var,
+                precision: vp.precision,
+                kwta_active: vp.kwta_active,
+                phi_integrated: vp.phi_integrated,
+                oscillation_phase: vp.oscillation_phase,
+                free_energy: vp.free_energy,
+                kl_divergence: vp.kl_divergence,
+                oscillation_phase_theta: vp.oscillation_phase_theta,
+                control_belief: vp.control_belief,
+                reward_quantiles: vp.reward_quantiles,
+                causal_power: vp.causal_power,
+                expected_free_energy: vp.expected_free_energy,
+                branching_ratio: vp.branching_ratio,
+                free_energy_rate: vp.free_energy_rate,
+                blanket_surprise: vp.blanket_surprise,
+                irreducible_free_energy: vp.irreducible_free_energy,
+            }
+        }).collect();
+
+        Field {
+            points: migrated_points,
+            active_set: v2.active_set,
+            tick: v2.tick,
+            total_energy: v2.total_energy,
+            economy: v2.economy,
+            phase: v2.phase,
+            clamps: v2.clamps.into_iter()
+                .map(|(id, arr)| (id, pad_256_to_512(arr)))
+                .collect(),
+            input_ids: v2.input_ids,
+            output_ids: v2.output_ids,
+            last_thought: v2.last_thought.map(pad_256_to_512),
+            reflection_count: v2.reflection_count,
+            dopamine: v2.dopamine,
+            norepinephrine: v2.norepinephrine,
+            serotonin: v2.serotonin,
+            acetylcholine: v2.acetylcholine,
+            spectral_radius: v2.spectral_radius,
+            chaos_target: v2.chaos_target,
+            current_intention: v2.current_intention.map(pad_256_to_512),
+            intention_strength: v2.intention_strength,
+            rnd_frozen: v2.rnd_frozen,
+            rnd_predictor: v2.rnd_predictor,
+            kappa: v2.kappa,
+            omega: v2.omega,
+            lambda: v2.lambda,
+            beta: v2.beta,
+            alpha: v2.alpha,
+            rho: v2.rho,
+            mu: v2.mu,
+            growth_threshold: v2.growth_threshold,
+            ema_decay: v2.ema_decay,
+            emo_decay: v2.emo_decay,
+            error_tracking_rate: v2.error_tracking_rate,
+            fe_tracking_rate: v2.fe_tracking_rate,
+            kl_scale: v2.kl_scale,
+            clamp_range: v2.clamp_range,
+            settle_epsilon: v2.settle_epsilon,
+            noise_amplitude: v2.noise_amplitude,
+            think_interval: v2.think_interval,
+            reflect_interval: v2.reflect_interval,
+            max_goals: v2.max_goals,
+            learn_interval: v2.learn_interval,
+            explore_interval: v2.explore_interval,
+            consolidation_interval: v2.consolidation_interval,
+            snapshot_interval: v2.snapshot_interval,
+            growth_interval: v2.growth_interval,
+            sampling_temperature: v2.sampling_temperature,
+            sampling_top_p: v2.sampling_top_p,
+            repetition_penalty: v2.repetition_penalty,
+            goals: v2.goals,
+            last_think_tick: v2.last_think_tick,
+            last_reflect_tick: v2.last_reflect_tick,
+            teacher_interval: v2.teacher_interval,
+            teacher_success_streak: v2.teacher_success_streak,
+            last_boredom_tension: v2.last_boredom_tension,
+            last_boredom_curiosity: v2.last_boredom_curiosity,
+            boredom_streak: v2.boredom_streak,
+            is_sluggish_flag: v2.is_sluggish_flag,
+            attn_weights: v2.attn_weights,
+            attn_context: v2.attn_context.into_iter()
+                .map(pad_256_to_512)
+                .collect(),
+            working_memory: v2.working_memory.into_iter()
+                .map(pad_256_to_512)
+                .collect(),
+            wm_gates: v2.wm_gates,
+            wm_ages: v2.wm_ages,
+            concept_centroids: v2.concept_centroids,
+            concept_assignments: v2.concept_assignments,
+            global_oscillation_phase: v2.global_oscillation_phase,
+            oscillation_coherence: v2.oscillation_coherence,
+            integrated_info_avg: v2.integrated_info_avg,
+            power_law_exponent: v2.power_law_exponent,
+            is_critical: v2.is_critical,
+            avg_free_energy: v2.avg_free_energy,
+            theta_phase: v2.theta_phase,
+            theta_gamma_coupling: v2.theta_gamma_coupling,
+            branching_ratio_avg: v2.branching_ratio_avg,
+            ignition_active: v2.ignition_active,
+            ignition_strength: v2.ignition_strength,
+            last_winner_id: v2.last_winner_id,
+            winner_refractory_until: v2.winner_refractory_until,
+            avg_expected_free_energy: v2.avg_expected_free_energy,
+            adaptive: v2.adaptive,
+            temporal_history: v2.temporal_history,
+            causal_log: v2.causal_log,
+            goal_history: v2.goal_history,
+            pages_read: v2.pages_read,
+            tokens_processed: v2.tokens_processed,
+            snapshot_version: 2,  // Mark as migrated to v2.9.0 schema
+            field_dim: 512,  // Update dimensionality
+            n_input: v2.n_input,
+            n_hidden: v2.n_hidden,
+            n_output: v2.n_output,
+            concept_priors_enabled: v2.concept_priors_enabled,
+            concept_priors_disabled_until_tick: v2.concept_priors_disabled_until_tick,
+            concept_audit_log: v2.concept_audit_log,
+            self_ep_audit: v2.self_ep_audit,
+            self_metrics: v2.self_metrics,
+            provenance_counts: v2.provenance_counts,
+        }
+    }
+}
+
 impl From<schema_v0::FieldV0> for Field {
-    /// v2.6.5-era FieldV0 → current Field. De 4 v2.6.6 boredom/sluggish-velden
-    /// en v2.6.7 concept-clustering ontbreken in v0 en krijgen defaults.
-    /// Alle v0 data wordt EXACT gemapped (geen veld-verlies). Gebruikt voor
-    /// snapshots die pre-v2.6.6 productie hebben geschreven (incl. de b89ab6e
-    /// binary die per ongeluk maandenlang in de Docker image zat).
+    /// v2.6.5-era FieldV0 (DIM=256) → current Field (DIM=512).
+    /// 4 v2.6.6 boredom/sluggish-velden en v2.6.7 concept-clustering → defaults.
+    /// Pads 256-dim arrays to 512. All v0 data EXACT preserved.
     fn from(v0: schema_v0::FieldV0) -> Self {
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
+            let mut vec512 = [0.0f32; 512];
+            vec512[..256].copy_from_slice(&vec256);
+            vec512
+        };
+
         Field {
             points: v0.points,
             active_set: v0.active_set,
@@ -804,10 +975,12 @@ impl From<schema_v0::FieldV0> for Field {
             total_energy: v0.total_energy,
             economy: v0.economy,
             phase: v0.phase,
-            clamps: v0.clamps,
+            clamps: v0.clamps.into_iter()
+                .map(|(id, arr)| (id, pad_256_to_512(arr)))
+                .collect(),
             input_ids: v0.input_ids,
             output_ids: v0.output_ids,
-            last_thought: v0.last_thought,
+            last_thought: v0.last_thought.map(pad_256_to_512),
             reflection_count: v0.reflection_count,
             dopamine: v0.dopamine,
             norepinephrine: v0.norepinephrine,
@@ -815,7 +988,7 @@ impl From<schema_v0::FieldV0> for Field {
             acetylcholine: v0.acetylcholine,
             spectral_radius: v0.spectral_radius,
             chaos_target: v0.chaos_target,
-            current_intention: v0.current_intention,
+            current_intention: v0.current_intention.map(pad_256_to_512),
             intention_strength: v0.intention_strength,
             rnd_frozen: v0.rnd_frozen,
             rnd_predictor: v0.rnd_predictor,
@@ -857,8 +1030,12 @@ impl From<schema_v0::FieldV0> for Field {
             boredom_streak: 0,
             is_sluggish_flag: false,
             attn_weights: v0.attn_weights,
-            attn_context: v0.attn_context,
-            working_memory: v0.working_memory,
+            attn_context: v0.attn_context.into_iter()
+                .map(|arr| pad_256_to_512(arr))
+                .collect(),
+            working_memory: v0.working_memory.into_iter()
+                .map(|arr| pad_256_to_512(arr))
+                .collect(),
             wm_gates: v0.wm_gates,
             wm_ages: v0.wm_ages,
             // --- v2.6.7 concept-clustering (niet in v0) → leeg ---

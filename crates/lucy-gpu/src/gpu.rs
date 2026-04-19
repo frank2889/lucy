@@ -3,6 +3,7 @@
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use serde::{Serialize, Deserialize};
+use lucy_state::DIM;
 
 /// Volledige veldstaat voor GPU upload/download — gedeeld met gpu_client
 #[derive(Serialize, Deserialize)]
@@ -32,8 +33,6 @@ pub struct FieldSnapshot {
     pub ema_decay: f32,
     pub growth_threshold: f32,
 }
-
-const DIM: usize = 64;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]

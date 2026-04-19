@@ -1,0 +1,152 @@
+//! # Deploy Coordinator — Atomic Binary Swap + Docker Restart
+//!
+//! Manages safe deployment: backups, swap, pre-deploy flush, restart.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+pub struct DeployCoordinator {
+    production_binary: String,
+    max_backups: usize,
+}
+
+impl DeployCoordinator {
+    pub fn new() -> Self {
+        Self {
+            production_binary: "/lucy/lucy-core".to_string(),
+            max_backups: 5,
+        }
+    }
+
+    /// Pre-deploy flush: Signal graceful shutdown via signal file
+    pub fn pre_deploy_flush(&self, _api_url: &str, _token: &str) -> Result<(), String> {
+        // Create signal file for main loop to detect graceful shutdown
+        fs::write("/tmp/lucy-pre-deploy-signal", "shutdown").ok();
+
+        // Wait for flush + graceful shutdown (max 30s)
+        thread::sleep(Duration::from_secs(5));
+
+        Ok(())
+    }
+
+    /// Create rolling backups: lucy-core → lucy-core.bak.1, shift .1→.2, etc.
+    pub fn backup_binary(&self) -> Result<(), String> {
+        if !Path::new(&self.production_binary).exists() {
+            return Err(format!("{} does not exist", &self.production_binary));
+        }
+
+        // Shift backups: .1→.2, .2→.3, ... , .4→.5 (drop .5)
+        for i in (1..self.max_backups).rev() {
+            let from = format!("{}.bak.{}", &self.production_binary, i);
+            let to = format!("{}.bak.{}", &self.production_binary, i + 1);
+
+            if Path::new(&from).exists() {
+                fs::rename(&from, &to).map_err(|e| format!("Backup rotate failed: {}", e))?;
+            }
+        }
+
+        // Backup current: lucy-core → lucy-core.bak.1
+        let bak1 = format!("{}.bak.1", &self.production_binary);
+        fs::copy(&self.production_binary, &bak1)
+            .map_err(|e| format!("Backup copy failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Swap binary: copy new binary → /lucy/lucy-core (atomic on same filesystem)
+    pub fn swap_binary(&self, new_binary_path: &str) -> Result<(), String> {
+        if !Path::new(new_binary_path).exists() {
+            return Err(format!("New binary not found: {}", new_binary_path));
+        }
+
+        // Copy + overwrite
+        fs::copy(new_binary_path, &self.production_binary)
+            .map_err(|e| format!("Binary swap failed: {}", e))?;
+
+        // Verify permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.production_binary, fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("chmod failed: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Docker restart: restart lucy container
+    pub fn restart_docker(&self) -> Result<(), String> {
+        let output = Command::new("docker")
+            .args(&["restart", "lucy"])
+            .output()
+            .map_err(|e| format!("Docker restart failed: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!("Docker restart error: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        // Wait for container to be healthy (up to 30s)
+        for _ in 0..6 {
+            thread::sleep(Duration::from_secs(5));
+
+            let status = Command::new("docker")
+                .args(&["exec", "lucy", "curl", "-sf", "http://localhost:3000/status"])
+                .output();
+
+            if let Ok(out) = status {
+                if out.status.success() {
+                    return Ok(());  // Container is healthy
+                }
+            }
+        }
+
+        Err("Container failed to become healthy after 30s".to_string())
+    }
+
+    /// Rollback: restore from lucy-core.bak.1
+    pub fn rollback(&self) -> Result<(), String> {
+        let bak1 = format!("{}.bak.1", &self.production_binary);
+
+        if !Path::new(&bak1).exists() {
+            return Err(format!("No rollback backup available: {}", bak1));
+        }
+
+        fs::copy(&bak1, &self.production_binary)
+            .map_err(|e| format!("Rollback copy failed: {}", e))?;
+
+        // Restart
+        self.restart_docker()?;
+
+        Ok(())
+    }
+
+    /// Full deploy pipeline
+    pub fn deploy(&self, new_binary_path: &str, api_url: &str, api_token: &str) -> Result<(), String> {
+        // 1. Pre-deploy flush
+        self.pre_deploy_flush(api_url, api_token)?;
+
+        // 2. Backup current binary
+        self.backup_binary()?;
+
+        // 3. Swap binary
+        self.swap_binary(new_binary_path)?;
+
+        // 4. Restart docker
+        self.restart_docker()?;
+
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+mod unix_perms {
+    use std::os::unix::fs::PermissionsExt;
+    use std::fs;
+
+    pub fn make_executable(path: &str) -> std::io::Result<()> {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+    }
+}

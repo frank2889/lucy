@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    DIM, FieldPoint, Economy, FieldPhase, Goal, AdaptiveParams,
+    FieldPoint, Economy, FieldPhase, Goal, AdaptiveParams,
     TemporalSnapshot, CausalEvent, GoalOutcome,
     default_phase, default_chaos_target, default_dim,
     default_emo_decay, default_error_tracking_rate, default_fe_tracking_rate,
@@ -25,6 +25,8 @@ use crate::{
     default_sampling_temperature, default_sampling_top_p, default_repetition_penalty,
     default_teacher_interval,
 };
+
+const DIM_V1: usize = 256;
 
 /// Legacy v2.6.7 Field layout — **niet wijzigen**. Gebruik alleen voor backward-compat load.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,7 +41,7 @@ pub struct FieldV1 {
     pub phase: FieldPhase,
 
     #[serde(skip)]
-    pub clamps: HashMap<u32, [f32; DIM]>,
+    pub clamps: HashMap<u32, [f32; DIM_V1]>,
 
     #[serde(default)]
     pub input_ids: Vec<u32>,
@@ -47,7 +49,7 @@ pub struct FieldV1 {
     pub output_ids: Vec<u32>,
 
     #[serde(skip)]
-    pub last_thought: Option<[f32; DIM]>,
+    pub last_thought: Option<[f32; DIM_V1]>,
     #[serde(default)]
     pub reflection_count: u64,
 
@@ -66,7 +68,7 @@ pub struct FieldV1 {
     pub chaos_target: f32,
 
     #[serde(skip)]
-    pub current_intention: Option<[f32; DIM]>,
+    pub current_intention: Option<[f32; DIM_V1]>,
     #[serde(default)]
     pub intention_strength: f32,
 
@@ -147,10 +149,10 @@ pub struct FieldV1 {
     pub attn_weights: Option<Vec<f32>>,
 
     #[serde(skip)]
-    pub attn_context: Vec<[f32; DIM]>,
+    pub attn_context: Vec<[f32; DIM_V1]>,
 
     #[serde(skip)]
-    pub working_memory: Vec<[f32; DIM]>,
+    pub working_memory: Vec<[f32; DIM_V1]>,
     #[serde(skip)]
     pub wm_gates: Vec<f32>,
     #[serde(skip)]

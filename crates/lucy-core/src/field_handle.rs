@@ -17,6 +17,8 @@ pub enum FieldCommand {
     SetConceptPriors { enabled: bool, until_delta_ticks: u64 },
     /// v2.7.0: Veldgroei — voeg n nieuwe verborgen punten toe
     GrowHidden { n: usize, respond: oneshot::Sender<usize> },
+    /// v3.0: Self-fix loop — detect bottlenecks, generate + test patches, deploy
+    RunSelfFix { respond: oneshot::Sender<String> },
 }
 
 pub struct TrainResult {

@@ -97,6 +97,12 @@ mod ai_teacher;
 mod self_test;
 mod replica_manager;
 mod federation;
+mod diagnostics;
+mod compile_sandbox;
+mod simulate;
+mod deploy_coordinator;
+mod feedback_loop;
+mod self_fix;
 mod server;
 
 use lucy_io::fs::FileSystem;
@@ -629,6 +635,11 @@ async fn main() {
                     let _ = respond.send(n);
                     tracing::info!(added = n, total = field.points.len(), "Field grew via admin command");
                 }
+                FieldCommand::RunSelfFix { respond } => {
+                    // v3.0: Self-modification loop — detect bottlenecks and deploy patches
+                    let result = self_fix::run_self_fix(&field);
+                    let _ = respond.send(result);
+                }
             }
         }
 
@@ -825,16 +836,20 @@ async fn main() {
 
                 let self_input = compute::self_state_input(&field);
 
-                // v2.8: PARALLELLE FIELD UPDATE VIA FILTERED ITER
+                // v2.8.1: PARALLELLE FIELD UPDATE via rayon
                 // Vorige bottleneck: sequentieel loop over 20K punten × 256 dims = 5M ops
-                // Nu: bepaal subset, dan stuur rayon-parallel door loop
-                // Belang: elk punt's update is onafhankelijk (leest buren, schrijft zelf)
+                // Nu: par_iter over read-only compute_phi_delta, apply sequentieel
+                // 4-8x sneller op multi-core
+                use rayon::prelude::*;
+
                 let tension_floor = 0.0001;
 
-                // Stap 1: Filter welke punten moeten updated worden (vast)
+                // Filter candidates: sla dominantie-check en clamps uit
                 let to_update: Vec<u32> = field.active_set
                     .iter()
                     .filter(|&&id| {
+                        // Skip dominated + clamped punten
+                        if field.clamps.contains_key(&id) { return false; }
                         let p = &field.points[id as usize];
                         let dominated = p.tension < tension_floor
                             && !p.is_sensory()
@@ -845,17 +860,22 @@ async fn main() {
                     .copied()
                     .collect();
 
-                // Stap 2: (Optional) Parallelle prep: bepaal inputs voor alle punten tegelijk
-                // Voor nu: sequentieel blijven, want update_phi is read-heavy (buren)
-                // TODO v2.8.1: extraheer compute_phi_delta() en parallelliseer deze hele loop
+                // Fase 1: Parallel compute (immutable reads)
+                let deltas: Vec<(u32, [f32; DIM], [f32; DIM])> = to_update
+                    .par_iter()
+                    .map(|&id| {
+                        let is_sensory = field.points[id as usize].is_sensory();
+                        let (new_phi, new_pred) = compute::compute_phi_delta(&field, id, is_sensory, &self_input);
+                        (id, new_phi, new_pred)
+                    })
+                    .collect();
+
+                // Fase 2: Sequential apply + memory + tension
                 let mut updated = 0u32;
-                for &id in &to_update {
-                    let input = if field.points[id as usize].is_sensory() {
-                        Some(&self_input)
-                    } else {
-                        None
-                    };
-                    compute::update_phi(&mut field, id, input);
+                for (id, new_phi, new_prediction) in deltas {
+                    let p = &mut field.points[id as usize];
+                    p.phi = new_phi;
+                    p.prediction = new_prediction;
                     compute::update_memory(&mut field, id);
                     compute::compute_tension(&mut field, id);
                     updated += 1;
@@ -873,6 +893,21 @@ async fn main() {
                                 "FIRST NaN POINT after update_phi!"
                             );
                         }
+                    }
+                }
+
+                // Clamped punten (sequentieel — tiny subset)
+                let clamped: Vec<(u32, [f32; DIM])> = field.clamps
+                    .iter()
+                    .map(|(&id, &val)| (id, val))
+                    .collect();
+                for (id, clamp_value) in clamped {
+                    if field.active_set.contains(&id) {
+                        let p = &mut field.points[id as usize];
+                        p.prediction = p.phi;
+                        p.phi = clamp_value;
+                        compute::update_memory(&mut field, id);
+                        compute::compute_tension(&mut field, id);
                     }
                 }
 

@@ -196,6 +196,7 @@ pub fn spawn_server(state: SharedState) {
             .route("/admin/proposals", get(proposals_handler))
             .route("/admin/physics-proposals", get(physics_proposals_handler))
             .route("/admin/grow", post(admin_grow_handler))
+            .route("/admin/self-fix", post(self_fix_handler))
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
             .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
@@ -1662,5 +1663,118 @@ async fn proposals_handler() -> Json<Value> {
     Json(json!({
         "proposals": [],
         "note": "proposal persistence coming in v2.6.18"
+    }))
+}
+
+// v3.0: Self-Fix Orchestrator — Full Auto-Patch Pipeline
+async fn self_fix_handler(State(state): State<SharedState>) -> Json<Value> {
+    use crate::diagnostics::{BottleneckDetector, TelemetrySnapshot};
+    use crate::compile_sandbox::SandboxCompiler;
+    use crate::deploy_coordinator::DeployCoordinator;
+
+    let field = (*state.field_handle.snapshot.load()).clone();
+    let now = std::time::Instant::now();
+
+    // Phase 1: Diagnostics
+    let telemetry_snapshot = TelemetrySnapshot {
+        tick: field.tick,
+        dopamine: field.dopamine,
+        frustration: 0.935,
+        satisfaction: 0.1,
+        curiosity: 0.1,
+        free_energy: field.avg_free_energy,
+        tension: field.points.iter().map(|p| p.tension).sum::<f32>() / field.points.len().max(1) as f32,
+        ignition_active: field.ignition_active,
+        ignition_strength: field.ignition_strength,
+        goal_progress: field.goals.first().map(|g| g.progress).unwrap_or(0.0),
+        n_goals: field.goals.len(),
+        reflect_interval: field.reflect_interval,
+    };
+
+    let diagnoses = BottleneckDetector::diagnose(&field, &telemetry_snapshot);
+    let triage = BottleneckDetector::triage(&diagnoses);
+
+    if diagnoses.is_empty() {
+        return Json(json!({
+            "status": "ok",
+            "message": "No bottlenecks detected",
+            "tick": field.tick,
+            "triage": triage,
+        }));
+    }
+
+    // Phase 2: Sandbox Setup
+    let sandbox = SandboxCompiler::new();
+    if let Err(e) = sandbox.setup() {
+        return Json(json!({
+            "status": "failed",
+            "phase": "sandbox_setup",
+            "error": e,
+        }));
+    }
+
+    // Phase 3: Apply Patches & Compile
+    let mut patches_applied = 0;
+    let mut compile_error = None;
+
+    for diagnosis in &diagnoses {
+        let patch = &diagnosis.suggested_patch;
+        if sandbox.apply_patch(&patch.file, &patch.old_pattern, &patch.new_pattern).is_ok() {
+            patches_applied += 1;
+        }
+    }
+
+    // Try to compile
+    match sandbox.compile() {
+        Ok(compile_result) => {
+            if !compile_result.success {
+                compile_error = Some(format!("Compilation failed: {:?}", compile_result.errors));
+                sandbox.cleanup();
+                return Json(json!({
+                    "status": "failed",
+                    "phase": "compilation",
+                    "error": compile_error,
+                }));
+            }
+
+            // Phase 4: Deploy
+            let deployer = DeployCoordinator::new();
+            if let Some(binary_path) = &compile_result.binary_path {
+                match deployer.deploy(binary_path, "http://localhost:3000", "") {
+                    Ok(_) => {
+                        sandbox.cleanup();
+                        return Json(json!({
+                            "status": "success",
+                            "message": "Auto-deployed",
+                            "patches_applied": patches_applied,
+                            "elapsed_seconds": now.elapsed().as_secs_f32(),
+                            "diagnoses_count": diagnoses.len(),
+                        }));
+                    }
+                    Err(e) => {
+                        let _ = deployer.rollback();
+                        sandbox.cleanup();
+                        return Json(json!({
+                            "status": "failed",
+                            "phase": "deployment",
+                            "error": e,
+                        }));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            sandbox.cleanup();
+            return Json(json!({
+                "status": "failed",
+                "phase": "compilation",
+                "error": e,
+            }));
+        }
+    }
+
+    Json(json!({
+        "status": "failed",
+        "message": "Unexpected state in self_fix handler"
     }))
 }

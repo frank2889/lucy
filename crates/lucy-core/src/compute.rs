@@ -107,6 +107,93 @@
     /// Update Φ voor een actief punt:
     /// Φ_{t+1} = Φ_t + λ·[-lokale_spanning_gradient] + β·I - α·sign(Φ)
     /// ALS het punt geklemd is → forceer phi = clamp waarde
+    /// v2.8.1: Compute new phi and prediction deltas voor parallellisatie.
+    /// Pure read-only — geen mutations. Veilig voor par_iter.
+    /// Clamped punten moeten in main.rs gefilterd worden VOOR deze call.
+    pub fn compute_phi_delta(
+        field: &Field,
+        id: u32,
+        is_sensory: bool,
+        self_input: &[f32; DIM],
+    ) -> ([f32; DIM], [f32; DIM]) {
+        let id_usize = id as usize;
+        let point = &field.points[id_usize];
+
+        // Compute gradient from neighbors (immutable)
+        let mut grad = [0.0f32; DIM];
+        if point.couplings.len() > 0 {
+            let coupling_data: SmallVec<[(u32, f32); 16]> = point
+                .couplings
+                .iter()
+                .map(|c| (c.target, c.weight))
+                .collect();
+            let phi_self = point.phi;
+            for &(target, weight) in &coupling_data {
+                if let Some(neighbor) = field.points.get(target as usize) {
+                    if !neighbor.phi[0].is_finite() { continue; }
+                    for d in 0..DIM {
+                        grad[d] += weight * (phi_self[d] - neighbor.phi[d]);
+                    }
+                }
+            }
+            let inv_n = 1.0 / point.couplings.len() as f32;
+            for d in 0..DIM {
+                grad[d] *= inv_n;
+            }
+        }
+
+        // Get attention context
+        let attn_ctx = if id_usize < field.attn_context.len() {
+            Some(field.attn_context[id_usize])
+        } else {
+            None
+        };
+
+        // Read parameters
+        let lambda = field.lambda;
+        let beta = field.beta;
+        let alpha = field.alpha;
+        let base_pred_rate = field.fe_tracking_rate;
+        let phi_self = point.phi;
+        let pred_self = point.prediction;
+
+        // Compute new phi and prediction
+        let mut new_phi = [0.0f32; DIM];
+        let mut new_prediction = [0.0f32; DIM];
+
+        for d in 0..DIM {
+            let error_d = (phi_self[d] - pred_self[d]).abs();
+            let adaptive_rate = base_pred_rate / (1.0 + 10.0 * error_d);
+
+            new_prediction[d] = (1.0 - adaptive_rate) * pred_self[d] + adaptive_rate * phi_self[d];
+
+            new_phi[d] = phi_self[d] - lambda * grad[d];
+
+            if is_sensory {
+                new_phi[d] += beta * self_input[d];
+            }
+
+            if let Some(ref ctx) = attn_ctx {
+                if ctx[d].is_finite() {
+                    new_phi[d] += ATTN_GAMMA * ctx[d];
+                }
+            }
+
+            // Sparse penalty
+            if new_phi[d].abs() > field.noise_amplitude {
+                new_phi[d] -= alpha * new_phi[d].signum();
+            }
+
+            // Sanitize
+            if !new_phi[d].is_finite() {
+                new_phi[d] = 0.0;
+            }
+            new_phi[d] = new_phi[d].clamp(-field.clamp_range, field.clamp_range);
+        }
+
+        (new_phi, new_prediction)
+    }
+
     pub fn update_phi(field: &mut Field, id: u32, input: Option<&[f32; DIM]>) {
         // Check clamp EERST — geklemde punten worden geforceerd
         if let Some(clamp) = field.clamps.get(&id) {

@@ -30,15 +30,16 @@ pub const HEADER_SIZE: usize = 20;
 ///
 /// Historie:
 ///   0 = legacy pre-v2.6.9 (geen header, payload = FieldV1 layout = v2.6.7-era)
-///   1 = v2.6.9+ Field (current — bewijs-architectuur, snapshot_header wrapper)
+///   1 = v2.6.9+ Field (bewijs-architectuur, snapshot_header wrapper, DIM=256)
+///   2 = v2.9.0+ Field (DIM=512 upgrade, schema_v2 migration support)
 ///
-/// Bump naar 2, 3, ... bij toekomstige breaking Field-wijzigingen.
+/// Bump naar 3, 4, ... bij toekomstige breaking Field-wijzigingen.
 /// Elke versie MOET een `schema_vN` module + `From<schema_vN::Field> for current::Field`
 /// implementatie hebben, anders weigert `load_with_migration` te laden.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Known schema versions — `load_with_migration` ondersteunt deze.
-pub const SUPPORTED_VERSIONS: &[u32] = &[0, 1];
+pub const SUPPORTED_VERSIONS: &[u32] = &[0, 1, 2];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotHeader {
