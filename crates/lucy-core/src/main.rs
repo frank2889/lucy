@@ -282,7 +282,17 @@ async fn main() {
     explorer.load_self_managed_apis();
     // Schoon de frontier op: max 20% per domein (breekt API-monoculture)
     explorer.diversify_frontier();
-    tracing::info!(frontier = explorer.frontier.len(), interests = explorer.interests.len(), "Exploration bronnen geladen + gediversifieerd");
+
+    // v3.0.1: Force CERN-seed in frontier — observability boost voor particle physics data
+    for url in &[
+        "https://opendata.cern.ch/api/records/?q=higgs+boson&type=Dataset&size=5",
+        "https://opendata.cern.ch/api/records/?q=dark+matter&type=Dataset&size=5",
+        "https://opendata.cern.ch/api/records/?q=standard+model&type=Dataset&size=5",
+    ] {
+        explorer.discover_urls(url);
+    }
+
+    tracing::info!(frontier = explorer.frontier.len(), interests = explorer.interests.len(), "Exploration bronnen geladen + gediversifieerd + CERN seed");
 
     // === v0.7: Initialiseer bewustzijns-systemen ===
     compute::init_rnd(&mut field);
@@ -1629,7 +1639,11 @@ async fn main() {
                                 }
                             }
 
-                            tracing::info!(url = %result.url, tokens = token_ids.len(), "Exploration: geleerd!");
+                            if result.url.contains("opendata.cern.ch") {
+                                tracing::info!(url = %result.url, tokens = token_ids.len(), "CERN: dataset gelezen");
+                            } else {
+                                tracing::info!(url = %result.url, tokens = token_ids.len(), "Exploration: geleerd!");
+                            }
 
                             // v2.3: Update exploration goal progress met echte activiteit
                             let frontier_size = explorer.frontier.len();

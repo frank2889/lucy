@@ -200,9 +200,9 @@ pub fn spawn_server(state: SharedState) {
             // /brain → redirect naar / (breekt oude 301 cache in browsers)
             .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
             .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
+            .merge(protected)
             // Dashboard op / via fallback (alles dat geen API route matcht)
             .fallback_service(ServeDir::new("dashboard").fallback(ServeFile::new("dashboard/index.html")))
-            .merge(protected)
             .with_state(state)
             .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(cache_headers))
@@ -1675,13 +1675,21 @@ async fn self_fix_handler(State(state): State<SharedState>) -> Json<Value> {
     let field = (*state.field_handle.snapshot.load()).clone();
     let now = std::time::Instant::now();
 
-    // Phase 1: Diagnostics
+    // Phase 1: Diagnostics — bereken emoties als gemiddelde over active_set (zelfde als /telemetry)
+    let n = field.active_set.len().max(1) as f32;
+    let avg_curiosity = field.active_set.iter()
+        .map(|&id| field.points[id as usize].curiosity).sum::<f32>() / n;
+    let avg_satisfaction = field.active_set.iter()
+        .map(|&id| field.points[id as usize].satisfaction).sum::<f32>() / n;
+    let avg_frustration = field.active_set.iter()
+        .map(|&id| field.points[id as usize].frustration).sum::<f32>() / n;
+
     let telemetry_snapshot = TelemetrySnapshot {
         tick: field.tick,
         dopamine: field.dopamine,
-        frustration: 0.935,
-        satisfaction: 0.1,
-        curiosity: 0.1,
+        frustration: avg_frustration,
+        satisfaction: avg_satisfaction,
+        curiosity: avg_curiosity,
         free_energy: field.avg_free_energy,
         tension: field.points.iter().map(|p| p.tension).sum::<f32>() / field.points.len().max(1) as f32,
         ignition_active: field.ignition_active,
