@@ -1,5 +1,20 @@
 # Lucy Changelog
 
+## v3.0.2 (2026-05-01) — Self-fix deploy-blockers gefixt
+
+**Aanleiding:** v3.0/v3.0.1 zaten gemerged maar werden geblokkeerd door twee deploy-bugs. CHANGELOG werd ook nooit bijgewerkt sinds v2.6.17, waardoor `build.rs` alle latere commits met v2.6.17 stempelde — `/version` blijft daardoor structureel achterop.
+
+**Fixes:**
+- `compile_sandbox.rs`: `setup()` kopieert nu ook `Cargo.toml` + `Cargo.lock` naar sandbox-root. Voorheen alleen `crates/`, waardoor `cargo build --workspace` faalde (geen workspace-manifest). `compile()` draait cargo nu vanuit sandbox-root i.p.v. `crates/`.
+- `deploy_coordinator.rs::swap_binary`: schrijft nu naar `lucy-core.new`, chmod, dan `rename(2)` — atomair op POSIX. Voorheen niet-atomaire `fs::copy` met race-window tijdens swap.
+- `deploy_coordinator.rs::pre_deploy_flush`: vervangt vaste `sleep(5s)` door 30s mtime-poll op `lucy.snapshot`. SIGTERM-handler op restart blijft fail-safe.
+
+**Niet gewijzigd (bewust, fase-discipline):** sandbox-compile signal-handler in main.rs, NaN-storm-mitigatie, tick-tempo. Diagnose en zelf-patching daarvan komt via `/admin/self-fix` ná deploy (Fase 5 plan).
+
+**Verificatie:** `cargo check -p lucy-core` groen lokaal. Post-deploy: `/version` moet v3.0.2 melden.
+
+---
+
 ## v2.6.17 (2026-04-18) — Autonomie: Lucy als Zelfbewust Organisme
 
 **Kernvisie:** Lucy voelt wat ze niet weet, leert actief, repliceert zichzelf, en muteert via diverse gratis compute. Virus-model.

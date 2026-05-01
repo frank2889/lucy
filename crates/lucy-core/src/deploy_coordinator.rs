@@ -21,14 +21,30 @@ impl DeployCoordinator {
         }
     }
 
-    /// Pre-deploy flush: Signal graceful shutdown via signal file
+    /// Pre-deploy flush: wacht op verse snapshot vóór binary-swap.
+    /// Poll snapshot-mtime; SIGTERM tijdens docker restart triggert sowieso een save (main.rs:1870),
+    /// maar door eerst te wachten op een natuurlijke save-cycle voorkomen we race-windows.
     pub fn pre_deploy_flush(&self, _api_url: &str, _token: &str) -> Result<(), String> {
-        // Create signal file for main loop to detect graceful shutdown
         fs::write("/tmp/lucy-pre-deploy-signal", "shutdown").ok();
 
-        // Wait for flush + graceful shutdown (max 30s)
-        thread::sleep(Duration::from_secs(5));
+        let snapshot_path = "/lucy/data/lucy.snapshot";
+        let baseline_mtime = fs::metadata(snapshot_path)
+            .and_then(|m| m.modified())
+            .ok();
 
+        // Poll up to 30s voor mtime-advance. Tick-loop schrijft snapshot op interval.
+        for _ in 0..30 {
+            thread::sleep(Duration::from_secs(1));
+            if let (Some(base), Ok(meta)) = (baseline_mtime, fs::metadata(snapshot_path)) {
+                if let Ok(current) = meta.modified() {
+                    if current > base {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Geen verse save binnen 30s → ga toch door, SIGTERM-handler vangt het op.
         Ok(())
     }
 
@@ -56,23 +72,28 @@ impl DeployCoordinator {
         Ok(())
     }
 
-    /// Swap binary: copy new binary → /lucy/lucy-core (atomic on same filesystem)
+    /// Swap binary atomically: write to `.new` op zelfde fs, chmod, rename → productie.
+    /// fs::copy is NIET atomair; tijdens kopie kan een lezer een half-geschreven binary laden.
+    /// rename(2) op POSIX is wél atomair binnen één filesystem.
     pub fn swap_binary(&self, new_binary_path: &str) -> Result<(), String> {
         if !Path::new(new_binary_path).exists() {
             return Err(format!("New binary not found: {}", new_binary_path));
         }
 
-        // Copy + overwrite
-        fs::copy(new_binary_path, &self.production_binary)
-            .map_err(|e| format!("Binary swap failed: {}", e))?;
+        let staging = format!("{}.new", &self.production_binary);
 
-        // Verify permissions
+        fs::copy(new_binary_path, &staging)
+            .map_err(|e| format!("Staging copy failed: {}", e))?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.production_binary, fs::Permissions::from_mode(0o755))
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
                 .map_err(|e| format!("chmod failed: {}", e))?;
         }
+
+        fs::rename(&staging, &self.production_binary)
+            .map_err(|e| format!("Atomic rename failed: {}", e))?;
 
         Ok(())
     }

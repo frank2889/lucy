@@ -17,15 +17,17 @@ impl SandboxCompiler {
         }
     }
 
-    /// Setup sandbox: copy crates/ → /tmp/lucy-v3-sandbox/
+    /// Setup sandbox: copy workspace (Cargo.toml + Cargo.lock + crates/) → /tmp/lucy-v3-sandbox/
     pub fn setup(&self) -> Result<(), String> {
-        // Clean old sandbox
         let _ = fs::remove_dir_all(&self.sandbox_dir);
         fs::create_dir_all(&self.sandbox_dir)
             .map_err(|e| format!("Failed to create sandbox: {}", e))?;
 
-        // Copy Lucy crates
-        let cmd = format!("cp -r /lucy/crates {}", &self.sandbox_dir);
+        // Workspace root + crates. Cargo needs Cargo.toml at workspace root.
+        let cmd = format!(
+            "cp -r /lucy/crates {dst}/ && cp /lucy/Cargo.toml {dst}/Cargo.toml && cp /lucy/Cargo.lock {dst}/Cargo.lock 2>/dev/null || true",
+            dst = &self.sandbox_dir
+        );
         let output = Command::new("sh")
             .arg("-c")
             .arg(&cmd)
@@ -33,7 +35,11 @@ impl SandboxCompiler {
             .map_err(|e| format!("Copy failed: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("Copy crates failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(format!("Copy workspace failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        if !Path::new(&format!("{}/Cargo.toml", &self.sandbox_dir)).exists() {
+            return Err("Cargo.toml ontbreekt in sandbox-root na setup".to_string());
         }
 
         Ok(())
@@ -70,13 +76,11 @@ impl SandboxCompiler {
 
     /// Compile in sandbox
     pub fn compile(&self) -> Result<CompileResult, String> {
-        let cargo_dir = format!("{}/crates", &self.sandbox_dir);
-
         let output = Command::new("cargo")
             .arg("build")
             .arg("--release")
             .arg("--workspace")
-            .current_dir(&cargo_dir)
+            .current_dir(&self.sandbox_dir)
             .output()
             .map_err(|e| format!("Cargo failed: {}", e))?;
 
@@ -96,7 +100,7 @@ impl SandboxCompiler {
             });
         }
 
-        let binary_path = format!("{}/crates/target/release/lucy-core", &self.sandbox_dir);
+        let binary_path = format!("{}/target/release/lucy-core", &self.sandbox_dir);
 
         // Verify binary exists
         if !Path::new(&binary_path).exists() {
