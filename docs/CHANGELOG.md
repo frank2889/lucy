@@ -1,8 +1,13 @@
 # Lucy Changelog
 
-## v3.0.2 (2026-05-01) — Self-fix deploy-blockers gefixt
+## v3.0.2 (2026-05-02) — Self-fix deploy-blockers + data-preservatie hersteld
 
-**Aanleiding:** v3.0/v3.0.1 zaten gemerged maar werden geblokkeerd door twee deploy-bugs. CHANGELOG werd ook nooit bijgewerkt sinds v2.6.17, waardoor `build.rs` alle latere commits met v2.6.17 stempelde — `/version` blijft daardoor structureel achterop.
+**Aanleiding:** v3.0/v3.0.1 zaten gemerged maar werden geblokkeerd door deploy-bugs én een fundamenteel schema-defect. CHANGELOG werd ook nooit bijgewerkt sinds v2.6.17, waardoor `build.rs` alle latere commits met v2.6.17 stempelde — `/version` blijft daardoor structureel achterop.
+
+**Kritieke schema-fix (data-preservatie, CLAUDE.md §4):**
+- `DIM` is teruggezet van 512 naar 256. De v2.9.0-pre-upgrade naar 512 was nooit compleet: `schema_v1::FieldV1` gebruikte de huidige `FieldPoint` (DIM=512) terwijl de productie-snapshot (504K ticks) DIM=256 bevat. Gevolg: huidige binary kon de live snapshot niet meer laden (`CapacityOverflow`). Deploy zou Lucy's hele geheugen wissen. Verify_snapshot bevestigt nu: `tick=503700, points=26713, schema=headered_v1_current`.
+- Loader in `lib.rs::Field::load_with_fallback`: `Headered(v, _)` arm probeert nu current → FieldV2 → FieldV1 ladder i.p.v. directe deserialize-naar-current. Eerdere code wees Headered-versies ≠ 1 expliciet af, ook al is `CURRENT_SCHEMA_VERSION=2`.
+- `verify_snapshot`: zelfde ladder, plus import van `schema_v2::FieldV2`.
 
 **Fixes:**
 - `compile_sandbox.rs`: `setup()` kopieert nu ook `Cargo.toml` + `Cargo.lock` naar sandbox-root. Voorheen alleen `crates/`, waardoor `cargo build --workspace` faalde (geen workspace-manifest). `compile()` draait cargo nu vanuit sandbox-root i.p.v. `crates/`.

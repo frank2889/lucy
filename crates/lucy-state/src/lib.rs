@@ -55,9 +55,12 @@ pub use snapshot_header::{SnapshotHeader, SnapshotFormat, CURRENT_SCHEMA_VERSION
     HEADER_SIZE, MAGIC, detect_version};
 
 /// Dimensionaliteit van elke veldvector (Φ, P, M, embeddings).
-/// v2.9.0+: 512 voor hogere expressiviteit. v2.8.x en eerder: 256.
-/// Schema-versioning handelt migratie af.
-pub const DIM: usize = 512;
+/// v2.9.0+ pre-upgrade pad ging naar 512 maar de bridge-infrastructuur (FieldPointV1
+/// gebruikte huidige FieldPoint i.p.v. eigen 256-versie) was nooit compleet, waardoor
+/// productie-snapshots (schema=1, DIM=256, 504K ticks) niet meer geladen konden worden.
+/// v3.0.2: terug naar 256 om Lucy's geleerde data te respecteren. DIM-upgrade naar 512
+/// kan later via een schone migratie (eigen FieldPointV1/V2 met bewuste padding).
+pub const DIM: usize = 256;
 
 /// Fase waarin het veld zich bevindt
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -688,11 +691,7 @@ impl From<schema_v1::FieldV1> for Field {
     /// v2.6.7-era FieldV1 (DIM=256) → current Field (DIM=512).
     /// Nieuwe v2.6.8+ velden → default. Pads 256-dim arrays to 512.
     fn from(v1: schema_v1::FieldV1) -> Self {
-        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
-            let mut vec512 = [0.0f32; 512];
-            vec512[..256].copy_from_slice(&vec256);
-            vec512
-        };
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; DIM] { vec256 };
 
         Field {
             // --- 1-op-1 gemapped vanuit v1 (identieke veldnamen, array-padding) ---
@@ -808,11 +807,7 @@ impl From<schema_v2::FieldV2> for Field {
     /// Pads 256-dim arrays ao 512 (rest=0). FieldPointV2 → FieldPoint met array-migration.
     /// Clamps, last_thought, current_intention, attn_context, working_memory: pad [256] → [512].
     fn from(v2: schema_v2::FieldV2) -> Self {
-        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
-            let mut vec512 = [0.0f32; 512];
-            vec512[..256].copy_from_slice(&vec256);
-            vec512
-        };
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; DIM] { vec256 };
 
         // Migrate FieldPointV2 → FieldPoint (pad arrays)
         let migrated_points = v2.points.into_iter().map(|vp| {
@@ -943,7 +938,7 @@ impl From<schema_v2::FieldV2> for Field {
             pages_read: v2.pages_read,
             tokens_processed: v2.tokens_processed,
             snapshot_version: 2,  // Mark as migrated to v2.9.0 schema
-            field_dim: 512,  // Update dimensionality
+            field_dim: DIM,
             n_input: v2.n_input,
             n_hidden: v2.n_hidden,
             n_output: v2.n_output,
@@ -962,11 +957,7 @@ impl From<schema_v0::FieldV0> for Field {
     /// 4 v2.6.6 boredom/sluggish-velden en v2.6.7 concept-clustering → defaults.
     /// Pads 256-dim arrays to 512. All v0 data EXACT preserved.
     fn from(v0: schema_v0::FieldV0) -> Self {
-        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; 512] {
-            let mut vec512 = [0.0f32; 512];
-            vec512[..256].copy_from_slice(&vec256);
-            vec512
-        };
+        let pad_256_to_512 = |vec256: [f32; 256]| -> [f32; DIM] { vec256 };
 
         Field {
             points: v0.points,
@@ -1869,21 +1860,46 @@ impl Field {
             }
         }
 
-        // v2.6.9: versie-detectie via header magic bytes
+        // v2.6.9: versie-detectie via header magic bytes.
+        // Headered v1/v2 worden via schema-ladder geladen: probeer eerst current
+        // (DIM=512), dan FieldV2 (DIM=256, alle moderne velden), dan FieldV1.
+        // Reden: pre-v2.9.0 binaries schreven schema_version=1 of =2 op DIM=256
+        // payload. Direct-deserialize naar Field (DIM=512) faalt met
+        // CapacityOverflow door array-grootte mismatch.
         let field: Self = match detect_version(&bytes) {
             SnapshotFormat::Headered(version, payload_offset) => {
                 let payload = &bytes[payload_offset..];
-                match version {
-                    1 => {
-                        // v2.6.9+ current format — direct deserialize
-                        bincode::deserialize(payload)?
-                    }
-                    unknown => {
-                        return Err(format!(
-                            "Unsupported snapshot schema version: {}. Huidige binary ondersteunt v0 (legacy) en v{}.",
-                            unknown, CURRENT_SCHEMA_VERSION
-                        ).into());
-                    }
+
+                if let Ok(f) = bincode::deserialize::<Self>(payload) {
+                    tracing::info!(version, "Headered snapshot direct geladen (current schema)");
+                    f
+                } else if let Ok(v2) = bincode::deserialize::<schema_v2::FieldV2>(payload) {
+                    tracing::info!(
+                        version,
+                        tick = v2.tick,
+                        points = v2.points.len(),
+                        "Headered snapshot via FieldV2-bridge geladen (DIM=256 → 512)"
+                    );
+                    Field::from(v2)
+                } else if let Ok(v1) = bincode::deserialize::<schema_v1::FieldV1>(payload) {
+                    tracing::info!(
+                        version,
+                        tick = v1.tick,
+                        points = v1.points.len(),
+                        "Headered snapshot via FieldV1-bridge geladen"
+                    );
+                    Field::from(v1)
+                } else {
+                    let cur_err = bincode::deserialize::<Self>(payload).err()
+                        .map(|e| e.to_string()).unwrap_or_else(|| "?".into());
+                    let v2_err = bincode::deserialize::<schema_v2::FieldV2>(payload).err()
+                        .map(|e| e.to_string()).unwrap_or_else(|| "?".into());
+                    let v1_err = bincode::deserialize::<schema_v1::FieldV1>(payload).err()
+                        .map(|e| e.to_string()).unwrap_or_else(|| "?".into());
+                    return Err(format!(
+                        "Headered v{} load faalde op current/V2/V1 — current: {} | V2: {} | V1: {}",
+                        version, cur_err, v2_err, v1_err
+                    ).into());
                 }
             }
             SnapshotFormat::Legacy => {

@@ -15,7 +15,7 @@
 use std::io::Cursor;
 use std::process::ExitCode;
 
-use lucy_state::{Field, schema_v0::FieldV0, schema_v1::FieldV1};
+use lucy_state::{Field, schema_v0::FieldV0, schema_v1::FieldV1, schema_v2::FieldV2};
 use lucy_state::snapshot_header::{detect_version, SnapshotFormat};
 
 fn try_strict<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
@@ -50,30 +50,41 @@ fn main() -> ExitCode {
 
     let (format_name, payload): (&str, &[u8]) = match detect_version(&bytes) {
         SnapshotFormat::Headered(v, off) => {
-            if v == 1 {
-                match try_strict::<Field>(&bytes[off..]) {
-                    Ok(f) => {
-                        println!(
-                            "{{\"ok\":true,\"schema\":\"headered_v1\",\"tick\":{},\"points\":{},\"bytes\":{}}}",
-                            f.tick, f.points.len(), bytes.len()
-                        );
-                        return ExitCode::SUCCESS;
-                    }
-                    Err(e) => {
-                        println!(
-                            "{{\"ok\":false,\"schema\":\"headered_v1\",\"error\":\"{}\"}}",
-                            e.replace('"', "'")
-                        );
-                        return ExitCode::from(1);
-                    }
-                }
-            } else {
+            let payload = &bytes[off..];
+            // Probeer current Field, dan FieldV2 (DIM=256, alle moderne velden), dan FieldV1.
+            // Pre-v2.9.0 binaries schreven schema=1 op DIM=256 payload — alleen V2-bridge laadt dat.
+            if let Ok(f) = try_strict::<Field>(payload) {
                 println!(
-                    "{{\"ok\":false,\"schema\":\"headered\",\"error\":\"unsupported version {}\"}}",
-                    v
+                    "{{\"ok\":true,\"schema\":\"headered_v{}_current\",\"tick\":{},\"points\":{},\"bytes\":{}}}",
+                    v, f.tick, f.points.len(), bytes.len()
                 );
-                return ExitCode::from(1);
+                return ExitCode::SUCCESS;
             }
+            if let Ok(f) = try_strict::<FieldV2>(payload) {
+                println!(
+                    "{{\"ok\":true,\"schema\":\"headered_v{}_v2bridge\",\"tick\":{},\"points\":{},\"bytes\":{}}}",
+                    v, f.tick, f.points.len(), bytes.len()
+                );
+                return ExitCode::SUCCESS;
+            }
+            if let Ok(f) = try_strict::<FieldV1>(payload) {
+                println!(
+                    "{{\"ok\":true,\"schema\":\"headered_v{}_v1bridge\",\"tick\":{},\"points\":{},\"bytes\":{}}}",
+                    v, f.tick, f.points.len(), bytes.len()
+                );
+                return ExitCode::SUCCESS;
+            }
+            let cur_err = try_strict::<Field>(payload).err().unwrap_or_default();
+            let v2_err = try_strict::<FieldV2>(payload).err().unwrap_or_default();
+            let v1_err = try_strict::<FieldV1>(payload).err().unwrap_or_default();
+            println!(
+                "{{\"ok\":false,\"schema\":\"headered_v{}\",\"errors\":{{\"current\":\"{}\",\"v2\":\"{}\",\"v1\":\"{}\"}}}}",
+                v,
+                cur_err.replace('"', "'"),
+                v2_err.replace('"', "'"),
+                v1_err.replace('"', "'")
+            );
+            return ExitCode::from(1);
         }
         SnapshotFormat::Legacy => ("legacy", bytes.as_slice()),
     };
