@@ -1,5 +1,19 @@
 # Lucy Changelog
 
+## v3.0.3 (2026-05-05) — Zombie-goal fix: reflect triggert direct bij progress=1.0
+
+**Aanleiding:** Live telemetry op tick 504.550 toont 5 goals met `progress=1.0` en `complete_total=0`. Root cause: explore-goals krijgen progress buiten reflect()-calls (via `update_explore_progress()`), en na een herstart loopt `last_reflect_tick` vanuit de snapshot door — zombie-goals wachten dan tot de volgende 10.000-tick cyclus.
+
+**Fix:** In de tick-loop (main.rs) wordt nu gecontroleerd of er zombie-goals (progress≥1.0) aanwezig zijn. Zo ja, triggert reflect() direct, ongeacht de timer. reflect() verwerkt ze, telt ze mee in `GOAL_COMPLETE_TOTAL`, en verwijdert ze.
+
+**Verwacht effect:**
+
+- `complete_total > 0` binnen één reflect-cycle na deploy
+- `frustration` daalt naarmate `control_belief` stijgt via completions
+- Geen regressie op score_cv, winner_turnover_ratio, ignition_cap
+
+**Niet gewijzigd:** reflect_interval, snapshot-schema, goal-spawn logica.
+
 ## v3.0.2 (2026-05-02) — Self-fix deploy-blockers + data-preservatie hersteld
 
 **Aanleiding:** v3.0/v3.0.1 zaten gemerged maar werden geblokkeerd door deploy-bugs én een fundamenteel schema-defect. CHANGELOG werd ook nooit bijgewerkt sinds v2.6.17, waardoor `build.rs` alle latere commits met v2.6.17 stempelde — `/version` blijft daardoor structureel achterop.

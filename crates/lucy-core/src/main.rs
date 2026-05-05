@@ -130,6 +130,42 @@ const GPU_BALANCE_CHECK: u64 = 5_000;    // Check Vast.ai balance + posting (elk
 // Dynamische intervallen: field.learn_interval, field.growth_interval, field.snapshot_interval,
 // field.explore_interval, field.consolidation_interval — aangepast door adapt_dynamics()
 
+/// v3.1: Wetenschappelijke experiment-config uit env vars.
+/// Default-waarden = bestaand productie-gedrag. Geen env = identiek aan v3.0.2.
+#[derive(Clone, Debug, Default)]
+pub struct ExperimentConfig {
+    pub seed: Option<u64>,
+    pub headless: bool,
+    pub ticks_max: Option<u64>,
+    pub trace_path: Option<String>,
+    pub disable_refractory: bool,
+    pub disable_ignition_cap: bool,
+    pub disable_novelty_boost: bool,
+}
+
+impl ExperimentConfig {
+    pub fn from_env() -> Self {
+        fn flag(key: &str) -> bool {
+            std::env::var(key).ok().map(|v| matches!(v.as_str(), "1" | "true" | "yes")).unwrap_or(false)
+        }
+        Self {
+            seed: std::env::var("LUCY_SEED").ok().and_then(|v| v.parse().ok()),
+            headless: flag("LUCY_HEADLESS"),
+            ticks_max: std::env::var("LUCY_TICKS_MAX").ok().and_then(|v| v.parse().ok()),
+            trace_path: std::env::var("LUCY_TRACE_PATH").ok().filter(|s| !s.is_empty()),
+            disable_refractory: flag("LUCY_DISABLE_REFRACTORY"),
+            disable_ignition_cap: flag("LUCY_DISABLE_IGNITION_CAP"),
+            disable_novelty_boost: flag("LUCY_DISABLE_NOVELTY_BOOST"),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.seed.is_some() || self.headless || self.ticks_max.is_some()
+            || self.trace_path.is_some() || self.disable_refractory
+            || self.disable_ignition_cap || self.disable_novelty_boost
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -154,6 +190,21 @@ async fn main() {
     );
     tracing::info!("Lucy v0.9 — Field Intelligence + RAG + Attention + Working Memory — waking up...");
 
+    // v3.1: Experiment-config uit env. Default-loos = productie-gedrag.
+    let exp_cfg = ExperimentConfig::from_env();
+    if exp_cfg.is_active() {
+        tracing::warn!(
+            seed = ?exp_cfg.seed,
+            headless = exp_cfg.headless,
+            ticks_max = ?exp_cfg.ticks_max,
+            trace = ?exp_cfg.trace_path,
+            disable_refractory = exp_cfg.disable_refractory,
+            disable_ignition_cap = exp_cfg.disable_ignition_cap,
+            disable_novelty_boost = exp_cfg.disable_novelty_boost,
+            "EXPERIMENT MODE actief — niet-default gedrag"
+        );
+    }
+
     let root = PathBuf::from(".");
     let fs = FileSystem::new(root.clone());
 
@@ -169,6 +220,12 @@ async fn main() {
         tracing::error!("ALLE snapshots gefaald — bootstrapping fresh. GELEERDE DATA VERLOREN!");
         field::bootstrap_field()
     };
+
+    // v3.1: Apply experiment-config op field (runtime-only, niet in snapshot)
+    field.disable_refractory = exp_cfg.disable_refractory;
+    field.disable_ignition_cap = exp_cfg.disable_ignition_cap;
+    field.disable_novelty_boost = exp_cfg.disable_novelty_boost;
+    field.seed_used = exp_cfg.seed;
 
     // v2.5: Onmiddellijk healen na laden/bootstrap — voorkomt inf bij tick 0
     let healed = field.heal();
@@ -1347,7 +1404,11 @@ async fn main() {
         }
 
         // 6c. REFLECTIE — Lucy evalueert haar doelen
-        if thinker::should_reflect(&field) && field.phase == FieldPhase::Idle {
+        // Zombie-trigger: als er goals op progress=1.0 staan (bijv. na herstart of
+        // explore-update buiten reflect-interval), direct reflecteren zonder op de
+        // timer te wachten — anders blijven ze hangen tot de volgende 10.000-tick cyclus.
+        let has_zombie_goals = field.goals.iter().any(|g| g.progress >= 1.0);
+        if (thinker::should_reflect(&field) || has_zombie_goals) && field.phase == FieldPhase::Idle {
           if let Ok(mut journal) = shared.journal.try_write() {
             thinker::reflect(&mut field, &mut journal);
             tracing::debug!(goals = field.goals.len(), "Lucy reflecteerde");
@@ -1852,6 +1913,14 @@ async fn main() {
         }
 
         field.tick += 1;
+
+        // v3.1: Clean exit bij LUCY_TICKS_MAX (experiment-mode)
+        if let Some(max_ticks) = exp_cfg.ticks_max {
+            if field.tick >= max_ticks {
+                tracing::info!(tick = field.tick, "LUCY_TICKS_MAX bereikt — clean exit");
+                break;
+            }
+        }
 
         // v1.0: Yield elke 10 ticks zodat async runtime ademruimte heeft
         if field.tick % 10 == 0 {
