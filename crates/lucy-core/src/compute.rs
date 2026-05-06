@@ -3581,6 +3581,16 @@
             candidates.retain(|(id, _, _)| *id as u32 != field.last_winner_id);
         }
 
+        // v3.0.4: Refractory kan alle kandidaten wegfilteren (top-K=1 + die was de
+        // vorige winnaar). Dan is candidates[0] een index-out-of-bounds panic.
+        if candidates.is_empty() {
+            field.ignition_active = false;
+            let fe = field.fe_tracking_rate;
+            let decayed = (1.0 - fe) * field.ignition_strength;
+            field.ignition_strength = if decayed.is_finite() { decayed } else { 0.0 };
+            return;
+        }
+
         // === Stap 2: Winner-Take-All — sterkste kandidaat wint ===
         // Bewuste ervaring is exclusief: maar één representatie tegelijk
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

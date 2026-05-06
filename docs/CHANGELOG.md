@@ -1,5 +1,19 @@
 # Lucy Changelog
 
+## v3.0.4 (2026-05-06) — Crash-loop break: empty-candidates + extreme-value heal
+
+**Aanleiding:** Na v3.0.3 deploy zat Lucy in een crash-restart loop. Tick liep ~1u door tot ~505000, dan tps=0 en tension=1e30 (mathematische runaway). Container restartte, snapshot werd geladen op tick 503700, cyclus herhaalde zich. 26.566 NaN-velden per startup geheald — symptoom van diepere field-corruptie.
+
+**Twee root causes:**
+
+1. **`compute.rs:3588` index-out-of-bounds.** In `global_workspace_broadcast`: na de winner-refractory `retain` op regel 3581 kon `candidates` leeg worden (top-K=1 + die kandidaat was de vorige winnaar). Direct daarna `candidates[0]` → panic. Nu: empty-check met decay-and-return.
+
+2. **`heal()` ving alleen NaN/Inf, geen extreme-finite waarden.** Tension klom naar 1e30 (binnen `f32::MAX/1e6` clamp, dus formeel finite, dus niet geheald). Cascade: free_energy EMA, blanket_surprise, kl_divergence allemaal in dezelfde range. heal() resetet nu alle finite waarden boven `1e6` naar default — ruim boven elk normaal signaal, ruim onder runaway.
+
+**Niet gewijzigd:** behavioral clamps in compute.rs (`f32::MAX/1e6`) blijven als anti-Inf laatste laag. De EXTREME-drempel in heal() is een sweep, niet een runtime-clamp — de root cause van waarom tension naar 1e30 klimt is een aparte diagnose (waarschijnlijk feedback-loop in EMA × precision × prediction_error).
+
+**Verwacht effect:** Eerste startup heelt extreme waarden, Lucy blijft stabiel draaien. Ticks lopen door zonder crash. Volgende reflect verwerkt zombie-goals (v3.0.3 fix). complete_total stijgt en blijft persistent.
+
 ## v3.0.3 (2026-05-05) — Zombie-goal fix: reflect triggert direct bij progress=1.0
 
 **Aanleiding:** Live telemetry op tick 504.550 toont 5 goals met `progress=1.0` en `complete_total=0`. Root cause: explore-goals krijgen progress buiten reflect()-calls (via `update_explore_progress()`), en na een herstart loopt `last_reflect_tick` vanuit de snapshot door — zombie-goals wachten dan tot de volgende 10.000-tick cyclus.

@@ -681,6 +681,18 @@ pub struct Field {
     pub self_metrics: SelfMetrics,
     #[serde(skip)]
     pub provenance_counts: [u64; 6],
+
+    // === v3.1: Wetenschappelijke ablation-toggles (runtime-only, niet in snapshot) ===
+    // Default-waarden = bestaand productie-gedrag. Alleen aan via env vars in main.rs.
+    #[serde(skip)]
+    pub disable_refractory: bool,
+    #[serde(skip)]
+    pub disable_ignition_cap: bool,
+    #[serde(skip)]
+    pub disable_novelty_boost: bool,
+    /// Geseed bij start als LUCY_SEED gezet is. None = thread_rng (huidig gedrag).
+    #[serde(skip)]
+    pub seed_used: Option<u64>,
 }
 
 pub(crate) fn default_dim() -> usize { DIM }
@@ -798,6 +810,10 @@ impl From<schema_v1::FieldV1> for Field {
             self_ep_audit: Vec::new(),
             self_metrics: SelfMetrics::default(),
             provenance_counts: [0u64; 6],
+            disable_refractory: false,
+            disable_ignition_cap: false,
+            disable_novelty_boost: false,
+            seed_used: None,
         }
     }
 }
@@ -948,6 +964,10 @@ impl From<schema_v2::FieldV2> for Field {
             self_ep_audit: v2.self_ep_audit,
             self_metrics: v2.self_metrics,
             provenance_counts: v2.provenance_counts,
+            disable_refractory: false,
+            disable_ignition_cap: false,
+            disable_novelty_boost: false,
+            seed_used: None,
         }
     }
 }
@@ -1064,6 +1084,10 @@ impl From<schema_v0::FieldV0> for Field {
             self_ep_audit: Vec::new(),
             self_metrics: SelfMetrics::default(),
             provenance_counts: [0u64; 6],
+            disable_refractory: false,
+            disable_ignition_cap: false,
+            disable_novelty_boost: false,
+            seed_used: None,
         }
     }
 }
@@ -1495,6 +1519,10 @@ impl Field {
             n_input: 0,  // wordt gezet door bootstrap_field
             n_hidden: 0,
             n_output: 0,
+            disable_refractory: false,
+            disable_ignition_cap: false,
+            disable_novelty_boost: false,
+            seed_used: None,
         }
     }
 
@@ -1523,6 +1551,10 @@ impl Field {
         let mut nan_consolidated = 0u32;
         let mut nan_fe = 0u32;
         let mut nan_other = 0u32;
+        // v3.0.4: extreme-value drempel — finite maar buiten redelijk dynamisch bereik.
+        // Tension/free_energy klommen in productie naar 1e30 (binnen f32::MAX/1e6 clamp,
+        // dus niet als NaN herkend). 1e6 is ruim boven elk normaal signaal en stopt runaway.
+        const EXTREME: f32 = 1e6;
         for p in &mut self.points {
             for v in p.phi.iter_mut() {
                 if !v.is_finite() { *v = 0.0; healed += 1; nan_phi += 1; }
@@ -1533,16 +1565,16 @@ impl Field {
             for v in p.memory.iter_mut() {
                 if !v.is_finite() { *v = 0.0; healed += 1; nan_mem += 1; }
             }
-            if !p.tension.is_finite() { p.tension = 0.0; healed += 1; nan_other += 1; }
-            if !p.tension_ema.is_finite() { p.tension_ema = 0.0; healed += 1; nan_other += 1; }
-            if !p.energy.is_finite() { p.energy = 1.0; healed += 1; nan_other += 1; }
+            if !p.tension.is_finite() || p.tension.abs() > EXTREME { p.tension = 0.0; healed += 1; nan_other += 1; }
+            if !p.tension_ema.is_finite() || p.tension_ema.abs() > EXTREME { p.tension_ema = 0.0; healed += 1; nan_other += 1; }
+            if !p.energy.is_finite() || p.energy.abs() > EXTREME { p.energy = 1.0; healed += 1; nan_other += 1; }
             if !p.eta.is_finite() { p.eta = 0.01; healed += 1; nan_other += 1; }
-            if !p.free_energy.is_finite() { p.free_energy = 0.0; healed += 1; nan_fe += 1; }
-            if !p.free_energy_rate.is_finite() { p.free_energy_rate = 0.0; healed += 1; nan_other += 1; }
-            if !p.error_var.is_finite() { p.error_var = 1.0; healed += 1; nan_other += 1; }
-            if !p.precision.is_finite() { p.precision = 1.0; healed += 1; nan_other += 1; }
-            if !p.kl_divergence.is_finite() { p.kl_divergence = 0.0; healed += 1; nan_other += 1; }
-            if !p.blanket_surprise.is_finite() { p.blanket_surprise = 0.0; healed += 1; nan_other += 1; }
+            if !p.free_energy.is_finite() || p.free_energy.abs() > EXTREME { p.free_energy = 0.0; healed += 1; nan_fe += 1; }
+            if !p.free_energy_rate.is_finite() || p.free_energy_rate.abs() > EXTREME { p.free_energy_rate = 0.0; healed += 1; nan_other += 1; }
+            if !p.error_var.is_finite() || p.error_var.abs() > EXTREME { p.error_var = 1.0; healed += 1; nan_other += 1; }
+            if !p.precision.is_finite() || p.precision.abs() > EXTREME { p.precision = 1.0; healed += 1; nan_other += 1; }
+            if !p.kl_divergence.is_finite() || p.kl_divergence.abs() > EXTREME { p.kl_divergence = 0.0; healed += 1; nan_other += 1; }
+            if !p.blanket_surprise.is_finite() || p.blanket_surprise.abs() > EXTREME { p.blanket_surprise = 0.0; healed += 1; nan_other += 1; }
             if !p.curiosity.is_finite() { p.curiosity = 0.0; healed += 1; nan_other += 1; }
             if !p.satisfaction.is_finite() { p.satisfaction = 0.0; healed += 1; nan_other += 1; }
             if !p.frustration.is_finite() { p.frustration = 0.0; healed += 1; nan_other += 1; }
