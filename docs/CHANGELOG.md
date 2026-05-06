@@ -1,5 +1,13 @@
 # Lucy Changelog
 
+## v3.0.5 (2026-05-06) — Tension/free_energy clamp 1e6 (was f32::MAX/1e6 = 3.4e32)
+
+**Aanleiding:** Na v3.0.4 deploy: heal() werkte (140K + 85K corruptie geheald), maar tension explodeerde binnen één field_update-step opnieuw naar 4.2e30 (zichtbaar in heartbeat). Tick-loop bleef daarna hangen. Root cause: de bestaande clamps op compute.rs regel 508/520/1166/1248 stonden op `f32::MAX/1e6` (~3.4e32), bedoeld als anti-Inf laatste laag, niet als gedragsclamp. Daardoor kon tension binnen die clamp groeien tot 1e30+, ver buiten elk realistisch dynamisch bereik.
+
+**Fix:** Alle vier clamps verlaagd naar `1e6`. Ruim zes ordes van grootte boven normaal signaal (~O(1)), ruim onder het runaway-gebied. Dit is bewust een gedragsclamp i.p.v. Inf-bescherming — pragmatische rem op de positive-feedback loop in EMA × precision × prediction_error tot de echte oorzaak gediagnosticeerd is.
+
+**Niet gewijzigd:** heal() extreme-drempel blijft op 1e6 (matcht). Diepere root cause (welke vermenigvuldiging produceert eerst 1e30?) is een aparte ADR-waardige diagnose.
+
 ## v3.0.4 (2026-05-06) — Crash-loop break: empty-candidates + extreme-value heal
 
 **Aanleiding:** Na v3.0.3 deploy zat Lucy in een crash-restart loop. Tick liep ~1u door tot ~505000, dan tps=0 en tension=1e30 (mathematische runaway). Container restartte, snapshot werd geladen op tick 503700, cyclus herhaalde zich. 26.566 NaN-velden per startup geheald — symptoom van diepere field-corruptie.

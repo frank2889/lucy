@@ -505,7 +505,7 @@
         let free_energy = kl_divergence + blanket_surprise;
         // v2.6.7 A2: NaN/Inf safety op EMA-update van free_energy
         let raw_fe = (1.0 - fe_rate) * old_free_energy + fe_rate * free_energy;
-        point.free_energy = if raw_fe.is_finite() { raw_fe.clamp(0.0, f32::MAX / 1e6) } else { 0.0 };
+        point.free_energy = if raw_fe.is_finite() { raw_fe.clamp(0.0, 1e6) } else { 0.0 };
 
         // ┌─────────────────────────────────────────────────────────┐
         // │ STAP 5: TENSION = INSTANT F + metabole kosten + basaal │
@@ -517,7 +517,7 @@
         // v2.6.7 A2: anti-Inf safety clamp (niet gedragslimiet) — was geëxplodeerd naar 1e34
         let raw_tension = free_energy + compute_cost + basal_tension;
         let safe_tension = if raw_tension.is_finite() { raw_tension } else { basal_tension };
-        point.tension = safe_tension.clamp(basal_tension, f32::MAX / 1e6);
+        point.tension = safe_tension.clamp(basal_tension, 1e6);
         point.tension_ema = ema_decay * old_tension_ema + (1.0 - ema_decay) * point.tension;
 
         // ┌─────────────────────────────────────────────────────────┐
@@ -1163,7 +1163,7 @@
             // v2.6.7 A2: anti-Inf safety clamp
             let raw_tension = free_energy + compute_cost + basal_tension;
             let safe_tension = if raw_tension.is_finite() { raw_tension } else { basal_tension };
-            let tension = safe_tension.clamp(basal_tension, f32::MAX / 1e6);
+            let tension = safe_tension.clamp(basal_tension, 1e6);
             let tension_ema = ema_decay * point.tension_ema + (1.0 - ema_decay) * tension;
 
             // dF/dt — de temporele afgeleide waaruit emoties volgen
@@ -1245,7 +1245,7 @@
                 // v2.6.7: EMA update van free_energy, NaN-safe
                 free_energy: {
                     let raw = (1.0 - fe_rate) * old_free_energy + fe_rate * free_energy;
-                    if raw.is_finite() { raw.clamp(0.0, f32::MAX / 1e6) } else { 0.0 }
+                    if raw.is_finite() { raw.clamp(0.0, 1e6) } else { 0.0 }
                 },
             })
         }).collect();
