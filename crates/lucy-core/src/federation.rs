@@ -39,6 +39,9 @@ pub fn is_compatible(field: &Field, remote: &WeightSnapshot) -> Result<(), Strin
 pub struct CouplingWeight {
     pub point_id: u32,
     pub coupling_idx: u16,
+    /// edge-identity key: het doelpunt van deze coupling. Zonder deze check middelt
+    /// merge_weights positioneel edges naar verschillende targets = stille corruptie.
+    pub target: u32,
     pub weight: f32,
 }
 
@@ -52,6 +55,7 @@ pub fn export_weights(field: &Field) -> WeightSnapshot {
                 weights.push(CouplingWeight {
                     point_id: id,
                     coupling_idx: ci as u16,
+                    target: c.target,
                     weight: c.weight,
                 });
             }
@@ -76,7 +80,12 @@ pub fn merge_weights(field: &mut Field, remote: &WeightSnapshot, alpha: f32) -> 
         let pid = rw.point_id as usize;
         let ci = rw.coupling_idx as usize;
         if pid < field.points.len() && ci < field.points[pid].couplings.len() {
-            let local = field.points[pid].couplings[ci].weight;
+            let local_c = &field.points[pid].couplings[ci];
+            // edge-identity check: alleen middelen als beide nodes op dit slot dezelfde
+            // edge (zelfde target) hebben. Na autonome grow()/prune() kan positie ci naar
+            // verschillende targets wijzen bij gelijk n_points — dan overslaan (fail-safe).
+            if local_c.target != rw.target { continue; }
+            let local = local_c.weight;
             let nw = (1.0 - a) * local + a * rw.weight;
             if nw.is_finite() {
                 // clamp binnen realistisch gewicht-bereik (zoals update_weights elders)
@@ -170,7 +179,7 @@ mod tests {
     fn merge_refuses_incompatible_topology() {
         let mut field = Field::new();
         let n = field.points.len();
-        let s = snap(DIM, n + 1, vec![CouplingWeight { point_id: 0, coupling_idx: 0, weight: 1.0 }]);
+        let s = snap(DIM, n + 1, vec![CouplingWeight { point_id: 0, coupling_idx: 0, target: 0, weight: 1.0 }]);
         // incompatibele topologie → 0 merges, geen corruptie
         assert_eq!(merge_weights(&mut field, &s, 0.3), 0);
     }
@@ -179,7 +188,7 @@ mod tests {
     fn merge_skips_nonfinite_without_panic() {
         let mut field = Field::new();
         let n = field.points.len();
-        let s = snap(DIM, n, vec![CouplingWeight { point_id: 0, coupling_idx: 0, weight: f32::NAN }]);
+        let s = snap(DIM, n, vec![CouplingWeight { point_id: 0, coupling_idx: 0, target: 0, weight: f32::NAN }]);
         // compatibele topologie maar NaN-gewicht → overgeslagen, geen panic
         assert_eq!(merge_weights(&mut field, &s, 0.3), 0);
     }

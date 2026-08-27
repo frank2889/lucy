@@ -165,6 +165,9 @@ pub fn spawn_server(state: SharedState) {
             .route("/admin/pre-deploy", post(pre_deploy_handler))
             .route("/sync", post(sync_handler))
             .route("/feed-code", post(feed_code_handler))
+            // /feed muteert permanent gewichten/vocab → achter auth (was publiek).
+            // Lucy leert autonoom in-process, niet via /feed, dus dit breekt haar leren niet.
+            .route("/feed", post(feed_handler))
             .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
             .route("/admin/grow", post(admin_grow_handler))
             .route("/admin/self-fix", post(self_fix_handler))
@@ -179,7 +182,6 @@ pub fn spawn_server(state: SharedState) {
             .route("/status", get(status))
             .route("/activity", get(activity_handler))
             .route("/ask", post(ask_handler))
-            .route("/feed", post(feed_handler))
             .route("/journal", get(journal_handler))
             .route("/sense", post(sense_handler))
             .route("/topology", get(topology_handler))
@@ -404,7 +406,7 @@ async fn ask_handler(
         Ok(Ok(Err(_panic))) => {
             tracing::error!("Panic in query processing");
             return Json(json!({
-                "answer": "...", "error": "panic_during_query",
+                "answer": "...", "error_detail": "panic_during_query",
                 "error": "internal_panic",
                 "think_rounds": 0,
                 "coherence": "0.0000",
@@ -412,7 +414,7 @@ async fn ask_handler(
         }
         Ok(Err(e)) => {
             return Json(json!({
-                "answer": "...", "error": "internal",
+                "answer": "...", "error_detail": "internal",
                 "error": format!("{}", e),
                 "think_rounds": 0,
                 "coherence": "0.0000",
@@ -1002,44 +1004,57 @@ async fn sense_handler(
         return Json(json!({"error": "no data provided"}));
     }
 
-    // Perceive: converteer naar 64-dim phi-vector
-    let phi = perceive(&modality, &raw_data);
+    // v3.x: Zwaar CPU-werk (perceive + field-clone + 200-tick settle) in spawn_blocking,
+    // net als ask_handler. Zonder dit blokkeert het settle de async-executor en kan één
+    // client met ~W gelijktijdige /sense-requests elke Tokio-worker vastzetten.
+    let state_c = state.clone();
+    let sense_result = tokio::task::spawn_blocking(move || {
+        // Perceive: converteer naar 64-dim phi-vector
+        let phi = perceive(&modality, &raw_data);
 
-    // v1.0: Sense op snapshot kloon — tick loop draait door
-    let mut field = (**state.field_handle.snapshot.load()).clone();
-    let input_ids = field.input_ids.clone();
+        // v1.0: Sense op snapshot kloon — tick loop draait door
+        let mut field = (**state_c.field_handle.snapshot.load()).clone();
+        let input_ids = field.input_ids.clone();
 
-    if input_ids.is_empty() {
-        return Json(json!({"error": "no input points in field"}));
+        if input_ids.is_empty() {
+            return None;
+        }
+
+        // Klem input-punten op de waargenomen vector
+        for (i, &id) in input_ids.iter().enumerate() {
+            field.clamps.insert(id, compute::rotate_embedding(&phi, i));
+        }
+
+        // Settle het veld
+        let (ticks_used, tension) = compute::settle_until_converged(&mut field, 200, 0.01);
+
+        // Lees output
+        let output: Vec<f32> = if !field.output_ids.is_empty() {
+            let out_id = field.output_ids[0] as usize;
+            field.points[out_id].phi.to_vec()
+        } else {
+            vec![]
+        };
+
+        // Verwijder clamps
+        field.clamps.clear();
+
+        let output_norm = output.iter().map(|v| v * v).sum::<f32>().sqrt();
+        Some((ticks_used, tension, output_norm))
+    }).await;
+
+    match sense_result {
+        Ok(Some((ticks_used, tension, output_norm))) => Json(json!({
+            "received": true,
+            "modality": modality_str,
+            "source": source,
+            "settle_ticks": ticks_used,
+            "tension": format!("{tension:.4}"),
+            "output_norm": output_norm,
+        })),
+        Ok(None) => Json(json!({"error": "no input points in field"})),
+        Err(_) => Json(json!({"error": "sense task failed"})),
     }
-
-    // Klem input-punten op de waargenomen vector
-    for (i, &id) in input_ids.iter().enumerate() {
-        field.clamps.insert(id, compute::rotate_embedding(&phi, i));
-    }
-
-    // Settle het veld
-    let (ticks_used, tension) = compute::settle_until_converged(&mut field, 200, 0.01);
-
-    // Lees output
-    let output: Vec<f32> = if !field.output_ids.is_empty() {
-        let out_id = field.output_ids[0] as usize;
-        field.points[out_id].phi.to_vec()
-    } else {
-        vec![]
-    };
-
-    // Verwijder clamps
-    field.clamps.clear();
-
-    Json(json!({
-        "received": true,
-        "modality": modality_str,
-        "source": source,
-        "settle_ticks": ticks_used,
-        "tension": format!("{tension:.4}"),
-        "output_norm": output.iter().map(|v| v * v).sum::<f32>().sqrt(),
-    }))
 }
 
 /// /admin/physics-proposals — Lucy's voorstellen voor zelf-verbetering van haar fysica
@@ -1495,7 +1510,7 @@ async fn telemetry_handler(State(state): State<SharedState>) -> Json<Value> {
     } else { 0.0 };
 
     // v2.5: Alles uit Field snapshot (lock-free via ArcSwap)
-    let vocab_size = state.vocab.try_read().map(|v| v.vocab_size()).unwrap_or(0);
+    let vocab_size = state.vocab.read().await.vocab_size();
     let pages_read = f.pages_read;         // gesync'd vanuit explorer elke 50 ticks
     let tokens_processed = f.tokens_processed;
     let n_couplings: usize = f.active_set.iter()

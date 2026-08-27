@@ -38,20 +38,90 @@ impl HttpClient {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .user_agent("Lucy/0.1")
+                // SSRF: hercontroleer ELKE redirect-hop (literal-IP + string-blocklist),
+                // en cap het aantal hops. DNS-namen worden bij connect door reqwest
+                // geresolved; de literal-check vangt directe redirects naar interne IPs.
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 5 {
+                        return attempt.error("te veel redirects (SSRF-guard)".to_string());
+                    }
+                    match attempt.url().host_str() {
+                        Some(h) => match HttpClient::classify_host_literal(h) {
+                            Ok(()) => attempt.follow(),
+                            Err(e) => attempt.error(e),
+                        },
+                        None => attempt.error("redirect zonder host".to_string()),
+                    }
+                }))
                 .build()
                 .expect("HTTP client creation failed"),
         }
     }
 
-    /// SSRF-guard: weiger loopback/private/link-local IPs en interne hostnames.
-    /// Minimale eigen URL-parser (geen `url` crate dependency in lucy-io).
-    fn is_public_url(url: &str) -> Result<(), String> {
+    /// Classificeer een IP: Err als het niet-globaal is
+    /// (loopback/private/link-local/ULA/CGNAT/unspecified/etc).
+    fn classify_ip(ip: std::net::IpAddr) -> Result<(), String> {
+        use std::net::IpAddr;
+        let bad = match ip {
+            IpAddr::V4(v4) => {
+                let o = v4.octets();
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    || o[0] == 0
+                    // 100.64.0.0/10 CGNAT
+                    || (o[0] == 100 && (o[1] & 0xC0) == 64)
+                    // 192.0.0.0/24 IETF protocol assignments
+                    || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+            }
+            IpAddr::V6(v6) => {
+                // IPv4-mapped (::ffff:a.b.c.d) via de v4-regels beoordelen
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return Self::classify_ip(IpAddr::V4(v4));
+                }
+                let seg0 = v6.segments()[0];
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                    || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+            }
+        };
+        if bad {
+            Err(format!("Interne/niet-globale IP geblokkeerd: {}", ip))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Sync host-check: string-blocklist + literal-IP-classificatie. DNS-namen
+    /// passeren hier (die worden in `validate_public_url` async geresolved). Wordt
+    /// óók per redirect-hop aangeroepen door de redirect-policy.
+    fn classify_host_literal(host: &str) -> Result<(), String> {
+        let h = host.to_ascii_lowercase();
+        if h == "localhost" || h.ends_with(".local") || h == "metadata.google.internal" {
+            return Err("Interne host geblokkeerd".to_string());
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return Self::classify_ip(ip);
+        }
+        Ok(())
+    }
+
+    /// SSRF-guard (async): parse de URL, blokkeer interne literals, en RESOLVE de
+    /// host via DNS — weiger als ook maar één geresolved IP niet-globaal is. Fail-
+    /// closed als resolutie faalt/leeg is. Sluit de A-record->intern-IP-bypass die
+    /// de oude string-only check openliet. Minimale eigen URL-parser (geen `url` crate).
+    async fn validate_public_url(url: &str) -> Result<(), String> {
         let url = url.trim();
         let (scheme, rest) = url.split_once("://").ok_or("Bad URL: geen scheme")?;
-        match scheme.to_ascii_lowercase().as_str() {
-            "http" | "https" => {}
+        let default_port: u16 = match scheme.to_ascii_lowercase().as_str() {
+            "http" => 80,
+            "https" => 443,
             s => return Err(format!("Scheme niet toegestaan: {}", s)),
-        }
+        };
         // authority = alles tot eerste '/', '?' of '#'
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
         // strip userinfo (user:pass@)
@@ -59,37 +129,46 @@ impl HttpClient {
             Some((_, hp)) => hp,
             None => authority,
         };
-        // host uitpakken (IPv6 tussen [], anders tot ':')
-        let host = if let Some(after_bracket) = hostport.strip_prefix('[') {
+        // host + optionele expliciete poort (IPv6 tussen [], anders tot laatste ':')
+        let (host, explicit_port) = if let Some(after_bracket) = hostport.strip_prefix('[') {
             match after_bracket.split_once(']') {
-                Some((h, _)) => h.to_string(),
+                Some((h, tail)) => {
+                    let p = tail.strip_prefix(':').and_then(|s| s.parse::<u16>().ok());
+                    (h.to_string(), p)
+                }
                 None => return Err("Bad URL: ongeldige IPv6".to_string()),
             }
         } else {
-            hostport.split(':').next().unwrap_or("").to_string()
+            match hostport.rsplit_once(':') {
+                Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+                    (h.to_string(), p.parse::<u16>().ok())
+                }
+                _ => (hostport.to_string(), None),
+            }
         };
         if host.is_empty() {
             return Err("Geen host".to_string());
         }
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            let blocked = ip.is_loopback() || ip.is_unspecified() || match ip {
-                std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-                std::net::IpAddr::V6(_) => false,
-            };
-            if blocked {
-                return Err(format!("Interne IP geblokkeerd: {}", ip));
-            }
+        Self::classify_host_literal(&host)?;
+        let port = explicit_port.unwrap_or(default_port);
+        // DNS-resolutie (async, non-blocking). Fail-closed bij fout of lege set.
+        let addrs = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("DNS-resolutie faalde (fail-closed): {}", e))?;
+        let mut any = false;
+        for sa in addrs {
+            any = true;
+            Self::classify_ip(sa.ip())?;
         }
-        let h = host.to_ascii_lowercase();
-        if h == "localhost" || h.ends_with(".local") || h == "metadata.google.internal" {
-            return Err("Interne host geblokkeerd".to_string());
+        if !any {
+            return Err("Geen IP's geresolved (fail-closed)".to_string());
         }
         Ok(())
     }
 
     /// GET request — Lucy's primaire zintuig naar het internet
     pub async fn get(&self, url: &str) -> Result<HttpResponse, String> {
-        Self::is_public_url(url)?;
+        Self::validate_public_url(url).await?;
         let start = std::time::Instant::now();
         let resp = self
             .client
@@ -120,7 +199,7 @@ impl HttpClient {
 
     /// GET met custom headers (voor APIs die auth-tokens verwachten)
     pub async fn get_with_headers(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
-        Self::is_public_url(url)?;
+        Self::validate_public_url(url).await?;
         let start = std::time::Instant::now();
         let mut req = self.client.get(url);
         for (k, v) in extra_headers {
@@ -145,7 +224,7 @@ impl HttpClient {
 
     /// POST met custom headers (voor APIs zoals DDG AI Chat die vqd-tokens gebruiken)
     pub async fn post_with_headers(&self, url: &str, body: &[u8], content_type: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
-        Self::is_public_url(url)?;
+        Self::validate_public_url(url).await?;
         let start = std::time::Instant::now();
         let mut req = self.client.post(url)
             .header("Content-Type", content_type)
@@ -172,7 +251,7 @@ impl HttpClient {
 
     /// POST request — Lucy's handen naar het internet
     pub async fn post(&self, url: &str, body: &[u8], content_type: &str) -> Result<HttpResponse, String> {
-        Self::is_public_url(url)?;
+        Self::validate_public_url(url).await?;
         let start = std::time::Instant::now();
         let resp = self
             .client

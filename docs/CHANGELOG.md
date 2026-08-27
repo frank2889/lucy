@@ -1,5 +1,53 @@
 # Lucy Changelog
 
+## v3.1.1 (2026-08-27) — Audit-ronde: ingestion, panics, persistentie, federatie, SSRF
+
+Vervolg-fixronde op v3.1.0. Multi-agent audit per subsysteem, elke bevinding adversarieel
+geverifieerd (12 bevestigd van 20). Alleen geverifieerde, minimale fixes toegepast; subtiele
+leer-dynamica (reward-bias, async reward-attributie) en cross-cutting werk (concurrency-limiet,
+persistentie-lock) bewust uitgesteld naar aparte fases (projectregel 5). Workspace compileert
+schoon, unit-tests groen. **Niet live gevalideerd** — deploy-verificatie via telemetry is aan de mens.
+
+### Leren / ingestion
+- `learn_from_text` en de exploratie-EP-lus trainden NIETS bij teksten korter dan de chunk-grootte
+  (`windows(n)` op een kortere slice = lege iterator) — erger naarmate tension (chunk_size) steeg.
+  Nu clampt de venstergrootte op de sequentielengte; korte extracties trainen als één chunk.
+- `extract_readable_text` herkende geen top-level JSON-array (NASA/Socrata) en miste keys voor
+  GDELT (`articles`), CrossRef (`message`-wrapper + array-titel) en PubChem (`InformationList.Information`)
+  → die vielen terug op ruwe-JSON-dump. Nu correct uitgelezen. (CERN/Invenio `hits.hits[].metadata`
+  met HTML-strip was al toegevoegd.)
+- `urls_for_concept` percent-encodet het concept nu als query-waarde; voorheen lekten tekens als
+  `&`/`=` uit een concept en injecteerden extra query-params in de URL.
+
+### Robuustheid / panics
+- `poster::extract_fields` sliced HTML op een vaste byte-offset (200) → non-char-boundary panic op
+  internationale pagina's die de ONBESCHERMDE tick-loop kon killen. Nu op de echte `>`-positie.
+
+### Server
+- `/sense` draaide een 200-tick settle synchroon op de async-executor → één client kon alle Tokio-workers
+  vastzetten. Nu in `spawn_blocking` (net als `/ask`).
+- `/telemetry` rapporteerde vals `vocab_size: 0` bij lock-contentie (misdiagnose-val). Nu een echte read.
+- Dubbele `error`-sleutel in de `/ask`-fout-JSON dedupliceerd. `/feed` (permanente mutatie) achter auth.
+
+### Persistentie / onsterfelijkheid
+- `pull_latest_from_github` maakte `data/` niet aan → op een verse ephemeral host faalde ELK herstel
+  (ENOENT) en ging geleerde data verloren — precies waar de GitHub-backup de enige persistentie is.
+- Herstel is nu atomisch (buffer-then-commit): schrijft niets tenzij snapshot ÉN vocab binnen zijn,
+  daarna per bestand tmp+rename+CRC. Geen sticky half snapshot/vocab-paar meer.
+- `fs::load_with_fallback` herschreef de CRC-sidecar niet na herstel uit backup → validatie faalde elke
+  boot opnieuw. Nu herschreven.
+
+### Federatie
+- `is_compatible`/`merge_weights` verifieerden alleen DIM + n_points, niet de coupling-topologie → twee
+  even-grote maar divergent-getrainde nodes middelden gewichten van edges naar VERSCHILLENDE targets
+  (stille corruptie). `CouplingWeight` draagt nu de edge-`target`; merge slaat een mismatch over.
+  (Wire-formaat wijzigt — federatie-nodes samen uitrollen.)
+
+### Beveiliging (crawler)
+- SSRF-hardening in `lucy-io::http`: async DNS-resolutie die fail-closed weigert bij een intern IP
+  (sluit de A-record→intern-IP-bypass), correcte IPv6 (ULA/link-local/IPv4-mapped), en een redirect-policy
+  die elke hop herkeurt + capt. Sluit exfiltratie van cloud-metadata via gecrawlde links.
+
 ## v3.1.0 (2026-08-26) — Runaway root-cause + hardening + headless/overal-draaien
 
 Grote onderhouds- en architectuurronde. Alle code-fixes zijn geverifieerd (adversarieel)

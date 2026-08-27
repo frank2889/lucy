@@ -159,8 +159,8 @@ fn extract_fields(html: &str, html_lower: &str) -> Vec<FormField> {
     let mut pos = 0;
     while let Some(idx) = html_lower[pos..].find("<input") {
         let abs = pos + idx;
-        let tag_end = html_lower[abs..].find('>').unwrap_or(200).min(200);
-        let tag = &html_lower[abs..abs + tag_end];
+        let Some(rel) = html_lower[abs..].find('>') else { break; };
+        let tag = &html_lower[abs..abs + rel];
 
         let name = extract_attr(tag, "name").unwrap_or_default();
         let field_type = extract_attr(tag, "type").unwrap_or_else(|| "text".into());
@@ -170,15 +170,15 @@ fn extract_fields(html: &str, html_lower: &str) -> Vec<FormField> {
         if !name.is_empty() {
             fields.push(FormField { name, field_type, value, placeholder });
         }
-        pos = abs + tag_end + 1;
+        pos = abs + rel + 1;
     }
 
     // <textarea> velden
     pos = 0;
     while let Some(idx) = html_lower[pos..].find("<textarea") {
         let abs = pos + idx;
-        let tag_end = html_lower[abs..].find('>').unwrap_or(200).min(200);
-        let tag = &html_lower[abs..abs + tag_end];
+        let Some(rel) = html_lower[abs..].find('>') else { break; };
+        let tag = &html_lower[abs..abs + rel];
 
         let name = extract_attr(tag, "name").unwrap_or_else(|| "message".into());
         let placeholder = extract_attr(tag, "placeholder");
@@ -189,7 +189,7 @@ fn extract_fields(html: &str, html_lower: &str) -> Vec<FormField> {
             value: None,
             placeholder,
         });
-        pos = abs + tag_end + 1;
+        pos = abs + rel + 1;
     }
 
     fields

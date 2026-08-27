@@ -1760,7 +1760,8 @@ async fn main() {
 
                             // v2.6: Chunk size 16→32, overlap 50% (was: elk token 1× gezien)
                             let chunk_size = 32;
-                            for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) {
+                            let win = chunk_size.min(token_ids.len().max(2));
+                            for chunk in token_ids.windows(win).step_by((win / 2).max(1)) {
                                 if chunk.len() < 4 { continue; }
                                 let mid = chunk.len() / 2;
                                 let input_embs: Vec<[f32; DIM]> = chunk[..mid].iter()

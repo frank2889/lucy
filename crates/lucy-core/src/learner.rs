@@ -865,6 +865,12 @@ pub fn learn_from_text(
     let ticks_per_token = (2.0 * tension_factor) as usize; // 1-6 ticks per token
     let settle_ticks = (10.0 * tension_factor) as usize; // 5-30 settle ticks
 
+    // Clamp chunk_size op de sequentielengte: zonder dit levert windows(chunk_size)
+    // een LEGE iterator voor korte teksten (len < chunk_size) en wordt er niets
+    // getraind — erger bij hoge tension (grotere chunk_size). token_ids.len() >= 3
+    // is gegarandeerd (zie de guard hierboven), dus chunk_size >= 3 en step_by >= 1.
+    let chunk_size = chunk_size.min(token_ids.len());
+
     for chunk in token_ids.windows(chunk_size).step_by(chunk_size / 2) { // v2.5: 50% overlap — elk token 2× gezien
         if chunk.len() < 3 { break; }
 
@@ -918,6 +924,21 @@ fn add_pos(v: &mut [f32; DIM], pos: usize) {
 }
 
 /// Extraheer leesbare tekst uit willekeurige content (HTML, JSON, platte tekst)
+/// Verwijder HTML-tags uit een klein tekstfragment (bv. CERN abstract.description).
+fn strip_html_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => { in_tag = false; out.push(' '); }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn extract_readable_text(body: &str) -> String {
     // v1.2: Verbeterde JSON parser — zoek diep naar tekst in elke structuur
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
@@ -932,12 +953,42 @@ pub fn extract_readable_text(body: &str) -> String {
             }
         }
 
+        // Top-level JSON-array root (Socrata/NASA data.nasa.gov/api/views e.a. die een
+        // array als root teruggeven). Zonder dit valt de root-array terug op de ruwe-
+        // JSON-dump verderop en leert Lucy syntax-ruis i.p.v. name/description.
+        if let Some(arr) = json.as_array() {
+            for item in arr.iter().take(20) {
+                if let Some(s) = item.as_str() {
+                    if s.len() > 5 { text.push_str(s); text.push(' '); }
+                    continue;
+                }
+                for tf in &text_fields {
+                    if let Some(t) = item[*tf].as_str() {
+                        if t.len() > 5 { text.push_str(t); text.push(' '); }
+                    }
+                }
+                for special in &["API", "Description", "Category", "Link",
+                    "pageid", "title", "display_name", "journal_title"] {
+                    if let Some(t) = item[*special].as_str() {
+                        if t.len() > 3 { text.push_str(t); text.push(' '); }
+                    }
+                }
+            }
+        }
+
         // Zoek in arrays: entries, results, search, data, items, works, records
+        // + "articles" (GDELT ArtList), "Information" (PubChem InformationList.Information).
         let array_fields = ["entries", "results", "search", "data", "items",
-            "works", "records", "query", "hits", "response", "list"];
+            "works", "records", "query", "hits", "response", "list",
+            "articles", "Information"];
         for arr_field in &array_fields {
+            // Wrapper-afdaling: sommige bevraagde APIs nesten hun array onder een
+            // wrapper-key — json["query"] (Wikipedia), json["message"] (CrossRef works),
+            // json["InformationList"] (PubChem compound description).
             let arr = if let Some(a) = json[*arr_field].as_array() { a.clone() }
                 else if let Some(q) = json["query"][*arr_field].as_array() { q.clone() }
+                else if let Some(m) = json["message"][*arr_field].as_array() { m.clone() }
+                else if let Some(il) = json["InformationList"][*arr_field].as_array() { il.clone() }
                 else { continue };
 
             for item in arr.iter().take(20) {
@@ -945,6 +996,13 @@ pub fn extract_readable_text(body: &str) -> String {
                 for tf in &text_fields {
                     if let Some(t) = item[*tf].as_str() {
                         if t.len() > 5 { text.push_str(t); text.push(' '); }
+                    } else if let Some(a) = item[*tf].as_array() {
+                        // Tekstveld is een array van strings (bv. CrossRef "title") — join.
+                        let joined = a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if joined.len() > 5 { text.push_str(&joined); text.push(' '); }
                     }
                 }
                 // Speciale velden per API type
@@ -962,6 +1020,33 @@ pub fn extract_readable_text(body: &str) -> String {
             for page in pages.iter().take(5) {
                 if let Some(e) = page["extract"].as_str() {
                     text.push_str(e); text.push(' ');
+                }
+            }
+        }
+
+        // Invenio-API (CERN Open Data, Zenodo): hits.hits[].metadata.{title, abstract, keywords}.
+        // Zonder dit valt CERN terug op ruwe-JSON-dump (vooral aggregations-facetruis).
+        if let Some(records) = json["hits"]["hits"].as_array() {
+            for rec in records.iter().take(10) {
+                let md = &rec["metadata"];
+                for tf in &["title", "description", "summary"] {
+                    if let Some(t) = md[*tf].as_str() {
+                        if t.len() > 5 { text.push_str(&strip_html_inline(t)); text.push(' '); }
+                    }
+                }
+                // abstract: string, of object {description: "..."} — vaak HTML
+                if let Some(a) = md["abstract"].as_str() {
+                    if a.len() > 5 { text.push_str(&strip_html_inline(a)); text.push(' '); }
+                } else if let Some(d) = md["abstract"]["description"].as_str() {
+                    if d.len() > 5 { text.push_str(&strip_html_inline(d)); text.push(' '); }
+                }
+                // keywords: array van strings of {name/value: "..."}
+                if let Some(kws) = md["keywords"].as_array() {
+                    for k in kws.iter().take(20) {
+                        if let Some(s) = k.as_str() { text.push_str(s); text.push(' '); }
+                        else if let Some(s) = k["name"].as_str() { text.push_str(s); text.push(' '); }
+                        else if let Some(s) = k["value"].as_str() { text.push_str(s); text.push(' '); }
+                    }
                 }
             }
         }

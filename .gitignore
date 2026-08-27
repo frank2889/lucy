@@ -1,5 +1,8 @@
 /target
 .env
+# private sleutels nooit committen
+*.key
+*.pem
 data/lucy.snapshot
 data/lucy_journal.log
 data/self_test.jsonl

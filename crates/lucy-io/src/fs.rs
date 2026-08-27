@@ -173,6 +173,12 @@ pub fn load_with_fallback(path: &Path) -> Option<(Vec<u8>, String)> {
             if let Ok(data) = std::fs::read(&backup) {
                 // Herstel primary van deze backup
                 let _ = std::fs::copy(&backup, path);
+                // Herschrijf de CRC-sidecar van de PRIMARY met de CRC van de
+                // herstelde bytes. Anders blijft de oude sidecar (van de nu
+                // overschreven, corrupte primary) staan en faalt
+                // validate_checksum elke volgende boot opnieuw, waardoor deze
+                // fallback eeuwig herstart in plaats van eenmalig te self-healen.
+                write_checksum(path, &data);
                 return Some((data, format!("backup#{}", i)));
             }
         }

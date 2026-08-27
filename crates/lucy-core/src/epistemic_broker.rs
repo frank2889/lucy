@@ -97,7 +97,21 @@ pub fn urls_for_concept(concept: &str) -> Vec<String> {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect::<String>();
-    let q = concept.split_whitespace().collect::<Vec<_>>().join("+");
+    // Percent-encode het concept als query-waarde: anders lekken tekens als
+    // '&', '=', '#' uit het concept en injecteren ze extra query-params in de URL
+    // (of breken 'm). Spaties -> '+'. Houdt alleen unreserved tekens ongemoeid.
+    fn enc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() * 2);
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+                b' ' => out.push('+'),
+                _ => out.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        out
+    }
+    let q = enc(concept);
 
     let mut urls = vec![
         // ── ZOEKEN EERST: toegang tot het hele internet ──
@@ -372,9 +386,14 @@ mod tests {
 
     #[test]
     fn test_concept_sanitization() {
-        let urls = urls_for_concept("self-awareness & identity");
-        for url in urls {
-            assert!(!url.contains("&") || url.contains("&amp;") || url.contains("&query"));
+        // Concept-tekens mogen niet als rauwe query-scheiders in de URL lekken:
+        // elke '&' in een gegenereerde URL hoort een legitieme param-scheider te zijn
+        // (gevolgd door een letter), nooit geïnjecteerd vanuit het concept ('&' -> %26).
+        for url in urls_for_concept("self-awareness & identity") {
+            for (i, _) in url.match_indices('&') {
+                let next = url.as_bytes().get(i + 1).copied().unwrap_or(b' ');
+                assert!(next.is_ascii_alphabetic(), "geïnjecteerde & in {}", url);
+            }
         }
     }
 }

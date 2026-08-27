@@ -98,6 +98,13 @@ async fn upload_asset(client: &Client, upload_url: &str, token: &str, name: &str
 
 /// Haal de laatste snapshot op van GitHub (voor recovery).
 pub async fn pull_latest_from_github(token: &str) -> Result<u64, String> {
+    // Zorg dat data/ bestaat vóór enige write. Op een verse ephemeral host
+    // (geen volume-mount) bestaat data/ niet en zou std::fs::write met ENOENT
+    // falen, waardoor herstel volledig mislukt en geleerde data verloren gaat.
+    // create_dir_all is idempotent op hosts waar data/ al bestaat.
+    std::fs::create_dir_all("data")
+        .map_err(|e| format!("Kan data/ niet aanmaken: {}", e))?;
+
     let client = Client::new();
     let url = format!("{}/repos/{}/{}/releases/latest", GITHUB_API, REPO_OWNER, REPO_NAME);
 
@@ -119,32 +126,70 @@ pub async fn pull_latest_from_github(token: &str) -> Result<u64, String> {
     let tag = release["tag_name"].as_str().unwrap_or("unknown");
     let tick: u64 = tag.strip_prefix("tick-").and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    // Download assets
+    // Download assets — buffer-then-commit. Download ALLE assets eerst in
+    // geheugen; schrijf pas naar data/ als de volledige vereiste set binnen is.
+    // Zo blijft er nooit een half (mismatched) snapshot/vocab-paar achter dat
+    // door de `!snapshot_path.exists()`-guard nooit meer wordt hersteld.
+    // Required = lucy.snapshot + vocab.bincode (herstel is zinloos zonder één
+    // van beide); explorer/retrieval zijn best-effort (consistent met push).
+    let mut pending: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(assets) = release["assets"].as_array() {
         for asset in assets {
             let name = asset["name"].as_str().unwrap_or("");
             let download_url = asset["browser_download_url"].as_str().unwrap_or("");
 
-            if !download_url.is_empty() && (name == "lucy.snapshot" || name == "vocab.bincode"
-                || name == "explorer.bincode" || name == "retrieval.bincode") {
-                let data = client.get(download_url)
-                    .header("User-Agent", "Lucy-AI")
-                    .send()
-                    .await
-                    .map_err(|e| format!("Download {} failed: {}", name, e))?
-                    .bytes()
-                    .await
-                    .map_err(|e| format!("Read {} failed: {}", name, e))?;
+            let required = name == "lucy.snapshot" || name == "vocab.bincode";
+            let optional = name == "explorer.bincode" || name == "retrieval.bincode";
+            if download_url.is_empty() || !(required || optional) {
+                continue;
+            }
 
-                let out_path = format!("data/{}", name);
-                std::fs::write(&out_path, &data)
-                    .map_err(|e| format!("Write {} failed: {}", name, e))?;
-                let crc = crc32fast::hash(&data);
-                let _ = std::fs::write(std::path::Path::new(&out_path).with_extension("crc32"), crc.to_le_bytes());
+            let result: Result<Vec<u8>, String> = match client.get(download_url)
+                .header("User-Agent", "Lucy-AI")
+                .send()
+                .await
+            {
+                Ok(resp) => resp.bytes().await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| format!("Read {} failed: {}", name, e)),
+                Err(e) => Err(format!("Download {} failed: {}", name, e)),
+            };
 
-                tracing::info!(name, bytes = data.len(), "Downloaded from GitHub");
+            match result {
+                Ok(data) => {
+                    tracing::info!(name, bytes = data.len(), "Downloaded from GitHub");
+                    pending.push((name.to_string(), data));
+                }
+                Err(e) => {
+                    if required {
+                        // Vereiste asset ontbreekt: schrijf NIETS, laat de
+                        // bestaande (oude/afwezige) staat consistent achter.
+                        return Err(e);
+                    }
+                    tracing::warn!("Optional download failed: {}", e);
+                }
             }
         }
+    }
+
+    // Commit alleen als BEIDE vereiste assets binnen zijn — anders geen halve set.
+    let has_snapshot = pending.iter().any(|(n, _)| n == "lucy.snapshot");
+    let has_vocab = pending.iter().any(|(n, _)| n == "vocab.bincode");
+    if !has_snapshot || !has_vocab {
+        return Err("incomplete backup: snapshot/vocab ontbreekt".to_string());
+    }
+
+    // Schrijf nu atomisch per bestand (tmp + rename) en de CRC-sidecar.
+    for (name, data) in &pending {
+        let out_path = format!("data/{}", name);
+        let out = std::path::Path::new(&out_path);
+        let tmp = out.with_extension("tmp");
+        std::fs::write(&tmp, data)
+            .map_err(|e| format!("Write {} failed: {}", name, e))?;
+        std::fs::rename(&tmp, out)
+            .map_err(|e| format!("Rename {} failed: {}", name, e))?;
+        let crc = crc32fast::hash(data);
+        let _ = std::fs::write(out.with_extension("crc32"), crc.to_le_bytes());
     }
 
     tracing::info!(tick, tag, "Snapshot recovered from GitHub");
