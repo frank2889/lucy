@@ -28,11 +28,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-    deploy:
-      resources:
-        limits:
-          memory: 6G
-          cpus: "4.0"
+    # Geen resource-limits: provider-agnostisch. cpus: "4.0" brak container-creatie
+    # op hosts met <4 vCPU (o.a. Oracle Always-Free E2.1.Micro, 2 vCPU: "range of CPUs
+    # is from 0.01 to 2.00"). Lucy is de enige workload op de node; de swap in de
+    # cloud-init vangt geheugenpieken op. Wie wél wil limiteren, zet cpus <= host-vCPU.
 
 volumes:
   lucy-data:
