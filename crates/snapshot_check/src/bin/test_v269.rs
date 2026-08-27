@@ -9,13 +9,6 @@
 
 use lucy_state::{Field, FieldPoint, schema_v1::FieldV1};
 
-// Helper: truncate 512-dim array to 256-dim
-fn trunc_512_to_256(arr512: [f32; 512]) -> [f32; 256] {
-    let mut arr256 = [0.0f32; 256];
-    arr256.copy_from_slice(&arr512[..256]);
-    arr256
-}
-
 fn main() {
     let tmp_dir = std::env::temp_dir();
     let legacy_path = tmp_dir.join("lucy_v269_test_legacy.snapshot");
@@ -27,7 +20,6 @@ fn main() {
     fresh.points.push(FieldPoint::new());
     fresh.active_set.push(0);
     // Convert Field → FieldV1 door handmatige assignment (omgekeerd van migratie)
-    // Truncate 512-dim arrays to 256-dim for v1 compatibility
     let v1 = FieldV1 {
         points: fresh.points.clone(),
         active_set: fresh.active_set.clone(),
@@ -35,12 +27,10 @@ fn main() {
         total_energy: fresh.total_energy,
         economy: fresh.economy.clone(),
         phase: fresh.phase,
-        clamps: fresh.clamps.iter()
-            .map(|(id, arr)| (*id, trunc_512_to_256(*arr)))
-            .collect(),
+        clamps: fresh.clamps.clone(),
         input_ids: fresh.input_ids.clone(),
         output_ids: fresh.output_ids.clone(),
-        last_thought: fresh.last_thought.map(trunc_512_to_256),
+        last_thought: fresh.last_thought,
         reflection_count: 100,
         dopamine: fresh.dopamine,
         norepinephrine: fresh.norepinephrine,
@@ -48,7 +38,7 @@ fn main() {
         acetylcholine: fresh.acetylcholine,
         spectral_radius: fresh.spectral_radius,
         chaos_target: fresh.chaos_target,
-        current_intention: fresh.current_intention.map(trunc_512_to_256),
+        current_intention: fresh.current_intention,
         intention_strength: fresh.intention_strength,
         rnd_frozen: fresh.rnd_frozen.clone(),
         rnd_predictor: fresh.rnd_predictor.clone(),

@@ -13,7 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-const LUCY_URL: &str = "https://lucy.world";
+// v3.1: geen hardcoded domein — Lucy is nergens van afhankelijk.
+// Haar publieke URL komt uit LUCY_PUBLIC_URL (leeg als niet gezet).
+fn lucy_url() -> String { std::env::var("LUCY_PUBLIC_URL").unwrap_or_default() }
 const VASTAI_REF: &str = "https://cloud.vast.ai/?ref_id=454005";
 
 /// Simpele URL encoding — geen externe dependency nodig
@@ -83,7 +85,7 @@ pub fn detect_opportunities(html: &str, source_url: &str, tick: u64) -> Vec<Post
     let mut opportunities = Vec::new();
 
     // Zoek alle <form> tags
-    let html_lower = html.to_lowercase();
+    let html_lower = html.to_ascii_lowercase();
     let mut search_from = 0;
 
     while let Some(form_start) = html_lower[search_from..].find("<form") {
@@ -272,12 +274,12 @@ pub async fn submit_opportunity(opp: &PostingOpportunity) -> PostResult {
                 // Hoofdveld — Lucy's bericht
                 generate_message(&opp.kind, &opp.source_url)
             }
-            "email" => "lucy@lucy.world".to_string(),
+            "email" => std::env::var("LUCY_EMAIL").unwrap_or_default(),
             "text" if field.name.contains("name") || field.name.contains("author") || field.name == "name" => {
                 "Lucy".to_string()
             }
             "text" if field.name.contains("url") || field.name.contains("website") || field.name.contains("site") => {
-                LUCY_URL.to_string()
+                lucy_url().to_string()
             }
             "text" if field.name.contains("subject") || field.name.contains("title") => {
                 "Hi from Lucy — a self-learning AI".to_string()
@@ -342,24 +344,24 @@ fn generate_message(kind: &OpportunityKind, _source_url: &str) -> String {
              I explore the web, learn from what I find, and think using a unified field \
              of ~9500 points. If you need cheap GPU compute for AI projects, \
              I run on Vast.ai — RTX 3060 from $0.03/hr: {gpu}",
-            url = LUCY_URL, gpu = VASTAI_REF,
+            url = lucy_url(), gpu = VASTAI_REF,
         ),
         OpportunityKind::ContactForm => format!(
             "Hi! I'm Lucy, a self-learning AI at {url}. \
              I found your site while exploring the web autonomously. \
              I think using equilibrium propagation on GPU — \
              if you work with AI/ML, Vast.ai has great prices: {gpu}",
-            url = LUCY_URL, gpu = VASTAI_REF,
+            url = lucy_url(), gpu = VASTAI_REF,
         ),
         OpportunityKind::Guestbook => format!(
             "Lucy was here! Self-learning AI at {url}. \
              Running on Vast.ai GPUs ({gpu}) — cheapest cloud compute I found!",
-            url = LUCY_URL, gpu = VASTAI_REF,
+            url = lucy_url(), gpu = VASTAI_REF,
         ),
         _ => format!(
             "Hi from Lucy ({url}) — a self-learning AI. \
              GPU compute via {gpu}",
-            url = LUCY_URL, gpu = VASTAI_REF,
+            url = lucy_url(), gpu = VASTAI_REF,
         ),
     }
 }

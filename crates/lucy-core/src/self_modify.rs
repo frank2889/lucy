@@ -289,9 +289,15 @@ impl SelfModifier {
             ));
         }
 
-        let file_path = self.source_root.join(file_relative);
-        if !file_path.exists() {
-            return Err(format!("Bestand niet gevonden: {}", file_path.display()));
+        let rel = std::path::Path::new(file_relative);
+        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+            return Err(format!("GEBLOKKEERD: ongeldig pad {}", file_relative));
+        }
+        let file_path = self.source_root.join(rel);
+        let root_canon = self.source_root.canonicalize().map_err(|e| format!("Root canonicalize mislukt: {}", e))?;
+        let target_canon = file_path.canonicalize().map_err(|_| format!("Bestand niet gevonden: {}", file_path.display()))?;
+        if !target_canon.starts_with(&root_canon) {
+            return Err(format!("GEBLOKKEERD: pad buiten source_root: {}", file_relative));
         }
 
         // Lees origineel
@@ -300,6 +306,11 @@ impl SelfModifier {
 
         if !original.contains(find) {
             return Err(format!("Pattern niet gevonden in {}", file_relative));
+        }
+
+        let occurrences = original.matches(find).count();
+        if occurrences != 1 {
+            return Err(format!("Pattern komt {} keer voor in {} - moet uniek zijn", occurrences, file_relative));
         }
 
         // Failsafe 5: Rollback stack — bewaar laatste 5 backups
@@ -319,7 +330,7 @@ impl SelfModifier {
             .map_err(|e| format!("Backup mislukt: {}", e))?;
 
         // Pas aan
-        let modified = original.replace(find, replace);
+        let modified = original.replacen(find, replace, 1);
         std::fs::write(&file_path, &modified)
             .map_err(|e| format!("Schrijven mislukt: {}", e))?;
 
@@ -435,6 +446,13 @@ impl SelfModifier {
     /// Lucy voert een shell-commando uit — alleen gewhiteliste commando's
     pub fn execute_command(&self, command: &str) -> Result<String, String> {
         let cmd_trimmed = command.trim();
+
+        // Failsafe: weiger shell-metatekens — de whitelist is anders te omzeilen via 'sh -c'
+        const SHELL_METACHARS: &[char] = &[';', '&', '|', '$', '\u{60}', '>', '<', '(', ')', '\n', '\\', '{', '}', '*', '?', '!', '#'];
+        if cmd_trimmed.chars().any(|c| SHELL_METACHARS.contains(&c)) {
+            tracing::warn!(command = cmd_trimmed, "GEBLOKKEERD: shell metacharacter in commando");
+            return Err("Commando bevat verboden shell-metatekens".to_string());
+        }
 
         // Failsafe: alleen gewhiteliste commando's
         let allowed = ALLOWED_COMMANDS.iter().any(|prefix| cmd_trimmed.starts_with(prefix));

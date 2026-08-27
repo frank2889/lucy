@@ -118,28 +118,35 @@ impl Vocabulary {
 
         // v2.5: Eviction op basis van dynamische limiet (Lucy kan self.max_vocab verhogen)
         if self.id_to_token.len() >= self.max_vocab {
-            self.evict_least_used();
+            if let Some(slot) = self.evict_least_used() {
+                // Hergebruik de vrijgekomen slot voor het nieuwe token
+                let idx = slot as usize;
+                self.token_to_id.insert(token.to_string(), slot);
+                self.id_to_token[idx] = token.to_string();
+                self.embeddings[idx] = Embedding { v: random_embedding(slot) };
+                self.counts[idx] = 0;
+                return slot;
+            }
         }
 
         self.push_token(token)
     }
 
-    /// Verwijder het minst gebruikte token
-    fn evict_least_used(&mut self) {
+    /// Verwijder het minst gebruikte token en geef de vrijgekomen slot terug
+    fn evict_least_used(&mut self) -> Option<u32> {
         // Skip byte tokens (0-255) en speciale tokens (256-257)
         let skip = SPECIAL_START as usize;
-        if self.counts.len() <= skip { return; }
+        if self.counts.len() <= skip { return None; }
 
         let min_idx = self.counts.iter().enumerate()
             .skip(skip)
             .min_by_key(|(_, c)| *c)
-            .map(|(i, _)| i)
-            .unwrap_or(skip);
+            .map(|(i, _)| i)?;
 
         let token = self.id_to_token[min_idx].clone();
         self.token_to_id.remove(&token);
-        self.id_to_token[min_idx] = "<evicted>".to_string();
         self.counts[min_idx] = 0;
+        Some(min_idx as u32)
     }
 
     /// BPE tokenize — splits tekst in subwoord-eenheden
@@ -241,8 +248,6 @@ impl Vocabulary {
             .collect();
 
         for _ in 0..num_merges {
-            if self.id_to_token.len() >= self.max_vocab { break; }
-
             // Tel alle aangrenzende paren
             let mut pair_counts: HashMap<(String, String), u32> = HashMap::new();
             for tokens in &word_tokens {
@@ -263,9 +268,11 @@ impl Vocabulary {
 
             let merged = format!("{}{}", pair.0, pair.1);
 
-            // Voeg merged token toe aan vocab
-            self.add_token(&merged);
-            self.merges.push(pair.clone());
+            // Voeg merged token toe aan vocab (dedup: geen dubbele merge-regels)
+            if !self.merges.contains(&pair) {
+                self.add_token(&merged);
+                self.merges.push(pair.clone());
+            }
 
             // Pas merge toe op alle woorden
             for tokens in &mut word_tokens {
@@ -333,7 +340,7 @@ impl Vocabulary {
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = std::fs::read(path)?;
+        let (bytes, _src) = lucy_io::fs::load_with_fallback(path).ok_or("no primary or backup found")?;
         let vocab: Self = bincode::deserialize(&bytes)?;
         tracing::info!(vocab_size = vocab.id_to_token.len(), merges = vocab.merges.len(), "Vocabulary loaded");
         Ok(vocab)

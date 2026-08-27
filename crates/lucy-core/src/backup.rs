@@ -46,7 +46,9 @@ pub async fn push_snapshot_to_github(token: &str, tick: u64) -> Result<String, S
     if !release_resp.status().is_success() {
         let status = release_resp.status();
         let body = release_resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub release {} failed: {}", status, &body[..body.len().min(200)]));
+        let n = body.len().min(200);
+        let cut = (0..=n).rev().find(|&i| body.is_char_boundary(i)).unwrap_or(0);
+        return Err(format!("GitHub release {} failed: {}", status, &body[..cut]));
     }
 
     let release_json: serde_json::Value = release_resp.json().await
@@ -56,15 +58,19 @@ pub async fn push_snapshot_to_github(token: &str, tick: u64) -> Result<String, S
         .replace("{?name,label}", "");
 
     // Stap 3: Upload snapshot als asset
-    let _ = upload_asset(&client, &upload_url, token, "lucy.snapshot", &snapshot_data).await;
-    let _ = upload_asset(&client, &upload_url, token, "vocab.bincode", &vocab_data).await;
+    upload_asset(&client, &upload_url, token, "lucy.snapshot", &snapshot_data).await?;
+    upload_asset(&client, &upload_url, token, "vocab.bincode", &vocab_data).await?;
 
-    // Optioneel: explorer + retrieval
+    // Optioneel: explorer + retrieval (best-effort, maar log failures)
     if let Ok(data) = std::fs::read("data/explorer.bincode") {
-        let _ = upload_asset(&client, &upload_url, token, "explorer.bincode", &data).await;
+        if let Err(e) = upload_asset(&client, &upload_url, token, "explorer.bincode", &data).await {
+            tracing::warn!("Optional upload explorer.bincode failed: {}", e);
+        }
     }
     if let Ok(data) = std::fs::read("data/retrieval.bincode") {
-        let _ = upload_asset(&client, &upload_url, token, "retrieval.bincode", &data).await;
+        if let Err(e) = upload_asset(&client, &upload_url, token, "retrieval.bincode", &data).await {
+            tracing::warn!("Optional upload retrieval.bincode failed: {}", e);
+        }
     }
 
     tracing::info!(tick, tag, "Snapshot pushed to GitHub successfully");
@@ -130,8 +136,11 @@ pub async fn pull_latest_from_github(token: &str) -> Result<u64, String> {
                     .await
                     .map_err(|e| format!("Read {} failed: {}", name, e))?;
 
-                std::fs::write(format!("data/{}", name), &data)
+                let out_path = format!("data/{}", name);
+                std::fs::write(&out_path, &data)
                     .map_err(|e| format!("Write {} failed: {}", name, e))?;
+                let crc = crc32fast::hash(&data);
+                let _ = std::fs::write(std::path::Path::new(&out_path).with_extension("crc32"), crc.to_le_bytes());
 
                 tracing::info!(name, bytes = data.len(), "Downloaded from GitHub");
             }

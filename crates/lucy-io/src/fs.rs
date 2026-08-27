@@ -190,9 +190,18 @@ pub fn atomic_save(path: &Path, data: &[u8], keep_backups: usize) -> Result<(), 
     }
 
     // Atomic write: tmp → rename
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(|e| format!("Write tmp: {}", e))?;
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("Write tmp: {}", e))?;
+        f.write_all(data).map_err(|e| format!("Write tmp: {}", e))?;
+        f.sync_all().map_err(|e| format!("Sync tmp: {}", e))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| format!("Rename: {}", e))?;
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) { let _ = d.sync_all(); }
+    }
 
     // Checksum sidecar
     write_checksum(path, data);

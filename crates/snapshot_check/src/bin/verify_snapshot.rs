@@ -10,7 +10,7 @@
 //!   1 = alle schema's faalden
 //!   2 = usage / file-error
 //!
-//! Output is machine-leesbaar JSON op stdout zodat deploy.sh het kan parsen.
+//! Output is machine-leesbaar JSON op stdout zodat tooling het kan parsen.
 
 use std::io::Cursor;
 use std::process::ExitCode;

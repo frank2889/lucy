@@ -75,12 +75,13 @@ From F follows:
   criticality  = scale-invariant fixed point (branching ratio = 1)
 ```
 
-## Server
+## Runtime (v3.1: provider-agnostisch, geen deploy, nergens van afhankelijk)
 
-- **Host:** 209.38.36.51 (DigitalOcean, 4 vCPU, 8GB RAM)
-- **Domain:** lucy.world (HTTPS via Let's Encrypt)
-- **Container:** Docker with named volumes (`lucy-data`, `lucy-modules`)
-- **Deploy:** `bash deploy.sh` (in-container compile) or `bash deploy.sh rebuild` (Docker rebuild)
+- **Host:** géén vaste host of provider. Lucy is één zelfstandige container (`Dockerfile`) die
+  op elke OCI-runtime draait. Geen DigitalOcean, geen deploy-pipeline, geen SSH.
+- **Poort:** `$PORT` op `0.0.0.0` (default 8080) — nooit hardcoded, nooit localhost.
+- **Persistentie:** named volume óf GitHub-release-backup (host-onafhankelijk herstel bij boot).
+- **Config:** zero verplicht. Alle env-vars optioneel met fail-soft defaults.
 
 ## Field Architecture
 

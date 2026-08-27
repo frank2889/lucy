@@ -2,6 +2,8 @@
 .env
 data/lucy.snapshot
 data/lucy_journal.log
+data/self_test.jsonl
+data/corrupt/
 modules/*.dylib
 modules/*.so
 lucy-dashboard/node_modules

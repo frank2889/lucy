@@ -1,19 +1,29 @@
+# Zelf-hostende docker-node (bv. een always-free VM). Lucy draait óók zonder deze compose:
+# elke PaaS (Render/Fly/Cloud Run) bouwt rechtstreeks uit de Dockerfile — zie render.yaml.
+#
+# Standalone principe: Lucy start met ZERO verplichte configuratie. Geen .env nodig,
+# geen vaste poort, geen localhost-aanname. Alles heeft een fail-soft default:
+#   * PORT       — default 8080, gebonden op 0.0.0.0 (nooit 127.0.0.1, nooit hardcoded 3000)
+#   * GITHUB_TOKEN / LUCY_API_TOKEN — optioneel; ontbreken = graceful (persistentie/admin uit)
 services:
   lucy:
     build: .
     container_name: lucy
     restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - PORT=8080
+    # .env is OPTIONEEL — Lucy draait standalone zonder. Vul aan voor persistentie/auth.
+    env_file:
+      - path: .env
+        required: false
     ports:
-      - "127.0.0.1:3000:3000"
+      - "8080:8080"
     volumes:
       - lucy-data:/lucy/data
       - lucy-modules:/lucy/modules
-    env_file:
-      - .env
-    environment:
-      - RUST_LOG=info
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/version"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -154,7 +154,7 @@ impl ReplayBuffer {
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = std::fs::read(path)?;
+        let (bytes, _src) = lucy_io::fs::load_with_fallback(path).ok_or("no primary or backup found")?;
         Ok(bincode::deserialize(&bytes)?)
     }
 }

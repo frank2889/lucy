@@ -511,7 +511,7 @@ impl Explorer {
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = std::fs::read(path)?;
+        let (bytes, _src) = lucy_io::fs::load_with_fallback(path).ok_or("no primary or backup found")?;
         Ok(bincode::deserialize(&bytes)?)
     }
 }
@@ -859,9 +859,9 @@ pub fn learn_from_text(
     let avg_tension = field.active_set.iter()
         .map(|&id| field.points[id as usize].tension).sum::<f32>()
         / field.active_set.len().max(1) as f32;
-    let tension_factor = (avg_tension * 10.0).clamp(0.5, 3.0);
+    let tension_factor = if avg_tension.is_finite() { (avg_tension * 10.0).clamp(0.5, 3.0) } else { 1.0 };
 
-    let chunk_size = (32.0 * tension_factor) as usize; // 16-96 tokens per chunk
+    let chunk_size = ((32.0 * tension_factor) as usize).max(2); // 16-96 tokens per chunk
     let ticks_per_token = (2.0 * tension_factor) as usize; // 1-6 ticks per token
     let settle_ticks = (10.0 * tension_factor) as usize; // 5-30 settle ticks
 

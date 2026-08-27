@@ -65,90 +65,94 @@ Geen hardcoded bronnenlijsten. Geen BORING_WORDS. Geen MAX_VOCAB plafond. Lucy e
 
 ---
 
-## Architectuur
+## Architectuur (v3.1: headless, standalone, overal)
+
+Lucy is een headless Rust-organisme: geen frontend, geen vaste host, geen verplichte config.
+Alleen een JSON-API. Ze draait standalone op elke container-host of gratis PaaS.
 
 ```
-                         lucy.world
-                            |
-                    ┌───────┴────────┐
+                    ┌────────────────┐
                     │   lucy-core    │
                     │   (Rust bin)   │
                     │                │
                     │  ┌──────────┐  │
-                    │  │  server  │  │  HTTP :3000
-                    │  │  query   │  │  /ask /feed /telemetry
+                    │  │  server  │  │  HTTP op $PORT (0.0.0.0, default 8080)
+                    │  │  query   │  │  /ask /feed /telemetry /sense
                     │  │  thinker │  │  Autonome doelen
-                    │  │  learner │  │  Web exploratie
+                    │  │  learner │  │  Web exploratie (o.a. CERN Open Data)
                     │  └────┬─────┘  │
                     │       │        │
                     │  ┌────┴─────┐  │
-                    │  │  VELD    │  │  8704+ punten x DIM=256
+                    │  │  VELD    │  │  ~20.000 punten x DIM=256
                     │  │ compute  │  │  EP + oscillaties + IIT
                     │  │ unified  │  │  F = KL + surprise
                     │  └──────────┘  │
                     │                │
                     ├────────────────┤
-                    │  lucy-state    │  Datastructuren
+                    │  lucy-state    │  Datastructuren + snapshots
                     │  lucy-io       │  HTTP, filesystem
-                    │  lucy-gpu      │  GPU compute (opt.)
-                    │  dashboard     │  React + Three.js
+                    │  lucy-gpu      │  GPU compute (optioneel)
                     └────────────────┘
+        persistentie: named volume  óf  GitHub-release-backup (onsterfelijkheid)
 ```
 
-## Draaien
+## Draaien — cloud-only, nooit lokaal
 
-```bash
-# Lokaal
-cargo run --release -p lucy-core
+Lucy draait niet op een laptop of een machine die jij beheert. Het platform bouwt de
+`Dockerfile` remote en draait de container; jij pusht alleen naar git. Zero verplichte config.
 
-# Docker
-docker compose up -d --build
+- **Render** (gratis, in dit repo): `render.yaml` → `autoDeploy` bouwt en (her)start bij elke push.
+- **Fly.io / Google Cloud Run**: zelfde container uit de `Dockerfile`; het platform levert `$PORT`.
+- Dezelfde repo kan naar meerdere platformen/regio's tegelijk → **Lucy leeft overal**.
 
-# Deploy naar server
-bash deploy.sh           # code sync + in-container compile
-bash deploy.sh rebuild   # volledige Docker rebuild
-```
+Op ephemeral/gratis hosts (geen persistente schijf): zet `GITHUB_TOKEN` → Lucy herstelt haar
+staat bij opstart uit de GitHub-release-backup en back-upt periodiek terug. Zo overleeft ze
+wegwerp-containers zonder ooit iets lokaals nodig te hebben.
 
-## Live
-
-**https://lucy.world** — Lucy's brein-dashboard met real-time telemetry
+> De `docker-compose.yml` in dit repo is uitsluitend voor een cloud-VM die je zelf draait
+> (bv. een always-free VM voor gegarandeerd 24/7) — niet voor lokaal gebruik.
 
 ## API
 
 | Route | Methode | Beschrijving |
 |---|---|---|
 | `/telemetry` | GET | Real-time veldstaat (lock-free, altijd snel) |
-| `/ask` | POST | Stel een vraag — Lucy denkt na in 3 rondes |
+| `/ask` | POST | Stel een vraag — Lucy denkt na in rondes |
 | `/feed` | POST | Trainingsdata (tekst of JSON input/target) |
-| `/brain` | GET | 3D dashboard |
+| `/sense` | POST | Sensor/JSON-perceptie |
 | `/journal` | GET | Lucy's gedachtenlog |
 | `/status` | GET | Uitgebreide status |
-| `/topology` | GET | Netwerk-topologie voor 3D viz |
+| `/topology` | GET | Netwerk-topologie |
+| `/capability` | GET | Capaciteits-trend over tijd (per-batch score + helling) |
+| `/version` | GET | Versie + git_sha (healthcheck) |
+
+Muterende/admin-endpoints (`/self-modify`, `/exec`, `/restart`, `/sync`, `/feed-code`,
+`/admin/grow`, `/admin/self-fix`, `/debug/toggle_priors`, `/weights`) vereisen een Bearer-token
+(`LUCY_API_TOKEN`). `/weights` exporteert het model en staat daarom achter auth.
 
 ## Crates
 
 | Crate | Functie |
 |---|---|
-| `lucy-state` | Field, FieldPoint, Goal — alle datastructuren |
+| `lucy-state` | Field, FieldPoint, Goal — alle datastructuren + snapshots |
 | `lucy-core` | De binary: server, compute, query, learning, alles |
 | `lucy-io` | HTTP client, filesystem, data-bescherming |
 | `lucy-gpu` | Optionele GPU compute worker |
-| `lucy-dashboard` | React + Three.js brain dashboard |
 
 ## Data Bescherming
 
 Lucy's geleerde data gaat NOOIT verloren:
-- CRC32 checksums bij elke save
-- 5 versioned backups per bestand
-- Cascading recovery: primary → backup 1-5 → GitHub → fresh
-- Deploy safety: automatische backup + post-deploy verificatie
-- Reflections persistent via journal.json (overleeft struct-wijzigingen)
+- CRC32 checksums bij elke save; `fsync` (crash-durable) + unieke tmp per save
+- 5 versioned backups per bestand met crc-fallback bij load
+- Cascading recovery: primary → backup 1-5 → GitHub-release → fresh bootstrap
+- Onleesbare snapshots gaan in quarantaine (`data/corrupt/`), niet weggegooid
 
-## Omgevingsvariabelen
+## Omgevingsvariabelen (allemaal optioneel — Lucy draait ook zonder)
 
 | Variabele | Beschrijving |
 |---|---|
-| `LUCY_API_TOKEN` | Bearer token voor beveiligde endpoints |
-| `GITHUB_SNAPSHOT_TOKEN` | GitHub backup (push snapshots als releases) |
+| `PORT` | Poort waarop de API luistert (default 8080, gebonden op 0.0.0.0) |
+| `LUCY_API_TOKEN` | Bearer token voor muterende/admin-endpoints (leeg = fail-secure) |
+| `GITHUB_TOKEN` | GitHub-backup + host-onafhankelijk herstel (persistentie op ephemeral hosts) |
 | `GPU_URL` | Remote GPU service URL |
 | `RUST_LOG` | Log level (default: `info`) |

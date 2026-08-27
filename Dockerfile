@@ -6,14 +6,6 @@ COPY crates/ crates/
 COPY docs/ docs/
 RUN cargo build --release -p lucy-core
 
-# Dashboard build
-FROM node:20-slim AS dashboard
-WORKDIR /dashboard
-COPY lucy-dashboard/package.json lucy-dashboard/package-lock.json ./
-RUN npm ci
-COPY lucy-dashboard/ ./
-RUN npm run build
-
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
@@ -42,9 +34,7 @@ COPY --from=builder /lucy/crates/ /lucy/crates/
 COPY --from=builder /lucy/Cargo.toml /lucy/Cargo.toml
 COPY --from=builder /lucy/Cargo.lock /lucy/Cargo.lock
 
-# Dashboard static files
-RUN mkdir -p /lucy/dashboard
-COPY --from=dashboard /dashboard/dist/ /lucy/dashboard/
+# v3.1: geen dashboard/frontend meer — Lucy is headless, alleen de HTTP JSON-API.
 
 # v2.5: GEEN mkdir data/ of VOLUME declaratie in Dockerfile
 # Data en modules worden ALLEEN via docker-compose named volumes gemount.

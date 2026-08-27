@@ -27,6 +27,37 @@ pub const PROBE_QUESTIONS: [&str; 5] = [
     "wat is recent veranderd in jezelf",
 ];
 
+/// Verwachte kernwoorden per probe — een BEWUST ZWAKKE maar stabiele correctheids-proxy.
+/// Substring-match (dus "leer" matcht "leren"/"geleerd"). Klein en stabiel gehouden zodat we
+/// longitudinaal kunnen vergelijken; dit meet of het antwoord relevante concepten bevat,
+/// niet algemene intelligentie. Zie ook de eerlijke beperking in `score_probe`.
+pub const PROBE_EXPECTED: [&[&str]; 5] = [
+    &["lucy", "veld", "leer"],
+    &["nieuwsgier", "tevreden", "frustr", "voel"],
+    &["leer", "denk", "veld", "verwerk"],
+    &["begrijp", "concept", "patroon"],
+    &["veranderd", "geleerd", "nieuw", "groei"],
+];
+
+/// Composietscore 0..1 voor één probe: correctheid (kernwoord-overlap) + coherentie +
+/// retrieval-similariteit + niet-fallback. Bewust een zwakke bekwaamheids-proxy: het detecteert
+/// vooruitgang/regressie in zelf-consistentie en gegronde antwoorden over tijd, geen algemene
+/// intelligentie. Goedkoop (string-vergelijking) zodat het de tick-thread niet ophoudt.
+pub fn score_probe(question_id: usize, result: &QueryResult) -> f32 {
+    let expected = PROBE_EXPECTED.get(question_id).copied().unwrap_or(&[]);
+    let ans = result.answer.to_lowercase();
+    let correctness = if expected.is_empty() {
+        0.0
+    } else {
+        let hits = expected.iter().filter(|kw| ans.contains(**kw)).count();
+        hits as f32 / expected.len() as f32
+    };
+    let coherence = result.coherence.clamp(0.0, 1.0);
+    let sim = result.retrieval_top3_mean_sim.clamp(0.0, 1.0);
+    let non_fallback = if result.provenance == query::PROV_FALLBACK { 0.0 } else { 1.0 };
+    (0.30 * correctness + 0.30 * coherence + 0.25 * sim + 0.15 * non_fallback).clamp(0.0, 1.0)
+}
+
 /// Voer één meetvraag uit in audit-only modus. Géén side-effects.
 /// Returns (response_preview, provenance_label, mean_sim, fallback, used_retrieval_count, response_len).
 pub fn run_probe(
@@ -72,6 +103,7 @@ pub fn format_jsonl_row(
         _ => "unknown",
     };
     let preview: String = result.answer.chars().take(120).collect();
+    let score = score_probe(question_id, result);
     serde_json::json!({
         "tick": tick,
         "question_id": question_id,
@@ -86,6 +118,8 @@ pub fn format_jsonl_row(
         "response_preview": preview,
         "coherence": result.coherence,
         "think_rounds": result.think_rounds,
+        // v3.1 capaciteits-score (0..1) — zie score_probe voor de samenstelling
+        "score": score,
         "synthetic_audit": true,
     }).to_string()
 }

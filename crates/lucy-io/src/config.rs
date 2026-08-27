@@ -15,7 +15,6 @@ impl Config {
             "GOOGLE_API_KEY",
             "GOOGLE_SEARCH_ENGINE_ID",
             "GITHUB_TOKEN",
-            "DIGITALOCEAN_TOKEN",
         ];
 
         let mut api_keys = HashMap::new();

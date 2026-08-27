@@ -3,17 +3,13 @@
 > Datum: 10 april 2026
 > Doel: alles documenteren zodat een nieuwe agent kan overnemen
 
-> **⚠ UPDATE (2026-04-13):** Dit document beschrijft v2.6.3. Voor recentere
-> wijzigingen v2.6.4 t/m v2.6.8: zie [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
-> Voor de snapshot-compat crisis van 2026-04-13: zie
-> [`docs/SNAPSHOT_MIGRATION.md`](docs/SNAPSHOT_MIGRATION.md).
->
-> **Current status (2026-04-13 21:00 CEST):** Lucy draait v2.6.7 live op
-> lucy.world, tick ≥ 492750, 20933 points, 431K couplings, 11321 retrieval,
-> vocab 11984. v2.6.8 bewijs-architectuur-code is gecommitteerd
-> (`9acfbb8`, `4593d30`) maar NIET gedeployed vanwege bincode snapshot-
-> incompatibiliteit. v2.6.9 werk: `FieldV267` compat-struct of explicit
-> migration header — zie SNAPSHOT_MIGRATION.md.
+> **⚠ HISTORISCH DOCUMENT (v2.6.3, 10 apr 2026).** Bewaard om de instabiliteits-analyse
+> (de "vicieuze cirkel" hieronder — verwant aan de runaway die v3.1 bij de wortel oploste,
+> zie [ADR 0009](docs/decisions/0009-tension-runaway-rootcause.md)). De destijds live status
+> (lucy.world, DigitalOcean droplet) en de deploy/server-instructies zijn **verouderd en
+> verwijderd**: v3.1 is headless en provider-agnostisch — geen deploy, geen vaste host,
+> nergens van afhankelijk. Actuele werkwijze staat in [`CLAUDE.md`](CLAUDE.md),
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) en [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
 
 ---
 
@@ -25,7 +21,7 @@ Lucy's veld heeft een **oneindige-lus probleem**: `adapt_dynamics()` schroeft `l
 
 ## Architectuur Overzicht
 
-Lucy is een Rust-gebaseerd AI-systeem met een **unified field** van ~9000 punten (DIM=256 per punt). Geen backprop — leert via **Equilibrium Propagation**. Draait in Docker op 209.38.36.51.
+Lucy is een Rust-gebaseerd AI-systeem met een **unified field** van ~9000 punten (DIM=256 per punt). Geen backprop — leert via **Equilibrium Propagation**. Draait als één provider-agnostische container (geen vaste host).
 
 ### Bestanden die ertoe doen
 
@@ -34,31 +30,14 @@ Lucy is een Rust-gebaseerd AI-systeem met een **unified field** van ~9000 punten
 | `crates/lucy-state/src/lib.rs` | Datastructuren: Field, FieldPoint, Coupling, AdaptiveParams. **heal()** functie |
 | `crates/lucy-core/src/main.rs` | Main binary: tick loop, server, training pipeline |
 | `crates/lucy-core/src/compute.rs` | Alle wiskunde: update_phi, update_weights, neuromodulatie, adapt_dynamics |
-| `lucy-dashboard/crates/*/src/*.rs` | **KOPIE** van bovenstaande — moet altijd gesynchroned worden |
 
-### Deploy Procedure
+> _(De destijds vereiste `lucy-dashboard/crates/*`-kopie bestaat niet meer — de frontend is
+> verwijderd in v3.1. Er is nog maar één bron van waarheid: `crates/`.)_
 
-```bash
-# 1. Sync dashboard-kopie
-cp crates/lucy-core/src/main.rs lucy-dashboard/crates/lucy-core/src/main.rs
-cp crates/lucy-core/src/compute.rs lucy-dashboard/crates/lucy-core/src/compute.rs
-cp crates/lucy-state/src/lib.rs lucy-dashboard/crates/lucy-state/src/lib.rs
+### Draaien (v3.1 — geen deploy)
 
-# 2. Upload
-rsync -az --exclude target --exclude node_modules --exclude .git -e ssh . root@209.38.36.51:/opt/lucy/
-
-# 3. Prune (disk is klein, ~24GB)
-ssh root@209.38.36.51 'docker system prune -f'
-
-# 4. Build (~5 min, SSH timeout protection nodig)
-ssh -o ServerAliveInterval=15 root@209.38.36.51 'cd /opt/lucy && docker compose build --no-cache lucy 2>&1 | tail -5'
-
-# 5. Deploy
-ssh root@209.38.36.51 'cd /opt/lucy && docker compose up -d lucy'
-
-# 6. Verify
-ssh root@209.38.36.51 'sleep 10 && docker logs --tail 20 lucy 2>&1'
-```
+Er is geen deploy-procedure meer. Het platform bouwt de `Dockerfile` en draait de container;
+geen SSH, geen droplet, geen dashboard-sync. Zie [`CLAUDE.md`](CLAUDE.md) §Deploy-discipline.
 
 ---
 
@@ -250,19 +229,16 @@ Het PRE-UPDATE diagnostic blok (regel ~703) logt ELKE TICK als er NaN weights zi
 
 ---
 
-## Server Info
+## Runtime (v3.1 — provider-agnostisch)
 
-- **Host**: 209.38.36.51 (DigitalOcean)
-- **Domain**: lucy.world
-- **Container**: `lucy` (Docker, image `lucy-lucy`)
-- **Volume**: `lucy_lucy-data` → mounted at container /lucy/data
-- **Port**: 127.0.0.1:3000 → container 3000
-- **Disk**: ~24GB, Docker builds eten ~4GB → altijd `docker system prune` eerst
-- **SSH**: `ssh root@209.38.36.51` (gebruik `-o ServerAliveInterval=15` bij builds)
+- **Host**: geen vaste host of provider. Eén `Dockerfile`-container, draait op elke runtime.
+- **Poort**: `$PORT` op 0.0.0.0 (default 8080) — nooit hardcoded, nooit localhost.
+- **Persistentie**: named volume `/lucy/data` óf GitHub-release-backup (host-onafhankelijk herstel).
+- **Config**: zero verplicht — alle env-vars optioneel, fail-soft.
 
 ### Snapshot locatie
-Data persisted in Docker volume. Snapshot = `data/lucy.snapshot` (~36MB).
-Backups: `data/lucy.snapshot.v2.3.bak`, `data/lucy.snapshot.v2.4pre.bak`
+Snapshot = `data/lucy.snapshot` (~36MB) + 5 versioned backups per bestand + crc-sidecars.
+Herstel-cascade: primary → backup 1-5 → GitHub-release → verse bootstrap.
 
 ---
 

@@ -69,12 +69,11 @@ use axum::{
     extract::State,
     http::{header, Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use tower_http::cors::CorsLayer;
-use tower_http::services::{ServeDir, ServeFile};
 use lucy_state::*;
 use lucy_state::GoalStrategy;
 use serde_json::{json, Value};
@@ -164,19 +163,23 @@ pub fn spawn_server(state: SharedState) {
             .route("/exec", post(exec_handler))
             .route("/restart", post(restart_handler))
             .route("/admin/pre-deploy", post(pre_deploy_handler))
+            .route("/sync", post(sync_handler))
+            .route("/feed-code", post(feed_code_handler))
+            .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
+            .route("/admin/grow", post(admin_grow_handler))
+            .route("/admin/self-fix", post(self_fix_handler))
+            // v3.1: /weights exporteert het model → achter auth (was publiek: exfiltratie-risico)
+            .route("/weights", get(weights_handler))
             .layer(middleware::from_fn(auth_middleware));
 
-        // Publieke endpoints — open voor iedereen
+        // Publieke endpoints — open voor iedereen (Lucy is headless: JSON-API, geen frontend)
         let app = Router::new()
+            .route("/", get(root))
             .route("/api", get(root))
             .route("/status", get(status))
-            .route("/weights", get(weights_handler))
-            .route("/sync", post(sync_handler))
             .route("/activity", get(activity_handler))
             .route("/ask", post(ask_handler))
             .route("/feed", post(feed_handler))
-            .route("/feed-code", post(feed_code_handler))
-            .route("/dashboard", get(dashboard_handler))
             .route("/journal", get(journal_handler))
             .route("/sense", post(sense_handler))
             .route("/topology", get(topology_handler))
@@ -187,32 +190,32 @@ pub fn spawn_server(state: SharedState) {
             .route("/concept_audit", get(concept_audit_handler))
             .route("/self_ep_audit", get(self_ep_audit_handler))
             .route("/self_history", get(self_history_handler))
+            .route("/capability", get(capability_handler))
             .route("/retrieval_metrics", get(retrieval_metrics_handler))
-            .route("/debug/toggle_priors", post(debug_toggle_priors_handler))
             .route("/plugins", get(plugins_list_handler))
             .route("/version", get(version_handler))
             // v2.6.17: Epistemic awareness + autonomy endpoints
             .route("/admin/epistemic", get(epistemic_handler))
             .route("/admin/proposals", get(proposals_handler))
             .route("/admin/physics-proposals", get(physics_proposals_handler))
-            .route("/admin/grow", post(admin_grow_handler))
-            .route("/admin/self-fix", post(self_fix_handler))
-            // /brain → redirect naar / (breekt oude 301 cache in browsers)
-            .route("/brain", get(|| async { axum::response::Redirect::temporary("/") }))
-            .route("/brain/", get(|| async { axum::response::Redirect::temporary("/") }))
             .merge(protected)
-            // Dashboard op / via fallback (alles dat geen API route matcht)
-            .fallback_service(ServeDir::new("dashboard").fallback(ServeFile::new("dashboard/index.html")))
             .with_state(state)
             .layer(CorsLayer::permissive())
             .layer(middleware::from_fn(cache_headers))
             .layer(axum::extract::DefaultBodyLimit::max(10_000_000)); // 10MB max request body
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+        // v3.1 "overal draaien, nooit lokaal": poort ALTIJD uit PORT-env (Render/Cloud Run/
+        // Fly zetten die), gebonden op 0.0.0.0 — nooit hardcoded 3000, nooit 127.0.0.1.
+        // Fallback 8080 (conventie) alleen als PORT ontbreekt op een zelf-hostende node.
+        let port: u16 = std::env::var("PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8080);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port))
             .await
-            .expect("Failed to bind port 3000");
+            .unwrap_or_else(|e| panic!("Failed to bind port {}: {}", port, e));
 
-        tracing::info!("API server listening on port 3000");
+        tracing::info!(port, "API server listening");
         axum::serve(listener, app).await.ok();
     });
 }
@@ -363,9 +366,10 @@ async fn ask_handler(
             }
             let n = question_embeddings.len() as f32;
             for d in 0..DIM { query_emb[d] /= n; }
-            let retrieval = state.retrieval.read().await;
+            let mut retrieval = state.retrieval.write().await;
             if retrieval.len() > 0 {
-                let with_kinds = retrieval.retrieve_with_kinds_readonly(&query_emb, 3);
+                let current_tick = state.field_handle.snapshot.load().tick;
+                let with_kinds = retrieval.retrieve_with_kinds(&query_emb, 3, current_tick);
                 let plain: Vec<String> = with_kinds.iter().map(|(_, t, _)| t.clone()).collect();
                 (plain, with_kinds)
             } else {
@@ -932,19 +936,30 @@ async fn weights_handler(
     }
 }
 
-/// /sync — Ontvang weights van een andere Lucy instance en merge
+/// /sync — Ontvang weights van een andere Lucy instance en merge (auth-protected).
+/// v3.1: routet de merge via het command-kanaal naar het BEZITTENDE veld. De oude versie
+/// merge'de in een snapshot-kloon die de tick-loop elke ~50 ticks overschreef — dus geen enkel
+/// geïmporteerd gewicht overleefde. De merge is compat-gated in de tick-loop (federation.rs).
 async fn sync_handler(
     State(state): State<SharedState>,
     body: axum::body::Bytes,
 ) -> Json<Value> {
     match bincode::deserialize::<crate::federation::WeightSnapshot>(&body) {
         Ok(remote) => {
-            // Merge op de snapshot (niet het echte field — dat bezit de tick loop)
-            let mut field = (**state.field_handle.snapshot.load()).clone();
-            let merged = crate::federation::merge_weights(&mut field, &remote, 0.3);
-            // Update snapshot met gemerged field
-            state.field_handle.snapshot.store(std::sync::Arc::new(field));
-            Json(json!({"merged": merged, "remote_tick": remote.tick}))
+            let remote_tick = remote.tick;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if state.field_handle.commands
+                .send(crate::field_handle::FieldCommand::MergeWeights { snapshot: remote, respond: tx })
+                .await
+                .is_err()
+            {
+                return Json(json!({"error": "tick loop niet bereikbaar"}));
+            }
+            match rx.await {
+                Ok(Ok(merged)) => Json(json!({"merged": merged, "remote_tick": remote_tick})),
+                Ok(Err(e)) => Json(json!({"error": e, "remote_tick": remote_tick})),
+                Err(_) => Json(json!({"error": "geen antwoord van tick loop"})),
+            }
         }
         Err(e) => {
             Json(json!({"error": format!("deserialize failed: {}", e)}))
@@ -1084,15 +1099,6 @@ async fn admin_grow_handler(
             "error": "growth operation timeout",
             "added": 0
         }))
-    }
-}
-
-/// /dashboard — Lucy's live dashboard
-/// Lucy kan data/dashboard.html zelf aanpassen — wijzigingen zijn direct zichtbaar
-async fn dashboard_handler() -> Html<String> {
-    match std::fs::read_to_string("data/dashboard.html") {
-        Ok(html) => Html(html),
-        Err(_) => Html("<h1>Dashboard niet gevonden</h1><p>Lucy heeft data/dashboard.html nog niet aangemaakt.</p>".to_string()),
     }
 }
 
@@ -1355,6 +1361,75 @@ async fn self_history_handler(State(_state): State<SharedState>) -> Json<Value> 
         }
         Err(e) => Json(json!({"error": format!("{}", e)}))
     }
+}
+
+/// Ordinary-least-squares helling van y over de index 0..n. 0 bij < 2 punten.
+fn ols_slope(ys: &[f64]) -> f64 {
+    let n = ys.len();
+    if n < 2 { return 0.0; }
+    let nf = n as f64;
+    let sum_x: f64 = (0..n).map(|i| i as f64).sum();
+    let sum_y: f64 = ys.iter().sum();
+    let sum_xy: f64 = ys.iter().enumerate().map(|(i, y)| i as f64 * y).sum();
+    let sum_xx: f64 = (0..n).map(|i| (i as f64) * (i as f64)).sum();
+    let denom = nf * sum_xx - sum_x * sum_x;
+    if denom.abs() < 1e-9 { return 0.0; }
+    (nf * sum_xy - sum_x * sum_y) / denom
+}
+
+/// /capability — reduceert data/self_test.jsonl tot per-batch aggregaten + trend-helling.
+/// Maakt "wordt Lucy slimmer over tijd?" een meetbaar getal (score_slope > 0 = vooruitgang)
+/// i.p.v. een gevoel. Score-samenstelling: zie self_test::score_probe (bewust zwakke proxy).
+async fn capability_handler(State(_state): State<SharedState>) -> Json<Value> {
+    let path = std::path::Path::new("data/self_test.jsonl");
+    if !path.exists() {
+        return Json(json!({"batches_total": 0, "series": [], "note": "no self_test.jsonl yet"}));
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => return Json(json!({"error": format!("{}", e)})),
+    };
+    // Groepeer per batch (opeenvolgende rijen met dezelfde tick). Append-log is chronologisch.
+    struct Acc { tick: u64, n: u32, score_sum: f64, fallback: u32, self_ret: u32 }
+    let mut batches: Vec<Acc> = Vec::new();
+    for line in content.lines() {
+        let v: Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let tick = v.get("tick").and_then(|x| x.as_u64()).unwrap_or(0);
+        let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let fallback = v.get("fallback").and_then(|x| x.as_bool()).unwrap_or(false);
+        let prov = v.get("provenance").and_then(|x| x.as_str()).unwrap_or("");
+        let same = batches.last().map(|b| b.tick == tick).unwrap_or(false);
+        if !same {
+            batches.push(Acc { tick, n: 0, score_sum: 0.0, fallback: 0, self_ret: 0 });
+        }
+        let b = batches.last_mut().unwrap();
+        b.n += 1;
+        b.score_sum += score;
+        if fallback { b.fallback += 1; }
+        if prov == "retrieval_self" { b.self_ret += 1; }
+    }
+    let series: Vec<Value> = batches.iter().map(|b| {
+        let n = b.n.max(1) as f64;
+        json!({
+            "tick": b.tick,
+            "mean_score": b.score_sum / n,
+            "fallback_rate": b.fallback as f64 / n,
+            "retrieval_self_rate": b.self_ret as f64 / n,
+            "n": b.n,
+        })
+    }).collect();
+    let ys: Vec<f64> = batches.iter().map(|b| b.score_sum / b.n.max(1) as f64).collect();
+    let slope = ols_slope(&ys);
+    let latest = series.last().cloned().unwrap_or(Value::Null);
+    let tail: Vec<Value> = series.iter().rev().take(240).cloned().collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    Json(json!({
+        "batches_total": batches.len(),
+        "score_slope_per_batch": slope,
+        "trend": if slope > 1e-4 { "stijgend" } else if slope < -1e-4 { "dalend" } else { "vlak" },
+        "latest": latest,
+        "series": tail,
+    }))
 }
 
 /// /retrieval_metrics — cache-vs-brein bewijsmetrics
@@ -1711,78 +1786,94 @@ async fn self_fix_handler(State(state): State<SharedState>) -> Json<Value> {
         }));
     }
 
-    // Phase 2: Sandbox Setup
-    let sandbox = SandboxCompiler::new();
-    if let Err(e) = sandbox.setup() {
-        return Json(json!({
-            "status": "failed",
-            "phase": "sandbox_setup",
-            "error": e,
-        }));
-    }
-
-    // Phase 3: Apply Patches & Compile
-    let mut patches_applied = 0;
-    let mut compile_error = None;
-
-    for diagnosis in &diagnoses {
-        let patch = &diagnosis.suggested_patch;
-        if sandbox.apply_patch(&patch.file, &patch.old_pattern, &patch.new_pattern).is_ok() {
-            patches_applied += 1;
+    // Phase 2-4: sandbox setup + patch/compile + deploy zijn blokkerend
+    // (synchrone cargo build + thread::sleep). Draai op de blocking pool
+    // zodat de async runtime niet vastloopt.
+    let diagnoses_count = diagnoses.len();
+    let blocking_result = tokio::task::spawn_blocking(move || -> Value {
+        // Phase 2: Sandbox Setup
+        let sandbox = SandboxCompiler::new();
+        if let Err(e) = sandbox.setup() {
+            return json!({
+                "status": "failed",
+                "phase": "sandbox_setup",
+                "error": e,
+            });
         }
-    }
 
-    // Try to compile
-    match sandbox.compile() {
-        Ok(compile_result) => {
-            if !compile_result.success {
-                compile_error = Some(format!("Compilation failed: {:?}", compile_result.errors));
-                sandbox.cleanup();
-                return Json(json!({
-                    "status": "failed",
-                    "phase": "compilation",
-                    "error": compile_error,
-                }));
+        // Phase 3: Apply Patches & Compile
+        let mut patches_applied = 0;
+        let mut compile_error = None;
+
+        for diagnosis in &diagnoses {
+            let patch = &diagnosis.suggested_patch;
+            if sandbox.apply_patch(&patch.file, &patch.old_pattern, &patch.new_pattern).is_ok() {
+                patches_applied += 1;
             }
+        }
 
-            // Phase 4: Deploy
-            let deployer = DeployCoordinator::new();
-            if let Some(binary_path) = &compile_result.binary_path {
-                match deployer.deploy(binary_path, "http://localhost:3000", "") {
-                    Ok(_) => {
-                        sandbox.cleanup();
-                        return Json(json!({
-                            "status": "success",
-                            "message": "Auto-deployed",
-                            "patches_applied": patches_applied,
-                            "elapsed_seconds": now.elapsed().as_secs_f32(),
-                            "diagnoses_count": diagnoses.len(),
-                        }));
-                    }
-                    Err(e) => {
-                        let _ = deployer.rollback();
-                        sandbox.cleanup();
-                        return Json(json!({
-                            "status": "failed",
-                            "phase": "deployment",
-                            "error": e,
-                        }));
+        // Try to compile
+        match sandbox.compile() {
+            Ok(compile_result) => {
+                if !compile_result.success {
+                    compile_error = Some(format!("Compilation failed: {:?}", compile_result.errors));
+                    sandbox.cleanup();
+                    return json!({
+                        "status": "failed",
+                        "phase": "compilation",
+                        "error": compile_error,
+                    });
+                }
+
+                // Phase 4: Deploy
+                let deployer = DeployCoordinator::new();
+                if let Some(binary_path) = &compile_result.binary_path {
+                    match deployer.deploy(binary_path, "http://localhost:3000", "") {
+                        Ok(_) => {
+                            sandbox.cleanup();
+                            return json!({
+                                "status": "success",
+                                "message": "Auto-deployed",
+                                "patches_applied": patches_applied,
+                                "elapsed_seconds": now.elapsed().as_secs_f32(),
+                                "diagnoses_count": diagnoses_count,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = deployer.rollback();
+                            sandbox.cleanup();
+                            return json!({
+                                "status": "failed",
+                                "phase": "deployment",
+                                "error": e,
+                            });
+                        }
                     }
                 }
             }
+            Err(e) => {
+                sandbox.cleanup();
+                return json!({
+                    "status": "failed",
+                    "phase": "compilation",
+                    "error": e,
+                });
+            }
         }
-        Err(e) => {
-            sandbox.cleanup();
-            return Json(json!({
-                "status": "failed",
-                "phase": "compilation",
-                "error": e,
-            }));
-        }
-    }
 
-    Json(json!({
-        "status": "failed",
-        "message": "Unexpected state in self_fix handler"
-    }))
+        json!({
+            "status": "failed",
+            "message": "Unexpected state in self_fix handler"
+        })
+    }).await;
+
+    match blocking_result {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({
+            "status": "failed",
+            "phase": "runtime",
+            "http_status": 500,
+            "error": format!("Blocking self-fix taak mislukt: {}", e),
+        })),
+    }
 }

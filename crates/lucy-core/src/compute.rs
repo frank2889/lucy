@@ -387,6 +387,7 @@
             let ewc_pen = ewc_penalty(coupling, field.kl_scale);
             // v1.0: Broadcast couplings krijgen 2× learning rate (dragen bewust signaal)
             let lr = if coupling.broadcast { eta * 2.0 } else { eta };
+            coupling.broadcast = false; // consume one-shot ignition boost
             // v2.6.15 fix: use momentum directly (already blended on line 298),
             // don't double-apply mu factor by using dw again
             coupling.weight -= lr * coupling.momentum + lr * ewc_pen;
@@ -468,9 +469,12 @@
         // │ Bayesian Mechanics: precision = inverse variance op de  │
         // │ Markov Blanket. Hoge precision = scherp signaal.        │
         // └─────────────────────────────────────────────────────────┘
-        let error_diff = pred_error - if point.free_energy.is_finite() { point.free_energy } else { 0.0 };
+        // v3.1: error_var = EMA van de prediction-error magnitude zelf (bounded, want phi is
+        // geklemd op +/-clamp_range). Verwijdert de positive-feedback loop
+        // free_energy -> error_var -> kl_divergence -> free_energy die per tick ~kwadrateerde
+        // (F_next ~= C*F^2) en tension naar 1e30 dreef.
         let old_ev = if point.error_var.is_finite() { point.error_var } else { 1.0 };
-        point.error_var = (1.0 - tracking) * old_ev + tracking * error_diff * error_diff;
+        point.error_var = (1.0 - tracking) * old_ev + tracking * pred_error;
         // v2.5: precision clamp max 10.0 — voorkomt inf bij error_var ≈ 0 (eerste ticks / na reset)
         point.precision = (1.0 / (point.error_var + tracking)).min(10.0);
 
@@ -481,7 +485,7 @@
         // │ Friston 2023: extended to path integrals on manifold   │
         // └─────────────────────────────────────────────────────────┘
         let phi_var: f32 = point.phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
-        let ev = point.error_var.max(1e-6);
+        let ev = point.error_var.clamp(1e-6, 1e4);
         let kl_divergence = kl_scale * 0.5 * (ev + phi_var - 1.0 - ev.ln());
         let kl_divergence = if kl_divergence.is_finite() { kl_divergence.max(0.0) } else { kl_scale * phi_var };
         let old_kl = if point.kl_divergence.is_finite() { point.kl_divergence } else { 0.0 };
@@ -865,18 +869,20 @@
 
         // think_interval: hoge curiosity → vaker nadenken
         let curiosity_drive = (avg_curiosity * 10.0).clamp(0.1, 5.0);
-        field.think_interval = (500.0 / curiosity_drive).clamp(100.0, 2000.0) as u64;
-
         // reflect_interval: hoge frustration → vaker reflecteren
         let frustration_drive = (avg_frustration * 10.0).clamp(0.1, 5.0);
-        field.reflect_interval = (10_000.0 / frustration_drive).clamp(2_000.0, 50_000.0) as u64;
-
         // learn_interval: hoge tension → sneller leren
         let tension_drive = (avg_tension * 20.0).clamp(0.1, 5.0);
-        field.learn_interval = (100.0 / tension_drive).clamp(20.0, 500.0) as u64;
 
-        // explore_interval: schaalt met curiosity
-        field.explore_interval = (100.0 / curiosity_drive).clamp(20.0, 500.0) as u64;
+        // v3.1: emergency dead/sluggish interval-overrides (gezet ~799) niet overschrijven
+        // met de drive-based herberekening — anders blijft een dood/traag veld hangen.
+        if !is_dead && !is_sluggish {
+            field.think_interval = (500.0 / curiosity_drive).clamp(100.0, 2000.0) as u64;
+            field.reflect_interval = (10_000.0 / frustration_drive).clamp(2_000.0, 50_000.0) as u64;
+            field.learn_interval = (100.0 / tension_drive).clamp(20.0, 500.0) as u64;
+            // explore_interval: schaalt met curiosity
+            field.explore_interval = (100.0 / curiosity_drive).clamp(20.0, 500.0) as u64;
+        }
 
         // consolidation_interval: schaalt invers met tension (rustig = consolideren)
         let calm_factor = (1.0 - avg_tension.min(1.0)).max(0.1);
@@ -1146,13 +1152,14 @@
             let old_error_var = if point.error_var.is_finite() { point.error_var } else { 1.0 };
 
             // Precision
-            let error_diff = pred_error - old_free_energy;
-            let error_var = (1.0 - tracking) * old_error_var + tracking * error_diff * error_diff;
+            // v3.1: zie compute_tension — error_var tracked de error-magnitude zelf i.p.v.
+            // (pred_error - free_energy)^2, om de kwadratische runaway te breken.
+            let error_var = (1.0 - tracking) * old_error_var + tracking * pred_error;
             let precision = (1.0 / (error_var + tracking)).min(10.0); // v2.5: clamp
 
             // F = KL(q‖p) + S(η|b)
             let phi_var: f32 = new_phi.iter().map(|x| x * x).sum::<f32>() / DIM as f32;
-            let ev = error_var.max(1e-6);
+            let ev = error_var.clamp(1e-6, 1e4);
             let kl_div = kl_scale * 0.5 * (ev + phi_var - 1.0 - ev.ln());
             let kl_div = if kl_div.is_finite() { kl_div.max(0.0) } else { kl_scale * phi_var };
             let blanket_surprise = precision * pred_error;
@@ -2064,8 +2071,8 @@
         let idx = rng.random_range(0..field.active_set.len());
         let probe_id = field.active_set[idx] as usize;
 
-        // Sla ALLE phi's op — tick_all muteert het hele veld, niet alleen probe punt
-        let saved_phis: Vec<[f32; DIM]> = field.points.iter().map(|p| p.phi).collect();
+        // Sla ALLE punten op — tick_all muteert het hele veld, niet alleen probe punt
+        let saved_points = field.points.clone();
 
         // Injecteer kleine ruis op probe punt
         let perturbation = 0.01f32;
@@ -2076,7 +2083,7 @@
         // Meet initiële afwijking
         let mut initial_diff = 0.0f32;
         for d in 0..DIM {
-            let diff = field.points[probe_id].phi[d] - saved_phis[probe_id][d];
+            let diff = field.points[probe_id].phi[d] - saved_points[probe_id].phi[d];
             initial_diff += diff * diff;
         }
         initial_diff = initial_diff.sqrt().max(1e-10);
@@ -2089,7 +2096,7 @@
         // Meet finale afwijking
         let mut final_diff = 0.0f32;
         for d in 0..DIM {
-            let diff = field.points[probe_id].phi[d] - saved_phis[probe_id][d];
+            let diff = field.points[probe_id].phi[d] - saved_points[probe_id].phi[d];
             final_diff += diff * diff;
         }
         final_diff = final_diff.sqrt().max(1e-10);
@@ -2113,9 +2120,7 @@
         field.lambda = field.lambda.clamp(0.01, 0.1);
 
         // Herstel ALLE punten — geen veld-corruptie meer
-        for (i, phi) in saved_phis.into_iter().enumerate() {
-            field.points[i].phi = phi;
-        }
+        field.points = saved_points;
     }
 
     // === v0.7.2: HIËRARCHISCHE PREDICTIE — abstractie door laag-voor-laag voorspelling ===
@@ -2527,7 +2532,7 @@
             let total_boost = lr_multiplier * emo_factor * coherence_boost * phi_boost * causal_boost * urgency;
             let total_boost = if total_boost.is_finite() { total_boost.clamp(0.01, 100.0) } else { 1.0 };
 
-            point.eta = (point.eta * total_boost).min(field.lambda);
+            point.eta = (point.eta * total_boost).clamp(1e-4, field.lambda);
             if !point.eta.is_finite() { point.eta = 0.01; }
         }
 
@@ -3213,7 +3218,7 @@
                 for d in 0..DIM { eps[d] = p.phi[d] - p.prediction[d]; }
                 let neighbors: Vec<(usize, [f32; DIM])> = p.couplings.iter()
                     .enumerate()
-                    .map(|(ci, c)| (ci, field.points[c.target as usize].phi))
+                    .filter_map(|(ci, c)| field.points.get(c.target as usize).map(|t| (ci, t.phi)))
                     .collect();
                 (idx, eps, neighbors)
             })
@@ -3910,6 +3915,10 @@
         }
 
         let per_layer = N_HEADS * 3 * DIM * HEAD_DIM + N_HEADS * HEAD_DIM * DIM;
+        if weights.len() < N_ATTN_LAYERS * per_layer {
+            tracing::error!(got = weights.len(), expected = N_ATTN_LAYERS * per_layer, "attn_weights length mismatch - attention skipped");
+            return;
+        }
 
         for i in 0..field.active_set.len() {
             let id = field.active_set[i] as usize;
@@ -4021,6 +4030,10 @@
 
         let lr = 0.002f32; // Verhoogd van 0.001 — alle weights moeten sneller leren
         let per_layer = N_HEADS * 3 * DIM * HEAD_DIM + N_HEADS * HEAD_DIM * DIM;
+        if weights.len() < N_ATTN_LAYERS * per_layer {
+            tracing::error!(got = weights.len(), expected = N_ATTN_LAYERS * per_layer, "attn_weights length mismatch - attention skipped");
+            return;
+        }
 
         for i in 0..field.active_set.len() {
             let id = field.active_set[i] as usize;

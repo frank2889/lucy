@@ -19,6 +19,12 @@ pub enum FieldCommand {
     GrowHidden { n: usize, respond: oneshot::Sender<usize> },
     /// v3.0: Self-fix loop — detect bottlenecks, generate + test patches, deploy
     RunSelfFix { respond: oneshot::Sender<String> },
+    /// v3.1: Federated merge — pas remote coupling-weights toe op het BEZITTENDE veld
+    /// (compat-gated). Alleen zo overleeft een sync (de snapshot wordt elke ~50 ticks overschreven).
+    MergeWeights {
+        snapshot: crate::federation::WeightSnapshot,
+        respond: oneshot::Sender<Result<usize, String>>,
+    },
 }
 
 pub struct TrainResult {

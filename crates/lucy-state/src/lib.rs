@@ -279,7 +279,10 @@ impl Economy {
     pub fn new() -> Self {
         Self {
             balance_cents: 0,
-            monthly_server_cost: 600, // $6/maand DigitalOcean droplet
+            // v3.1: geen vaste provider/kost-aanname (Lucy is nergens van afhankelijk).
+            // Leest SERVER_COST_CENTS; default 0 = gratis hosting.
+            monthly_server_cost: std::env::var("SERVER_COST_CENTS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             total_earned: 0,
             total_spent: 0,
             api_costs_this_hour: 0,
@@ -1839,9 +1842,20 @@ impl Field {
         bytes.extend_from_slice(&payload);
 
         // Atomic write + checksum + 5 backups
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        // v: verwijder stale crc sidecar vóór rename — crash laat 'geen sidecar' (geaccepteerd) i.p.v. mismatch
+        let _ = std::fs::remove_file(path.with_extension("crc32"));
         std::fs::rename(&tmp, path)?;
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = std::fs::File::open(dir) { let _ = d.sync_all(); }
+        }
 
         // CRC32 checksum sidecar
         let checksum = crc32fast::hash(&bytes);
@@ -2049,6 +2063,10 @@ impl Field {
                         tracing::warn!(backup = i, tick = f.tick, "RECOVERED van lokale backup");
                         // Herstel primary
                         let _ = std::fs::copy(&backup, path);
+                        if let Ok(restored) = std::fs::read(path) {
+                            let crc = crc32fast::hash(&restored);
+                            let _ = std::fs::write(path.with_extension("crc32"), crc.to_le_bytes());
+                        }
                         return Some(f);
                     }
                     Err(e) => tracing::warn!("Backup #{} failed: {}", i, e),

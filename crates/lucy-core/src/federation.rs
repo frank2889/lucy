@@ -10,7 +10,29 @@ use serde::{Serialize, Deserialize};
 #[derive(Serialize, Deserialize)]
 pub struct WeightSnapshot {
     pub tick: u64,
+    /// v3.1 compat-gate: merge is alleen betekenisvol tussen topologie-identieke velden
+    /// (zelfde DIM en puntenaantal = dezelfde snapshot-lijn). Zie `is_compatible`.
+    #[serde(default)]
+    pub dim: usize,
+    #[serde(default)]
+    pub n_points: usize,
     pub weights: Vec<CouplingWeight>, // sparse: alleen niet-nul weights
+}
+
+/// v3.1: topologie/versie-gate voor federated merge. FedAvg is alleen zinvol tussen velden met
+/// identieke topologie — anders wijzen (point_id, coupling_idx) naar verschillende concepten en
+/// is het middelen stille corruptie. Nodes uit dezelfde GitHub-backup-lijn zijn compatibel.
+pub fn is_compatible(field: &Field, remote: &WeightSnapshot) -> Result<(), String> {
+    if remote.dim != DIM {
+        return Err(format!("DIM mismatch: remote={} lokaal={}", remote.dim, DIM));
+    }
+    if remote.n_points != field.points.len() {
+        return Err(format!(
+            "n_points mismatch: remote={} lokaal={}",
+            remote.n_points, field.points.len()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,24 +57,35 @@ pub fn export_weights(field: &Field) -> WeightSnapshot {
             }
         }
     }
-    WeightSnapshot { tick: field.tick, weights }
+    WeightSnapshot { tick: field.tick, dim: DIM, n_points: field.points.len(), weights }
 }
 
-/// Merge remote weights met lokale weights via FedAvg
-/// alpha = 0.5 = gelijk gewicht, 0.1 = 10% remote invloed
+/// Merge remote weights met lokale weights via FedAvg.
+/// alpha = 0.5 = gelijk gewicht, 0.1 = 10% remote invloed.
+/// v3.1: compat-gated + finite-guards + clamp — weigert incompatibele topologie (geen corruptie)
+/// en laat geen NaN/extreme remote-waarde het veld in (voorkomt tension-runaway na injectie).
 pub fn merge_weights(field: &mut Field, remote: &WeightSnapshot, alpha: f32) -> usize {
+    if let Err(e) = is_compatible(field, remote) {
+        tracing::warn!(error = %e, "Federated merge GEWEIGERD — incompatibele topologie");
+        return 0;
+    }
+    let a = alpha.clamp(0.0, 1.0);
     let mut merged = 0;
     for rw in &remote.weights {
+        if !rw.weight.is_finite() { continue; }
         let pid = rw.point_id as usize;
         let ci = rw.coupling_idx as usize;
         if pid < field.points.len() && ci < field.points[pid].couplings.len() {
             let local = field.points[pid].couplings[ci].weight;
-            // FedAvg: gewogen gemiddelde
-            field.points[pid].couplings[ci].weight = (1.0 - alpha) * local + alpha * rw.weight;
-            merged += 1;
+            let nw = (1.0 - a) * local + a * rw.weight;
+            if nw.is_finite() {
+                // clamp binnen realistisch gewicht-bereik (zoals update_weights elders)
+                field.points[pid].couplings[ci].weight = nw.clamp(-2.5, 2.5);
+                merged += 1;
+            }
         }
     }
-    tracing::info!(merged, remote_tick = remote.tick, alpha, "Federated merge complete");
+    tracing::info!(merged, remote_tick = remote.tick, alpha = a, "Federated merge complete");
     merged
 }
 
@@ -104,5 +137,50 @@ pub async fn push_to_replica(field: &Field, replica_url: &str) -> Result<(), Str
         Ok(())
     } else {
         Err(format!("Replica returned {}", resp.status()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(dim: usize, n_points: usize, weights: Vec<CouplingWeight>) -> WeightSnapshot {
+        WeightSnapshot { tick: 1, dim, n_points, weights }
+    }
+
+    #[test]
+    fn compat_rejects_dim_mismatch() {
+        let field = Field::new();
+        assert!(is_compatible(&field, &snap(DIM + 1, field.points.len(), vec![])).is_err());
+    }
+
+    #[test]
+    fn compat_rejects_npoints_mismatch() {
+        let field = Field::new();
+        assert!(is_compatible(&field, &snap(DIM, field.points.len() + 7, vec![])).is_err());
+    }
+
+    #[test]
+    fn compat_accepts_identical_topology() {
+        let field = Field::new();
+        assert!(is_compatible(&field, &snap(DIM, field.points.len(), vec![])).is_ok());
+    }
+
+    #[test]
+    fn merge_refuses_incompatible_topology() {
+        let mut field = Field::new();
+        let n = field.points.len();
+        let s = snap(DIM, n + 1, vec![CouplingWeight { point_id: 0, coupling_idx: 0, weight: 1.0 }]);
+        // incompatibele topologie → 0 merges, geen corruptie
+        assert_eq!(merge_weights(&mut field, &s, 0.3), 0);
+    }
+
+    #[test]
+    fn merge_skips_nonfinite_without_panic() {
+        let mut field = Field::new();
+        let n = field.points.len();
+        let s = snap(DIM, n, vec![CouplingWeight { point_id: 0, coupling_idx: 0, weight: f32::NAN }]);
+        // compatibele topologie maar NaN-gewicht → overgeslagen, geen panic
+        assert_eq!(merge_weights(&mut field, &s, 0.3), 0);
     }
 }

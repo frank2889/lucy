@@ -43,8 +43,53 @@ impl HttpClient {
         }
     }
 
+    /// SSRF-guard: weiger loopback/private/link-local IPs en interne hostnames.
+    /// Minimale eigen URL-parser (geen `url` crate dependency in lucy-io).
+    fn is_public_url(url: &str) -> Result<(), String> {
+        let url = url.trim();
+        let (scheme, rest) = url.split_once("://").ok_or("Bad URL: geen scheme")?;
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" => {}
+            s => return Err(format!("Scheme niet toegestaan: {}", s)),
+        }
+        // authority = alles tot eerste '/', '?' of '#'
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // strip userinfo (user:pass@)
+        let hostport = match authority.rsplit_once('@') {
+            Some((_, hp)) => hp,
+            None => authority,
+        };
+        // host uitpakken (IPv6 tussen [], anders tot ':')
+        let host = if let Some(after_bracket) = hostport.strip_prefix('[') {
+            match after_bracket.split_once(']') {
+                Some((h, _)) => h.to_string(),
+                None => return Err("Bad URL: ongeldige IPv6".to_string()),
+            }
+        } else {
+            hostport.split(':').next().unwrap_or("").to_string()
+        };
+        if host.is_empty() {
+            return Err("Geen host".to_string());
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            let blocked = ip.is_loopback() || ip.is_unspecified() || match ip {
+                std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                std::net::IpAddr::V6(_) => false,
+            };
+            if blocked {
+                return Err(format!("Interne IP geblokkeerd: {}", ip));
+            }
+        }
+        let h = host.to_ascii_lowercase();
+        if h == "localhost" || h.ends_with(".local") || h == "metadata.google.internal" {
+            return Err("Interne host geblokkeerd".to_string());
+        }
+        Ok(())
+    }
+
     /// GET request — Lucy's primaire zintuig naar het internet
     pub async fn get(&self, url: &str) -> Result<HttpResponse, String> {
+        Self::is_public_url(url)?;
         let start = std::time::Instant::now();
         let resp = self
             .client
@@ -75,6 +120,7 @@ impl HttpClient {
 
     /// GET met custom headers (voor APIs die auth-tokens verwachten)
     pub async fn get_with_headers(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
+        Self::is_public_url(url)?;
         let start = std::time::Instant::now();
         let mut req = self.client.get(url);
         for (k, v) in extra_headers {
@@ -99,6 +145,7 @@ impl HttpClient {
 
     /// POST met custom headers (voor APIs zoals DDG AI Chat die vqd-tokens gebruiken)
     pub async fn post_with_headers(&self, url: &str, body: &[u8], content_type: &str, extra_headers: &[(&str, &str)]) -> Result<HttpResponse, String> {
+        Self::is_public_url(url)?;
         let start = std::time::Instant::now();
         let mut req = self.client.post(url)
             .header("Content-Type", content_type)
@@ -125,6 +172,7 @@ impl HttpClient {
 
     /// POST request — Lucy's handen naar het internet
     pub async fn post(&self, url: &str, body: &[u8], content_type: &str) -> Result<HttpResponse, String> {
+        Self::is_public_url(url)?;
         let start = std::time::Instant::now();
         let resp = self
             .client

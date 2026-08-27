@@ -449,7 +449,7 @@ impl RetrievalStore {
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = std::fs::read(path)?;
+        let (bytes, _src) = lucy_io::fs::load_with_fallback(path).ok_or("no primary or backup found")?;
         let mut store: Self = bincode::deserialize(&bytes)?;
         store.rebuild_buckets();
         tracing::info!(entries = store.keys.len(), "Retrieval store loaded");

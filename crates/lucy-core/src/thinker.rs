@@ -454,8 +454,9 @@ pub fn reflect(
         / field.active_set.len().max(1) as f32;
 
     // Als >90% van punten actief EN hoge tension → brein is vol, groei!
-    if active_ratio > 0.9 && avg_tension > field.growth_threshold * 2.0 {
-        let growth_amount = (field.points.len() / 20).max(50); // 5% groei, min 50
+    const MAX_FIELD_POINTS: usize = 200_000;
+    if active_ratio > 0.9 && avg_tension > field.growth_threshold * 2.0 && field.points.len() < MAX_FIELD_POINTS {
+        let growth_amount = (field.points.len() / 20).max(50).min(MAX_FIELD_POINTS - field.points.len()); // 5% groei, min 50
         crate::growth::grow_hidden(field, growth_amount);
         journal_thought(journal, field.tick,
             &format!("Zelf-groei: {} nieuwe punten (totaal {})",

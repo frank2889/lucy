@@ -1,9 +1,0 @@
-/target
-.env
-data/lucy.snapshot
-data/lucy_journal.log
-modules/*.dylib
-modules/*.so
-lucy-dashboard/node_modules
-lucy-dashboard/dist
-node_modules

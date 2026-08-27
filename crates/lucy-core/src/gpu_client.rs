@@ -1,6 +1,6 @@
 //! # gpu_client — Remote GPU bridge
 //!
-//! Lucy op DigitalOcean stuurt velddata naar de Vast.ai GPU service.
+//! Lucy stuurt velddata naar de Vast.ai GPU service.
 //! Communiceert via bincode over HTTP voor minimale overhead.
 
 use lucy_state::*;

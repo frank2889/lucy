@@ -391,7 +391,10 @@ pub fn process_query_full(
                     .max_by_key(|f| f.len());
 
                 if let Some(fact) = best_fact {
-                    let answer = if fact.len() > 300 { format!("{}...", &fact[..300]) } else { fact.clone() };
+                    let answer = if fact.len() > 300 {
+                        let cut = (0..=300).rev().find(|&i| fact.is_char_boundary(i)).unwrap_or(0);
+                        format!("{}...", &fact[..cut])
+                    } else { fact.clone() };
                     tracing::info!(len = answer.len(), "RAG fallback: leesbaar feit gevonden");
                     answer
                 } else {

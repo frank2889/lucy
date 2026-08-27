@@ -212,12 +212,65 @@ async fn main() {
     // v2.5: ONSTERFELIJKE LOAD — primary → backups 1-5 → fresh bootstrap
     // Lucy's geleerde data gaat NOOIT verloren.
     let snapshot_path = Path::new(SNAPSHOT_PATH);
+
+    // v3.1 "gratis overal": op een verse/ephemeral host (gratis PaaS, wegwerp-container)
+    // is er geen lokale snapshot. Herstel Lucy's geest dan eerst uit de GitHub-release-
+    // backup (onsterfelijkheid, ADR 0008) — zo overleeft ze hosts zonder persistente schijf.
+    // Alleen als er GEEN lokale snapshot is en er een GITHUB_TOKEN gezet is; falen is niet fataal.
+    if !snapshot_path.exists() {
+        match std::env::var("GITHUB_TOKEN") {
+            Ok(token) if !token.is_empty() => {
+                tracing::info!("Geen lokale snapshot — probeer herstel uit GitHub-release-backup");
+                match backup::pull_latest_from_github(&token).await {
+                    Ok(tick) => tracing::info!(tick, "Staat hersteld uit GitHub-backup (host-onafhankelijk)"),
+                    Err(e) => tracing::warn!(%e, "GitHub-herstel mislukt — verse bootstrap volgt indien nodig"),
+                }
+            }
+            _ => tracing::info!("Geen lokale snapshot en geen GITHUB_TOKEN — verse bootstrap"),
+        }
+    }
+
     let mut field = if let Some(mut f) = Field::load_with_fallback(snapshot_path) {
         f.cache_io_ids();
         tracing::info!(tick = f.tick, points = f.points.len(), "Snapshot geladen (met fallback)");
         f
     } else {
         tracing::error!("ALLE snapshots gefaald — bootstrapping fresh. GELEERDE DATA VERLOREN!");
+        // D3: quarantine de onleesbare primary + backups zodat de verse field zijn
+        // backup-rotatie ze niet vernietigt. Verplaats naar data/corrupt/ met een
+        // numerieke suffix uit SystemTime (GEEN chrono).
+        {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let corrupt_dir = Path::new("data/corrupt");
+            if let Err(e) = std::fs::create_dir_all(corrupt_dir) {
+                tracing::warn!(error = %e, "D3: kon data/corrupt/ niet aanmaken");
+            }
+            let name = snapshot_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "snapshot".to_string());
+            // Primary + backups <name>.1..5 in quarantaine zetten
+            let mut candidates: Vec<PathBuf> = vec![snapshot_path.to_path_buf()];
+            for i in 1..=5 {
+                candidates.push(PathBuf::from(format!("data/backups/{}.{}", name, i)));
+            }
+            for src in candidates {
+                if src.exists() {
+                    let base = src
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| name.clone());
+                    let dst = corrupt_dir.join(format!("{}.{}", base, suffix));
+                    match std::fs::rename(&src, &dst) {
+                        Ok(_) => tracing::warn!(from = %src.display(), to = %dst.display(), "D3: corrupte snapshot in quarantaine"),
+                        Err(e) => tracing::warn!(error = %e, from = %src.display(), "D3: kon corrupte snapshot niet verplaatsen"),
+                    }
+                }
+            }
+        }
         field::bootstrap_field()
     };
 
@@ -578,6 +631,19 @@ async fn main() {
         std::thread::spawn(move || {
             let mut train_field = field_for_training;
             while let Ok(chunk) = train_chunk_rx.recv() {
+                // D2: snapshot pre-weights vóór micro_ep zodat we ECHTE deltas sturen
+                // (niet absolute weights van een stale boot-time clone).
+                let mut pre_weights: std::collections::HashMap<(usize, usize), f32> =
+                    std::collections::HashMap::new();
+                for &id in &train_field.active_set {
+                    let idx = id as usize;
+                    if idx < train_field.points.len() {
+                        for (ci, c) in train_field.points[idx].couplings.iter().enumerate() {
+                            pre_weights.insert((idx, ci), c.weight);
+                        }
+                    }
+                }
+
                 // Micro-EP op de training kopie
                 let delta = compute::micro_ep(
                     &mut train_field,
@@ -585,22 +651,27 @@ async fn main() {
                     &chunk.target_embs,
                 );
 
-                // Verzamel weight deltas
+                // Verzamel weight deltas (verschillen, niet absolute weights)
                 if delta > 0.0001 {
                     let mut deltas = Vec::new();
-                    // Stuur alleen gewijzigde weights terug
                     for &id in &train_field.active_set {
                         let idx = id as usize;
+                        if idx >= train_field.points.len() { continue; }
                         for (ci, c) in train_field.points[idx].couplings.iter().enumerate() {
-                            // Vergelijk met origineel (simpele heuristiek: stuur alles)
-                            deltas.push(WeightDelta {
-                                point_id: idx,
-                                coupling_idx: ci,
-                                delta: c.weight, // stuur absolute weight (niet delta)
-                            });
+                            let old_w = pre_weights.get(&(idx, ci)).copied().unwrap_or(0.0);
+                            let diff = c.weight - old_w;
+                            if diff != 0.0 {
+                                deltas.push(WeightDelta {
+                                    point_id: idx,
+                                    coupling_idx: ci,
+                                    delta: diff,
+                                });
+                            }
                         }
                     }
-                    let _ = weight_delta_tx.send(deltas);
+                    if !deltas.is_empty() {
+                        let _ = weight_delta_tx.send(deltas);
+                    }
                 }
             }
         });
@@ -616,13 +687,20 @@ async fn main() {
     let shutdown_signal = async {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate()
-        ).expect("Failed to install SIGTERM handler");
+        {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate()
+            ).expect("Failed to install SIGTERM handler");
 
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("SIGINT ontvangen"),
-            _ = sigterm.recv() => tracing::info!("SIGTERM ontvangen"),
+            tokio::select! {
+                _ = ctrl_c => tracing::info!("SIGINT ontvangen"),
+                _ = sigterm.recv() => tracing::info!("SIGTERM ontvangen"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+            tracing::info!("SIGINT ontvangen");
         }
     };
 
@@ -670,7 +748,8 @@ async fn main() {
                         let nn = token_ids.len() as f32;
                         for d in 0..DIM { avg_emb[d] /= nn; }
                         let mut ret = shared.retrieval.write().await;
-                        let summary = format!("[code:{}] {}", filename, &code[..code.len().min(200)]);
+                        let cut = (0..=code.len().min(200)).rev().find(|&i| code.is_char_boundary(i)).unwrap_or(0);
+                        let summary = format!("[code:{}] {}", filename, &code[..cut]);
                         ret.insert(&avg_emb, &summary);
                     }
                     let _ = respond.send(field_handle::TrainResult {
@@ -705,6 +784,23 @@ async fn main() {
                 FieldCommand::RunSelfFix { respond } => {
                     // v3.0: Self-modification loop — detect bottlenecks and deploy patches
                     let result = self_fix::run_self_fix(&field);
+                    let _ = respond.send(result);
+                }
+                FieldCommand::MergeWeights { snapshot, respond } => {
+                    // v3.1: Federated merge op het BEZITTENDE veld (compat-gated + finite-guards).
+                    // heal() na injectie ruimt eventuele extreme waarden op vóór de volgende tick.
+                    let result = match federation::is_compatible(&field, &snapshot) {
+                        Ok(()) => {
+                            let merged = federation::merge_weights(&mut field, &snapshot, 0.3);
+                            let healed = field.heal();
+                            tracing::info!(merged, healed, remote_tick = snapshot.tick, "MergeWeights toegepast op live veld");
+                            Ok(merged)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "MergeWeights geweigerd");
+                            Err(e)
+                        }
+                    };
                     let _ = respond.send(result);
                 }
             }
@@ -797,6 +893,9 @@ async fn main() {
             // v2.0: ArcSwap store — ZERO lock, ZERO wait, instant
             field_snapshot.store(Arc::new(field.clone()));
             vocab_snapshot.store(Arc::new(vocab.clone()));
+            // Keep shared.vocab RwLock fresh so graceful-shutdown save does not
+            // overwrite learned vocab with the boot-time clone (D1).
+            if let Ok(mut v) = shared.vocab.try_write() { *v = vocab.clone(); }
         }
 
         // v1.0: Broadcast status via watch
@@ -1224,8 +1323,7 @@ async fn main() {
                     let has_severe_gap = gaps.iter().any(|g| g.urgency > 0.7);
 
                     if has_severe_gap {
-                        let lucy_url = std::env::var("LUCY_PUBLIC_URL")
-                            .unwrap_or_else(|_| "https://lucy.world".to_string());
+                        let lucy_url = std::env::var("LUCY_PUBLIC_URL").unwrap_or_default();
                         for gap in gaps.iter().take(1) {
                             let concept_name = format!("concept_{}", gap.concept_idx);
                             let url = lucy_url.clone();
@@ -1424,13 +1522,8 @@ async fn main() {
 
             match action {
                 thinker::Action::Explore => {
-                    // Forceer exploratie bij volgende mogelijke tick
-                    // Door de tick counter op een explore-interval te zetten
-                    if tick % field.explore_interval != 0 {
-                        // Stel de veld-tick in zodat explore getriggerd wordt
-                        field.tick = (field.tick / field.explore_interval + 1) * field.explore_interval;
-                        tracing::info!(action = "explore", "Lucy kiest: nieuwe kennis zoeken");
-                    }
+                    // v3.1 ADR 0006 A5: keuze loggen, tick NIET manipuleren
+                    tracing::info!(action = "explore", "Lucy kiest: nieuwe kennis zoeken");
                 }
                 thinker::Action::Learn => {
                     if let Ok(mut replay) = shared.replay.try_write() {
@@ -1721,8 +1814,11 @@ async fn main() {
             for wd in &deltas {
                 if wd.point_id < field.points.len() && wd.coupling_idx < field.points[wd.point_id].couplings.len() {
                     // v2.6.2: NaN-guard — training thread kan NaN produceren via micro_ep
+                    // D2: delta additief toepassen (niet clobberen) met finite-guard
                     if wd.delta.is_finite() {
-                        field.points[wd.point_id].couplings[wd.coupling_idx].weight = wd.delta;
+                        let w = &mut field.points[wd.point_id].couplings[wd.coupling_idx].weight;
+                        let nw = *w + wd.delta;
+                        if nw.is_finite() { *w = nw; }
                     }
                 }
             }

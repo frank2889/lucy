@@ -1,5 +1,85 @@
 # Lucy Changelog
 
+## v3.1.0 (2026-08-26) — Runaway root-cause + hardening + headless/overal-draaien
+
+Grote onderhouds- en architectuurronde. Alle code-fixes zijn geverifieerd (adversarieel)
+en de workspace compileert schoon. **Niet live gevalideerd** — voor deploy hoort een
+fase-gewijze telemetry-check (zie projectregel 5/6). Deploy-verificatie is aan de mens.
+
+### Runaway root-cause eindelijk gediagnosticeerd (superseedt de v3.0.4/v3.0.5 clamps)
+De tension→1e30 explosie die v3.0.3–v3.0.5 alleen maskeerden, is nu bij de wortel opgelost.
+Root cause: in `compute_tension` was `error_var` een EMA van `(pred_error − free_energy)²`,
+terwijl `free_energy` zelf via de KL-term van `error_var` afhing. Dat is een kwadratische
+afbeelding `F_next ≈ C·F²` die de exponent élke tick verdubbelt (F, F², F⁴, …) → 1e30 in
+enkele ticks. De 1e6-clamp hielp niet omdat `error_var` zélf nooit geklemd werd. Fix:
+`error_var` tracked nu de begrensde prediction-error-magnitude zelf (standaard Friston-
+precisie), waardoor de positieve terugkoppeling verdwijnt. Twee locaties (compute.rs:471 en
+:1149) + `ev`-clamp `1e-6..1e4` als extra rem. Zie [ADR 0009](decisions/0009-tension-runaway-rootcause.md).
+
+### Beveiliging
+- **Kritiek:** `/sync`, `/feed-code`, `/admin/grow`, `/admin/self-fix`, `/debug/toggle_priors`
+  stonden op de PUBLIEKE router zonder auth (server bindt op alle interfaces). `/admin/self-fix`
+  triggert een binary-swap + container-restart. Nu achter `auth_middleware` (Bearer-token).
+- `execute_command`: shell-metateken-injectie voorbij de prefix-whitelist (via `sh -c`) geblokkeerd.
+- `modify_source`: path-traversal / absoluut-pad-escape gedicht (canonicalize + confinement);
+  `replace` → `replacen` + uniciteits-check tegen multi-site overschrijven.
+- SSRF-guard in de HTTP-client (blokkeert loopback/private/link-local + metadata-hosts).
+- `self_fix_handler`: blocking cargo-build/sleep verplaatst naar `spawn_blocking`.
+
+### Dataverlies-risico's
+- Graceful-shutdown overschreef geleerde vocab met een boot-time kopie — nu 50-tick-sync.
+- Training-thread clobberde live gewichten met stale absolute waarden — nu additieve deltas.
+- Totale-load-failure roteerde de oude backups weg vóór bootstrap — nu quarantaine in `data/corrupt/`.
+- crc-fallback nu gewired in vocab/explorer/replay/retrieval-load (was dode code → stille reset).
+- Atomische save: unieke tmp per save + `fsync` (crash-durable); crc-sidecar-race gedicht.
+- GitHub-backup: asset-upload-fouten propageren; crc-sidecar refresh bij pull-recovery.
+
+### Crash-panics op internet-input
+- UTF-8 byte-slice panics (feed-code, /ask RAG, poster HTML-lowercase, backup-body) char-safe gemaakt.
+- Non-finite perceptie-input (nan/inf) gefilterd; NaN-tension → chunk_size 0 → `windows(0)` panic gedicht.
+- Bounds-guards in consolidate_weights en attention tegen dangling snapshot-indices.
+
+### Cognitie
+- Vocab-eviction hergebruikt nu vrijgekomen slots (was no-op → onbegrensde groei); BPE-merges
+  gededupliceerd (was lineaire tokenize-slowdown); retrieval hit-tracking geactiveerd.
+- Zelf-groei krijgt een absoluut plafond; ADR 0006-A5 tick-overwrite-regressie hersteld.
+- adapt_dynamics: omgekeerde reanimatie-intervallen bij "dood" veld gedicht; eta-floor;
+  broadcast-flag als one-shot; spectral-radius-probe herstelt nu de volledige punt-staat.
+
+### Architectuur — headless, standalone, overal draaien
+- **Frontend verwijderd:** React-dashboard, vscode-extension en alle build-tooling weg.
+  Lucy is headless; alleen de JSON-API (`/telemetry`, `/ask`, `/sense`, `/feed`, …) blijft.
+- **Geen lokale deploy meer:** `deploy.sh`, `pull.sh`, `deploy-gpu.sh` verwijderd; single-server
+  hardcoding weg. Bouwen gebeurt op het platform (Render/Fly/Cloud Run bouwen de Dockerfile).
+- **Standalone / zero-config:** poort uit `PORT` (0.0.0.0, nooit 127.0.0.1/3000; fallback 8080),
+  `.env` optioneel, alle keys optioneel met fail-soft degradatie.
+- **Onsterfelijkheid overal:** boot herstelt de staat uit de GitHub-release-backup als er geen
+  lokale snapshot is (`pull_latest_from_github` was dode code, nu gewired) — zo overleeft Lucy
+  ephemeral/gratis hosts zonder persistente schijf. `render.yaml` als voorbeeld-platform.
+- CERN Open Data blijft (keyless publieke API) als kennisbron.
+
+### Capaciteits-meetlat (nieuw)
+
+Maakt "wordt Lucy slimmer over tijd?" meetbaar i.p.v. een gevoel. Bouwt op de bestaande
+audit-only probe-suite (`self_test.rs`, elke 5000 ticks → `data/self_test.jsonl`):
+- Een composiet-`score` (0..1) per probe: correctheid (kernwoord-overlap) + coherentie +
+  retrieval-similariteit + niet-fallback. Bewust een zwakke proxy — detecteert vooruitgang/
+  regressie in zelf-consistentie, geen algemene intelligentie.
+- Nieuw endpoint `GET /capability`: aggregeert de append-log tot per-batch gemiddelden en een
+  trend-helling (OLS). Helling > 0 = vooruitgang.
+
+### Federatie gehard (Track 3a — nog geen netwerk-uitrol)
+
+De federatie-code was grotendeels kapot/dood; deze ronde maakt hem correct en veilig:
+- `POST /sync` merge't nu via het command-kanaal in het BEZITTENDE veld (was: een transiënte
+  snapshot die de tick-loop elke ~50 ticks overschreef → geen enkel gewicht overleefde).
+- Compat-gate: merge wordt geweigerd tenzij DIM én puntenaantal matchen (zelfde snapshot-lijn).
+  Cross-topologie-merge zou (point_id, coupling_idx) op verschillende concepten middelen = corruptie.
+- Finite-guards + clamp + `heal()` na injectie tegen tension-runaway.
+- `GET /weights` staat nu achter auth (was publiek → modelexfiltratie).
+- Het volledige N-node netwerk (peer-registry + pull-loop) is UITGESTELD tot de meetlat aantoont
+  dat één node stabiel leert.
+
 ## v3.0.5 (2026-05-06) — Tension/free_energy clamp 1e6 (was f32::MAX/1e6 = 3.4e32)
 
 **Aanleiding:** Na v3.0.4 deploy: heal() werkte (140K + 85K corruptie geheald), maar tension explodeerde binnen één field_update-step opnieuw naar 4.2e30 (zichtbaar in heartbeat). Tick-loop bleef daarna hangen. Root cause: de bestaande clamps op compute.rs regel 508/520/1166/1248 stonden op `f32::MAX/1e6` (~3.4e32), bedoeld als anti-Inf laatste laag, niet als gedragsclamp. Daardoor kon tension binnen die clamp groeien tot 1e30+, ver buiten elk realistisch dynamisch bereik.

@@ -140,7 +140,9 @@ fn perceive_sensor(data: &[u8]) -> [f32; DIM] {
     for (i, part) in text.split(',').enumerate() {
         if i >= DIM { break; }
         if let Ok(val) = part.trim().parse::<f32>() {
-            phi[i] = val;
+            if val.is_finite() {
+                phi[i] = val;
+            }
         }
     }
 
@@ -166,15 +168,19 @@ fn perceive_json(data: &[u8]) -> [f32; DIM] {
             let target_dim = key_hash % DIM;
 
             if let Ok(val) = val_str.parse::<f32>() {
-                phi[target_dim] = val;
+                if val.is_finite() {
+                    phi[target_dim] = val;
+                }
             } else if val_str == "true" {
                 phi[target_dim] = 1.0;
             } else if val_str == "false" {
                 phi[target_dim] = 0.0;
             }
         } else if let Ok(val) = part.trim().parse::<f32>() {
-            phi[dim_idx % DIM] = val;
-            dim_idx += 1;
+            if val.is_finite() {
+                phi[dim_idx % DIM] = val;
+                dim_idx += 1;
+            }
         }
     }
 

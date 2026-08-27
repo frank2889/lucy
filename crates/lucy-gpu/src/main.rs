@@ -1,7 +1,7 @@
 //! # lucy-gpu — Remote GPU Compute Service
 //!
 //! Standalone server die op een Vast.ai GPU-machine draait.
-//! Lucy op DigitalOcean stuurt velddata → GPU rekent → stuurt resultaat terug.
+//! Lucy stuurt velddata → GPU rekent → stuurt resultaat terug.
 //!
 //! Endpoints:
 //!   POST /upload    — Upload volledige veldstaat naar GPU

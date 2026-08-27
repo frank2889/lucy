@@ -27,6 +27,7 @@ Agents en GPT-reviews beginnen met deze MAP, springen dan naar één specifiek b
 - [0006 — Goal-dedup + tick-manipulation + whitelist](decisions/0006-goal-dedup-tick-manipulation-whitelist.md) — v2.6.15, systeemhygiene: prevent spirals + enable self-modify
 - [0007 — Concept-driven goals](decisions/0007-concept-driven-goals.md) — v2.6.16, vrije wil: goals uit GNW-output
 - [0008 — Autonomous organism: epistemic awareness + immortality](decisions/0008-autonomous-organism.md) — v2.6.17, zelfbewustzijn + GitHub backup
+- [0009 — Tension-runaway root-cause](decisions/0009-tension-runaway-rootcause.md) — v3.1.0, error_var ontkoppeld van free_energy (breekt de kwadratische 1e30-explosie)
 
 ### Invariants
 - [Competitie-invariant](invariants/competition.md) — geen volledige activatie zonder competitie
@@ -35,6 +36,7 @@ Agents en GPT-reviews beginnen met deze MAP, springen dan naar één specifiek b
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — systeem-overzicht (root)
 - [CHANGELOG.md](CHANGELOG.md) — versie-per-versie samenvatting, linkt naar ADRs
 - [SNAPSHOT_MIGRATION.md](SNAPSHOT_MIGRATION.md) — schema-versioning regels
+- [RUNNING.md](RUNNING.md) — Lucy draaien: gratis 24/7 op een Oracle Always-Free VM (provider-agnostisch)
 - [HANDOFF.md](../HANDOFF.md) — overdrachts-document (root)
 
 ## Schrijfregels
