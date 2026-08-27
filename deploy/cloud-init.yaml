@@ -1,0 +1,69 @@
+#cloud-config
+# Lucy — generieke cloud-init (werkt op elke VM die cloud-init user-data ondersteunt:
+# Oracle Always-Free, AWS, GCP, Hetzner, …). Draait EENMALIG op de eerste boot en zet
+# Lucy volledig op: Docker installeren, repo clonen, container bouwen en starten.
+# Geen SSH nodig — je plakt dit als "user data" bij het aanmaken van de VM.
+#
+# Vul vóór gebruik de twee tokens in het bootstrap-script hieronder in:
+#   __GITHUB_TOKEN__     GitHub PAT — nodig voor de private repo + onsterfelijkheid (backup/herstel)
+#   __LUCY_API_TOKEN__   lang geheim voor admin/muterende endpoints (leeg = die endpoints geblokkeerd)
+#
+# LET OP — twee dingen die cloud-init NIET kan (blijven handmatig, eenmalig):
+#   1) Het cloud-account + de VM aanmaken (mens-gated).
+#   2) De CLOUD-firewall openen (bv. Oracle VCN Security List: ingress TCP 8080). Dit script
+#      opent alleen de firewall OP de VM (iptables), niet die van de cloud.
+
+package_update: true
+packages:
+  - git
+  - curl
+
+write_files:
+  - path: /opt/lucy-bootstrap.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ===== VUL DIT IN =====
+      GITHUB_TOKEN="__GITHUB_TOKEN__"
+      LUCY_API_TOKEN="__LUCY_API_TOKEN__"
+      REPO="frank2889/lucy"
+      PORT="8080"
+      # ======================
+
+      echo "[lucy] Docker installeren…"
+      if ! command -v docker >/dev/null 2>&1; then
+        curl -fsSL https://get.docker.com | sh
+      fi
+      systemctl enable --now docker
+
+      echo "[lucy] Firewall op de VM openen (poort ${PORT})…"
+      iptables -I INPUT 6 -m state --state NEW -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || true
+      if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save || true; fi
+
+      echo "[lucy] Repo clonen…"
+      cd /opt
+      rm -rf lucy
+      if [ -n "${GITHUB_TOKEN}" ] && [ "${GITHUB_TOKEN}" != "__GITHUB_TOKEN__" ]; then
+        git clone "https://${GITHUB_TOKEN}@github.com/${REPO}.git" lucy
+      else
+        git clone "https://github.com/${REPO}.git" lucy   # werkt alleen als de repo publiek is
+      fi
+      cd lucy
+
+      echo "[lucy] .env schrijven (alles fail-soft; leeg = uit)…"
+      {
+        [ "${GITHUB_TOKEN}" != "__GITHUB_TOKEN__" ] && echo "GITHUB_TOKEN=${GITHUB_TOKEN}"
+        [ "${LUCY_API_TOKEN}" != "__LUCY_API_TOKEN__" ] && echo "LUCY_API_TOKEN=${LUCY_API_TOKEN}"
+        echo "RUST_LOG=info"
+        echo "PORT=${PORT}"
+      } > .env
+
+      echo "[lucy] Container bouwen + starten (eerste build op ARM ~10-20 min)…"
+      docker compose up -d --build
+
+      echo "[lucy] Klaar. Volg met: docker compose -f /opt/lucy/docker-compose.yml logs -f"
+
+runcmd:
+  - /opt/lucy-bootstrap.sh >> /var/log/lucy-bootstrap.log 2>&1
