@@ -1,5 +1,15 @@
 # Lucy Changelog
 
+## v3.1.5 (2026-08-28) — Gated zelftuning (zelf-verbetering fase 2)
+
+Fase 2: de zelf-verbeterlus is rond. Lucy's al-actieve lambda/alpha/beta-tuning (`self_modify::tune_hyperparameters`) is nu GEMETEN en REVERSIBEL. Strikt veiliger dan voorheen — het voegt een terugdraai-wachter toe aan een gedrag dat al draaide; het kan alleen een aanpassing die schaadde ongedaan maken.
+
+- Bij een tuning wordt een fitness-baseline vastgelegd (satisfaction hoog + frustration laag = veld leert beter en houdt controle).
+- Na een probatie-venster (300 ticks) toetst `review_pending_tune` de fitness: merkbaar gezakt (met marge tegen tick-ruis) -> parameter teruggedraaid; anders behouden. Elk oordeel gaat naar `data/modifications.log` + history.
+- Gewired in de tick-loop; unit-test dekt de terugdraai-beslissing.
+
+Bouwt op fase 1 (meten, v3.1.3): ze verbetert zichzelf en houdt alleen wat aantoonbaar niet schaadt. Rust-niveau zelf-herschrijven blijft gated en later (projectregel 5).
+
 ## v3.1.4 (2026-08-28) — Fundament eigen taal-decoder (lucy-lm), bewust niet gewired
 
 Fundament voor Lucy's eigen, zelf-getrainde taal-mond (Visie A: het veld denkt, een decoder verwoordt het). Uitsluitend in de `lucy-lm`-crate; BEWUST niet gewired in lucy-core (candle is zwaar en zou de build en het levende veld op een kleine host schaden). Trainen + aanhaken is een volgende fase, gated op een groter gratis host.

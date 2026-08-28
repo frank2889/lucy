@@ -78,6 +78,18 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "mv ",      // v2.6.15: enable restart_self binary swap
 ];
 
+/// Probatie-venster (ticks) waarna een tuning wordt getoetst en evt. teruggedraaid.
+const TUNE_PROBATION_TICKS: u64 = 300;
+
+/// Fase 2: een toegepaste tuning die nog op fitness getoetst moet worden.
+#[derive(Clone)]
+struct PendingTune {
+    param: String,
+    old_value: f32,
+    applied_tick: u64,
+    baseline_fitness: f32,
+}
+
 /// Lucy's zelf-aanpassingssysteem
 pub struct SelfModifier {
     /// Pad naar Lucy's source code
@@ -90,6 +102,8 @@ pub struct SelfModifier {
     last_modification_tick: u64,
     /// Opeenvolgende compilatie-failures — kill switch na 3
     pub consecutive_failures: u32,
+    /// Fase 2: een toegepaste tuning die nog op veld-fitness getoetst wordt.
+    pending: Option<PendingTune>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -109,6 +123,7 @@ impl SelfModifier {
             cooldown_ticks: 50_000, // overridden by set_cooldown_from_field()
             last_modification_tick: 0,
             consecutive_failures: 0,
+            pending: None,
         }
     }
 
@@ -159,6 +174,10 @@ impl SelfModifier {
             .map(|&id| field.points[id as usize].tension)
             .sum::<f32>() / n;
 
+        // Fase 2: fitness-baseline VOOR de aanpassing (satisfaction hoog = model verbetert,
+        // frustration laag = controle). review_pending_tune toetst de aanpassing hieraan.
+        let baseline_fitness = avg_satisfaction - 0.5 * avg_frustration;
+
         // Dynamic thresholds derived from field parameters
         let err_rate = field.error_tracking_rate;
         // Dynamic: frustration threshold = growth_threshold * 0.2 (was: hardcoded 0.1)
@@ -188,6 +207,7 @@ impl SelfModifier {
             if (new_lambda - old_lambda).abs() > 0.001 {
                 field.lambda = new_lambda;
                 self.last_modification_tick = field.tick;
+                self.pending = Some(PendingTune { param: "lambda".to_string(), old_value: old_lambda, applied_tick: field.tick, baseline_fitness });
 
                 let modification = Modification::Hyperparameter {
                     name: "lambda".to_string(),
@@ -211,6 +231,7 @@ impl SelfModifier {
             if (new_alpha - old_alpha).abs() > 0.0001 {
                 field.alpha = new_alpha;
                 self.last_modification_tick = field.tick;
+                self.pending = Some(PendingTune { param: "alpha".to_string(), old_value: old_alpha, applied_tick: field.tick, baseline_fitness });
 
                 let modification = Modification::Hyperparameter {
                     name: "alpha".to_string(),
@@ -231,6 +252,7 @@ impl SelfModifier {
             if (new_beta - old_beta).abs() > 0.001 {
                 field.beta = new_beta;
                 self.last_modification_tick = field.tick;
+                self.pending = Some(PendingTune { param: "beta".to_string(), old_value: old_beta, applied_tick: field.tick, baseline_fitness });
 
                 let modification = Modification::Hyperparameter {
                     name: "beta".to_string(),
@@ -248,6 +270,63 @@ impl SelfModifier {
         }
 
         None
+    }
+
+    /// Fase 2: fitness van het veld (goedkoop, bounded): satisfaction hoog + frustration laag.
+    /// satisfaction = -dF/dt (model verbetert = beloning); frustration = verlies aan controle.
+    fn field_fitness(field: &Field) -> f32 {
+        let n = field.active_set.len();
+        if n == 0 { return 0.0; }
+        let nf = n as f32;
+        let sat: f32 = field.active_set.iter().map(|&id| field.points[id as usize].satisfaction).sum::<f32>() / nf;
+        let frus: f32 = field.active_set.iter().map(|&id| field.points[id as usize].frustration).sum::<f32>() / nf;
+        sat - 0.5 * frus
+    }
+
+    /// Beslis of een tuning teruggedraaid moet worden: alleen als de fitness merkbaar zakte
+    /// (met marge tegen tick-ruis). Pure functie -> testbaar.
+    fn should_revert(baseline: f32, current: f32, margin: f32) -> bool {
+        current < baseline - margin
+    }
+
+    /// Fase 2: toets een eerder toegepaste tuning na het probatie-venster. Beter of gelijk
+    /// gebleven -> behouden. Merkbaar slechter -> parameter terugdraaien. Strikt veiliger dan
+    /// ongetoetste tuning: het kan alleen een aanpassing die schaadde ongedaan maken.
+    pub fn review_pending_tune(&mut self, field: &mut Field) -> Option<String> {
+        let pending = self.pending.clone()?;
+        if field.tick < pending.applied_tick + TUNE_PROBATION_TICKS {
+            return None; // nog in probatie
+        }
+        let current = Self::field_fitness(field);
+        let margin = 0.02; // hysterese tegen tick-ruis
+        let reverted = Self::should_revert(pending.baseline_fitness, current, margin);
+        if reverted {
+            match pending.param.as_str() {
+                "lambda" => field.lambda = pending.old_value,
+                "alpha" => field.alpha = pending.old_value,
+                "beta" => field.beta = pending.old_value,
+                _ => {}
+            }
+        }
+        let verdict = format!(
+            "tune {} {}: fitness {:.3} -> {:.3}",
+            pending.param,
+            if reverted { "teruggedraaid" } else { "behouden" },
+            pending.baseline_fitness, current
+        );
+        let record = ModificationRecord {
+            tick: field.tick,
+            kind: "tune_review".to_string(),
+            description: verdict.clone(),
+            result: if reverted { "reverted".to_string() } else { "kept".to_string() },
+        };
+        self.history.push(record);
+        let log_path = Path::new("data/modifications.log");
+        let line = format!("[tick {}] tune_review — {}\n", field.tick, verdict);
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        self.pending = None;
+        Some(verdict)
     }
 
     /// Lucy leest haar eigen source code en kan het aanpassen
@@ -503,5 +582,19 @@ impl SelfModifier {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_draait_alleen_terug_bij_merkbare_daling() {
+        let margin = 0.02;
+        assert!(!SelfModifier::should_revert(0.50, 0.50, margin), "gelijk -> behouden");
+        assert!(!SelfModifier::should_revert(0.50, 0.49, margin), "ruis binnen marge -> behouden");
+        assert!(SelfModifier::should_revert(0.50, 0.40, margin), "merkbaar slechter -> terugdraaien");
+        assert!(!SelfModifier::should_revert(0.50, 0.60, margin), "beter -> behouden");
     }
 }

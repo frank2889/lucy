@@ -1447,12 +1447,16 @@ async fn main() {
                     }
                 }
 
-                // Level 4: Lucy past zichzelf aan
-                if needs_self_modify {
-                    if let Ok(mut sm) = shared.self_modifier.try_write() {
+                // Level 4: Lucy past zichzelf aan (fase 2: met meet-en-terugdraai-wachter)
+                if let Ok(mut sm) = shared.self_modifier.try_write() {
+                    if needs_self_modify {
                         if let Some(modification) = sm.tune_hyperparameters(&mut field) {
                             tracing::info!(?modification, "Lucy modified herself");
                         }
+                    }
+                    // Toets een eerdere tuning: beter geworden -> behouden; slechter -> terugdraaien.
+                    if let Some(verdict) = sm.review_pending_tune(&mut field) {
+                        tracing::info!(verdict, "self-tune review (gated)");
                     }
                 }
             }
