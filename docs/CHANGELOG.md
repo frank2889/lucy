@@ -1,5 +1,15 @@
 # Lucy Changelog
 
+## v3.1.3 (2026-08-28) — Meet-fundament: efficientie + kwaliteit meetbaar (zelf-verbetering fase 1)
+
+Fase 1 van gated zelf-verbetering: het meet-fundament. Puur meten, geen veld-dynamica gewijzigd (projectregel 5).
+
+- Elke self-test-meetbatch legt nu een resource-momentopname vast (tokens_processed, pages_read, n_points, n_couplings, vocab_size, avg_free_energy) naast de capability-score, zodat "resultaat per resource" berekenbaar wordt.
+- `/capability` rapporteert naast kwaliteit (score-trend) nu ook efficientie: capability-winst per 1k tokens en per 1k ticks, met een trend (slope > 0 = meer resultaat uit minder, over tijd). De aggregatie is verhuisd naar de pure, geteste `self_test::capability_report`.
+- Unit-tests dekken de efficientie-berekening en lege invoer.
+
+Dit is de meetlat waaraan een volgende fase (gated parameter-zelftuning) elke zelf-aanpassing toetst: hou alleen wat aantoonbaar beter of efficienter is, draai de rest terug.
+
 ## v3.1.2 (2026-08-28) — Gratis-forever invariant + deploy-portabiliteit
 
 Governance- en deploy-ronde (geen cognitie-wijziging).

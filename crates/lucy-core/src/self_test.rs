@@ -92,6 +92,7 @@ pub fn format_jsonl_row(
     question_id: usize,
     question: &str,
     result: &QueryResult,
+    res: &ResourceSnapshot,
 ) -> String {
     let prov_label = match result.provenance {
         query::PROV_FALLBACK => "fallback",
@@ -120,6 +121,14 @@ pub fn format_jsonl_row(
         "think_rounds": result.think_rounds,
         // v3.1 capaciteits-score (0..1) — zie score_probe voor de samenstelling
         "score": score,
+        // fase-1 meet-fundament: resource-context zodat efficientie (resultaat per resource)
+        // berekenbaar wordt. Alle rijen in dezelfde batch delen deze waarden.
+        "tokens_processed": res.tokens_processed,
+        "pages_read": res.pages_read,
+        "n_points": res.n_points,
+        "n_couplings": res.n_couplings,
+        "vocab_size": res.vocab_size,
+        "avg_free_energy": res.avg_free_energy,
         "synthetic_audit": true,
     }).to_string()
 }
@@ -150,10 +159,11 @@ pub fn run_batch_audit_only(
     retrieval: &RetrievalStore,
 ) -> Vec<(usize, String)> {
     let mut field_copy = field.clone();
+    let res = ResourceSnapshot::capture(field, vocab);
     let mut results = Vec::with_capacity(PROBE_QUESTIONS.len());
     for (i, q) in PROBE_QUESTIONS.iter().enumerate() {
         let result = run_probe(&mut field_copy, vocab, retrieval, q);
-        let row = format_jsonl_row(field.tick, i, q, &result);
+        let row = format_jsonl_row(field.tick, i, q, &result, &res);
         append_jsonl(&row);
         results.push((i, row));
     }
@@ -163,4 +173,177 @@ pub fn run_batch_audit_only(
         "self_test: batch audit-only afgerond"
     );
     results
+}
+
+/// Resource-momentopname bij een meet-batch: koppelt kwaliteit aan verbruikte middelen,
+/// zodat efficientie (resultaat per resource) berekenbaar wordt. Puur meten, geen effect.
+#[derive(Clone, Copy)]
+pub struct ResourceSnapshot {
+    pub tokens_processed: u64,
+    pub pages_read: u64,
+    pub n_points: u64,
+    pub n_couplings: u64,
+    pub vocab_size: u64,
+    pub avg_free_energy: f32,
+}
+
+impl ResourceSnapshot {
+    pub fn capture(field: &Field, vocab: &Vocabulary) -> Self {
+        let n_couplings: usize = field.points.iter().map(|p| p.couplings.len()).sum();
+        Self {
+            tokens_processed: field.tokens_processed,
+            pages_read: field.pages_read,
+            n_points: field.points.len() as u64,
+            n_couplings: n_couplings as u64,
+            vocab_size: vocab.vocab_size() as u64,
+            avg_free_energy: field.avg_free_energy,
+        }
+    }
+}
+
+/// OLS-helling van een reeks (x = index). Trend-indicator.
+fn slope(ys: &[f64]) -> f64 {
+    let n = ys.len();
+    if n < 2 { return 0.0; }
+    let nf = n as f64;
+    let sum_x: f64 = (0..n).map(|i| i as f64).sum();
+    let sum_y: f64 = ys.iter().sum();
+    let sum_xy: f64 = ys.iter().enumerate().map(|(i, y)| i as f64 * y).sum();
+    let sum_xx: f64 = (0..n).map(|i| (i as f64) * (i as f64)).sum();
+    let denom = nf * sum_xx - sum_x * sum_x;
+    if denom.abs() < 1e-9 { return 0.0; }
+    (nf * sum_xy - sum_x * sum_y) / denom
+}
+
+fn trend_label(s: f64) -> &'static str {
+    if s > 1e-6 { "stijgend" } else if s < -1e-6 { "dalend" } else { "vlak" }
+}
+
+/// Reduceer data/self_test.jsonl tot KWALITEIT (mean_score + trend) EN EFFICIENTIE
+/// (capability-winst per verbruikte resource + trend). Zo worden "wordt Lucy beter?" en
+/// "haalt ze meer uit minder?" meetbare getallen. Puur lezen, geen side-effects.
+/// Dit is het meet-fundament waarop gated zelf-verbetering (latere fase) bouwt.
+pub fn capability_report(content: &str) -> serde_json::Value {
+    struct Batch {
+        tick: u64, n: u32, score_sum: f64, fallback: u32, self_ret: u32,
+        tokens: u64, pages: u64, points: u64, couplings: u64, vocab: u64, free_energy: f64,
+    }
+    let mut batches: Vec<Batch> = Vec::new();
+    for line in content.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let tick = v.get("tick").and_then(|x| x.as_u64()).unwrap_or(0);
+        let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let fallback = v.get("fallback").and_then(|x| x.as_bool()).unwrap_or(false);
+        let prov = v.get("provenance").and_then(|x| x.as_str()).unwrap_or("");
+        let same = batches.last().map(|b| b.tick == tick).unwrap_or(false);
+        if !same {
+            batches.push(Batch {
+                tick, n: 0, score_sum: 0.0, fallback: 0, self_ret: 0,
+                tokens: v.get("tokens_processed").and_then(|x| x.as_u64()).unwrap_or(0),
+                pages: v.get("pages_read").and_then(|x| x.as_u64()).unwrap_or(0),
+                points: v.get("n_points").and_then(|x| x.as_u64()).unwrap_or(0),
+                couplings: v.get("n_couplings").and_then(|x| x.as_u64()).unwrap_or(0),
+                vocab: v.get("vocab_size").and_then(|x| x.as_u64()).unwrap_or(0),
+                free_energy: v.get("avg_free_energy").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            });
+        }
+        let b = batches.last_mut().unwrap();
+        b.n += 1;
+        b.score_sum += score;
+        if fallback { b.fallback += 1; }
+        if prov == "retrieval_self" { b.self_ret += 1; }
+    }
+
+    let mut series: Vec<serde_json::Value> = Vec::with_capacity(batches.len());
+    let mut eff_tokens_series: Vec<f64> = Vec::new();
+    let mut eff_ticks_series: Vec<f64> = Vec::new();
+    for i in 0..batches.len() {
+        let b = &batches[i];
+        let n = b.n.max(1) as f64;
+        let mean_score = b.score_sum / n;
+        let mut eff_tokens: Option<f64> = None;
+        let mut eff_ticks: Option<f64> = None;
+        if i > 0 {
+            let p = &batches[i - 1];
+            let d_score = mean_score - (p.score_sum / p.n.max(1) as f64);
+            let d_tokens = b.tokens.saturating_sub(p.tokens);
+            let d_ticks = b.tick.saturating_sub(p.tick);
+            if d_tokens > 0 {
+                let e = d_score / d_tokens as f64 * 1000.0; // capability-winst per 1k tokens
+                eff_tokens = Some(e);
+                eff_tokens_series.push(e);
+            }
+            if d_ticks > 0 {
+                let e = d_score / d_ticks as f64 * 1000.0; // capability-winst per 1k ticks
+                eff_ticks = Some(e);
+                eff_ticks_series.push(e);
+            }
+        }
+        series.push(serde_json::json!({
+            "tick": b.tick,
+            "mean_score": mean_score,
+            "fallback_rate": b.fallback as f64 / n,
+            "retrieval_self_rate": b.self_ret as f64 / n,
+            "n": b.n,
+            "tokens_processed": b.tokens,
+            "pages_read": b.pages,
+            "n_points": b.points,
+            "n_couplings": b.couplings,
+            "vocab_size": b.vocab,
+            "avg_free_energy": b.free_energy,
+            "eff_score_per_1k_tokens": eff_tokens,
+            "eff_score_per_1k_ticks": eff_ticks,
+        }));
+    }
+
+    let score_ys: Vec<f64> = batches.iter().map(|b| b.score_sum / b.n.max(1) as f64).collect();
+    let score_slope = slope(&score_ys);
+    let eff_slope = slope(&eff_tokens_series);
+    let latest = series.last().cloned().unwrap_or(serde_json::Value::Null);
+    let tail: Vec<serde_json::Value> = series.iter().rev().take(240).cloned().collect::<Vec<_>>()
+        .into_iter().rev().collect();
+
+    serde_json::json!({
+        "batches_total": batches.len(),
+        "quality": {
+            "score_slope_per_batch": score_slope,
+            "trend": trend_label(score_slope),
+        },
+        "efficiency": {
+            "note": "capability-score per verbruikte resource; slope>0 = meer resultaat uit minder over tijd",
+            "latest_score_per_1k_tokens": eff_tokens_series.last().copied(),
+            "latest_score_per_1k_ticks": eff_ticks_series.last().copied(),
+            "efficiency_slope": eff_slope,
+            "efficiency_trend": trend_label(eff_slope),
+        },
+        "latest": latest,
+        "series": tail,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_report_meet_efficientie() {
+        // Twee batches, elk 1 probe: score 0.4 -> 0.6 (d=0.2) over 10000 tokens (d=10000).
+        // Verwachte efficientie = 0.2 / 10000 * 1000 = 0.02 capability per 1k tokens.
+        let jsonl = concat!(
+            r#"{"tick":5000,"score":0.4,"fallback":false,"provenance":"field_generated","tokens_processed":10000,"pages_read":5,"n_points":8000,"n_couplings":100000,"vocab_size":3000,"avg_free_energy":100.0}"#, "\n",
+            r#"{"tick":10000,"score":0.6,"fallback":false,"provenance":"field_generated","tokens_processed":20000,"pages_read":10,"n_points":8100,"n_couplings":110000,"vocab_size":3200,"avg_free_energy":90.0}"#, "\n",
+        );
+        let rep = capability_report(jsonl);
+        assert_eq!(rep["batches_total"], 2);
+        let eff = rep["efficiency"]["latest_score_per_1k_tokens"].as_f64().unwrap();
+        assert!((eff - 0.02).abs() < 1e-9, "eff={}", eff);
+        assert!(rep["quality"]["score_slope_per_batch"].as_f64().unwrap() > 0.0, "kwaliteit hoort te stijgen");
+        assert_eq!(rep["efficiency"]["efficiency_trend"], "vlak"); // slechts 1 efficientie-punt -> geen trend
+    }
+
+    #[test]
+    fn capability_report_leeg() {
+        let rep = capability_report("");
+        assert_eq!(rep["batches_total"], 0);
+    }
 }

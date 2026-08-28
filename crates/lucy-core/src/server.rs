@@ -1379,18 +1379,8 @@ async fn self_history_handler(State(_state): State<SharedState>) -> Json<Value> 
 }
 
 /// Ordinary-least-squares helling van y over de index 0..n. 0 bij < 2 punten.
-fn ols_slope(ys: &[f64]) -> f64 {
-    let n = ys.len();
-    if n < 2 { return 0.0; }
-    let nf = n as f64;
-    let sum_x: f64 = (0..n).map(|i| i as f64).sum();
-    let sum_y: f64 = ys.iter().sum();
-    let sum_xy: f64 = ys.iter().enumerate().map(|(i, y)| i as f64 * y).sum();
-    let sum_xx: f64 = (0..n).map(|i| (i as f64) * (i as f64)).sum();
-    let denom = nf * sum_xx - sum_x * sum_x;
-    if denom.abs() < 1e-9 { return 0.0; }
-    (nf * sum_xy - sum_x * sum_y) / denom
-}
+// ols_slope + de capability-aggregatie zijn verhuisd naar self_test::capability_report
+// (een pure, testbare functie die nu ook efficientie berekent).
 
 /// /capability — reduceert data/self_test.jsonl tot per-batch aggregaten + trend-helling.
 /// Maakt "wordt Lucy slimmer over tijd?" een meetbaar getal (score_slope > 0 = vooruitgang)
@@ -1400,51 +1390,10 @@ async fn capability_handler(State(_state): State<SharedState>) -> Json<Value> {
     if !path.exists() {
         return Json(json!({"batches_total": 0, "series": [], "note": "no self_test.jsonl yet"}));
     }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"error": format!("{}", e)})),
-    };
-    // Groepeer per batch (opeenvolgende rijen met dezelfde tick). Append-log is chronologisch.
-    struct Acc { tick: u64, n: u32, score_sum: f64, fallback: u32, self_ret: u32 }
-    let mut batches: Vec<Acc> = Vec::new();
-    for line in content.lines() {
-        let v: Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
-        let tick = v.get("tick").and_then(|x| x.as_u64()).unwrap_or(0);
-        let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let fallback = v.get("fallback").and_then(|x| x.as_bool()).unwrap_or(false);
-        let prov = v.get("provenance").and_then(|x| x.as_str()).unwrap_or("");
-        let same = batches.last().map(|b| b.tick == tick).unwrap_or(false);
-        if !same {
-            batches.push(Acc { tick, n: 0, score_sum: 0.0, fallback: 0, self_ret: 0 });
-        }
-        let b = batches.last_mut().unwrap();
-        b.n += 1;
-        b.score_sum += score;
-        if fallback { b.fallback += 1; }
-        if prov == "retrieval_self" { b.self_ret += 1; }
+    match std::fs::read_to_string(path) {
+        Ok(content) => Json(crate::self_test::capability_report(&content)),
+        Err(e) => Json(json!({"error": format!("{}", e)})),
     }
-    let series: Vec<Value> = batches.iter().map(|b| {
-        let n = b.n.max(1) as f64;
-        json!({
-            "tick": b.tick,
-            "mean_score": b.score_sum / n,
-            "fallback_rate": b.fallback as f64 / n,
-            "retrieval_self_rate": b.self_ret as f64 / n,
-            "n": b.n,
-        })
-    }).collect();
-    let ys: Vec<f64> = batches.iter().map(|b| b.score_sum / b.n.max(1) as f64).collect();
-    let slope = ols_slope(&ys);
-    let latest = series.last().cloned().unwrap_or(Value::Null);
-    let tail: Vec<Value> = series.iter().rev().take(240).cloned().collect::<Vec<_>>()
-        .into_iter().rev().collect();
-    Json(json!({
-        "batches_total": batches.len(),
-        "score_slope_per_batch": slope,
-        "trend": if slope > 1e-4 { "stijgend" } else if slope < -1e-4 { "dalend" } else { "vlak" },
-        "latest": latest,
-        "series": tail,
-    }))
 }
 
 /// /retrieval_metrics — cache-vs-brein bewijsmetrics
