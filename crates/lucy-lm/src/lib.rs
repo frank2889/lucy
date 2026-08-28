@@ -1,6 +1,8 @@
 pub mod decoder;
+pub mod trainer;
 
 pub use decoder::{PhiDecoder, D_PHI, D_HIDDEN, VOCAB_SIZE};
+pub use trainer::LmTrainer;
 
 /// Status van Lucy's decoder/LM component.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

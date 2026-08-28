@@ -29,91 +29,106 @@ impl PhiDecoder {
         self.fc2.forward(&h)
     }
 
-    /// Genereer N tokens autoregressief gegeven output-regio phi's.
-    pub fn generate(
+    /// Decodeer een GEGEVEN reeks veld-phi's naar tokens (greedy/argmax). Deterministisch.
+    /// Eerlijk model: het VELD levert de phi's, de decoder benoemt elke phi. De oude
+    /// `generate` mockte de volgende phi met ruis (verzon dus zijn eigen "gedachten") —
+    /// dat is verwijderd; echte autoregressie hoort door het veld gedreven te worden.
+    pub fn decode_greedy(&self, phis: &[[f32; D_PHI]]) -> Result<Vec<u32>> {
+        if phis.is_empty() { return Ok(vec![]); }
+        let seq = phis.len();
+        let flat: Vec<f32> = phis.iter().flat_map(|p| p.iter().copied()).collect();
+        let x = Tensor::from_vec(flat, (seq, D_PHI), &Device::Cpu)?;
+        let logits = self.forward(&x)?; // [seq, VOCAB_SIZE]
+        let ids = logits.argmax(candle_core::D::Minus1)?; // [seq]
+        Ok(ids.to_vec1::<u32>()?)
+    }
+
+    /// Decodeer een gegeven reeks phi's met temperature + nucleus (top-p) sampling.
+    /// Deterministisch gegeven `seed` (reproduceerbaar en testbaar).
+    pub fn decode_sampled(
         &self,
-        output_phis: &[[f32; D_PHI]],
-        max_tokens: usize,
+        phis: &[[f32; D_PHI]],
         temperature: f32,
+        top_p: f32,
+        seed: u64,
     ) -> Result<Vec<u32>> {
-        let device = Device::Cpu;
-        let mut tokens = Vec::new();
-        let mut phi_history = output_phis.to_vec();
-
-        for step in 0..max_tokens {
-            // Laatste phi vector
-            let latest_phi = phi_history.last().ok_or_else(|| {
-                candle_core::Error::Msg("empty phi history".to_string())
-            })?;
-
-            // Convert to tensor [1, 256]
-            let phi_tensor = Tensor::new(&[*latest_phi], &device)?.reshape((1, D_PHI))?;
-
-            // Forward pass
-            let logits = self.forward(&phi_tensor)?;
-            let logits = logits.squeeze(0)?; // [VOCAB_SIZE]
-
-            // Temperature scaling
-            let logits = if (temperature - 1.0).abs() > 1e-6 {
-                let temp_t = Tensor::new(&[temperature], &device)?;
-                logits.broadcast_div(&temp_t)?
-            } else {
-                logits
-            };
-
-            // Top-p sampling
-            let token = sample_nucleus(&logits, 0.9)?;
-            tokens.push(token);
-
-            // Simple mock: append small noise to phi for next iteration
-            let mut next_phi = *latest_phi;
-            for i in 0..D_PHI {
-                next_phi[i] += ((step as f32) * 0.001) - 0.0005;
+        let mut out = Vec::with_capacity(phis.len());
+        let mut s = seed;
+        for phi in phis {
+            let x = Tensor::from_vec(phi.to_vec(), (1, D_PHI), &Device::Cpu)?;
+            let mut logits = self.forward(&x)?.squeeze(0)?; // [VOCAB_SIZE]
+            if temperature > 1e-6 && (temperature - 1.0).abs() > 1e-6 {
+                let t = Tensor::new(&[temperature], &Device::Cpu)?;
+                logits = logits.broadcast_div(&t)?;
             }
-            phi_history.push(next_phi);
-
-            if phi_history.len() > 512 {
-                phi_history.remove(0);
-            }
+            // LCG-advance zodat elk token een eigen (deterministische) trekking krijgt
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            out.push(sample_nucleus(&logits, top_p, s)?);
         }
-
-        Ok(tokens)
+        Ok(out)
     }
 }
 
-/// Top-p (nucleus) sampling: keep top tokens that account for cumulative probability p.
-fn sample_nucleus(logits: &Tensor, top_p: f32) -> Result<u32> {
+/// Top-p (nucleus) sampling: houd de kleinste kop-set tokens die samen kans `top_p` dekken,
+/// en trek daaruit PROPORTIONEEL aan waarschijnlijkheid (de oude versie trok uniform binnen de
+/// nucleus — dat is fout). Deterministisch gegeven `rand_u64`.
+fn sample_nucleus(logits: &Tensor, top_p: f32, rand_u64: u64) -> Result<u32> {
     let logits_vec = logits.to_vec1::<f32>()?;
-
-    // Softmax
     let max_logit = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp_logits: Vec<f32> = logits_vec.iter().map(|&x| (x - max_logit).exp()).collect();
     let sum_exp: f32 = exp_logits.iter().sum();
     let probs: Vec<f32> = exp_logits.iter().map(|&x| x / sum_exp).collect();
 
-    // Sort by probability (descending)
     let mut indices: Vec<usize> = (0..probs.len()).collect();
     indices.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Cumulative probability
     let mut cumsum = 0.0;
-    let mut valid_indices = vec![];
+    let mut nucleus: Vec<usize> = Vec::new();
     for &idx in &indices {
         cumsum += probs[idx];
-        valid_indices.push(idx);
-        if cumsum >= top_p {
-            break;
-        }
+        nucleus.push(idx);
+        if cumsum >= top_p { break; }
+    }
+    if nucleus.is_empty() { return Ok(indices[0] as u32); }
+
+    // Proportioneel trekken binnen de nucleus
+    let mass: f32 = nucleus.iter().map(|&i| probs[i]).sum();
+    let r = (rand_u64 as f64 / u64::MAX as f64) as f32 * mass;
+    let mut acc = 0.0;
+    for &idx in &nucleus {
+        acc += probs[idx];
+        if acc >= r { return Ok(idx as u32); }
+    }
+    Ok(*nucleus.last().unwrap() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_nn::VarMap;
+    use candle_core::DType;
+
+    fn build() -> PhiDecoder {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        PhiDecoder::new(vb).unwrap()
     }
 
-    // Sample uniformly from valid_indices
-    if valid_indices.is_empty() {
-        return Ok(indices[0] as u32);
+    #[test]
+    fn forward_vorm_klopt() {
+        let d = build();
+        let x = Tensor::from_vec(vec![0.1f32; D_PHI], (1, D_PHI), &Device::Cpu).unwrap();
+        let logits = d.forward(&x).unwrap();
+        assert_eq!(logits.dims(), &[1, VOCAB_SIZE]);
     }
-    let sampled_idx = valid_indices[(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as usize)
-        % valid_indices.len()];
-    Ok(sampled_idx as u32)
+
+    #[test]
+    fn decode_greedy_geldig_en_deterministisch() {
+        let d = build();
+        let phis = vec![[0.2f32; D_PHI], [-0.3f32; D_PHI]];
+        let ids = d.decode_greedy(&phis).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|&t| (t as usize) < VOCAB_SIZE));
+        assert_eq!(ids, d.decode_greedy(&phis).unwrap());
+    }
 }

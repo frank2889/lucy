@@ -1,5 +1,13 @@
 # Lucy Changelog
 
+## v3.1.4 (2026-08-28) — Fundament eigen taal-decoder (lucy-lm), bewust niet gewired
+
+Fundament voor Lucy's eigen, zelf-getrainde taal-mond (Visie A: het veld denkt, een decoder verwoordt het). Uitsluitend in de `lucy-lm`-crate; BEWUST niet gewired in lucy-core (candle is zwaar en zou de build en het levende veld op een kleine host schaden). Trainen + aanhaken is een volgende fase, gated op een groter gratis host.
+
+- `PhiDecoder`: de neppe `generate()` (verzon toekomstige phi's met ruis) vervangen door eerlijke `decode_greedy` / `decode_sampled` — het veld levert de phi's, de decoder benoemt elke. Nucleus-sampling nu proportioneel (was uniform) en deterministisch per seed.
+- Nieuwe `LmTrainer`: cross-entropy + SGD + `train_step` + `save`/`load`, zelf-supervised op (phi -> token)-paren.
+- Unit-tests bewijzen dat het leert (loss daalt, greedy voorspelt na training het target). Detail: die run kostte ~15 min in debug op CPU — concreet bewijs dat zelfs deze mini-decoder compute-hongerig is (output-laag 512->26000), en dat een echt taalmodel zelf-trainen ver buiten wat een gratis mini-host kan.
+
 ## v3.1.3 (2026-08-28) — Meet-fundament: efficientie + kwaliteit meetbaar (zelf-verbetering fase 1)
 
 Fase 1 van gated zelf-verbetering: het meet-fundament. Puur meten, geen veld-dynamica gewijzigd (projectregel 5).
