@@ -5,6 +5,8 @@ Lucy is headless en nergens van afhankelijk: één `Dockerfile`-container, poort
 haar op elke container-host draaien. Deze gids beschrijft de aanbevolen gratis 24/7-optie:
 een **Oracle Cloud Always-Free VM**. Geen DigitalOcean, geen deploy-pipeline, geen lock-in —
 dezelfde image verhuist morgen naar een andere host zonder één regel codewijziging.
+Gratis is hier een **harde regel**, geen voorkeur (zie [invariant gratis-forever](invariants/gratis-forever.md)):
+kies altijd een gratis tier, verhuis liever dan te betalen.
 
 > **Vercel/serverless kan dit NIET.** Lucy is een continu, staatvol proces (eeuwig tikkende
 > loop + ~34MB veld in geheugen + achtergrond-training). Serverless platformen draaien korte,
@@ -13,10 +15,14 @@ dezelfde image verhuist morgen naar een andere host zonder één regel codewijzi
 
 ## Waarom Oracle Always Free
 
-Een écht gratis VM met genoeg RAM en geen slaap-op-inactiviteit. Let op: Oracle heeft de
-Always-Free Ampere A1 in **juni 2026 gehalveerd naar 2 OCPU / 12 GB** (was 4/24). 12 GB is nog
-ruim genoeg — Lucy's compose-limiet is 6 GB. Alternatieven die ook persistente containers
-draaien: Fly.io / Render / Koyeb, maar hun gratis tiers slapen of zijn krap.
+Een écht gratis VM zonder slaap-op-inactiviteit. Oracle biedt twee always-free vormen:
+**E2.1.Micro** (x86, 1 OCPU / 1 GB — altijd beschikbaar, de gegarandeerd-gratis basis) en
+**Ampere A1** (ARM, tot 2 OCPU / 12 GB gratis sinds de halvering van juni 2026, maar vaak
+capaciteit-geblokkeerd — de gratis upgrade). De `docker-compose.yml` legt geen CPU/RAM-limieten
+meer op (die braken op hosts met <4 vCPU), dus dezelfde image draait op beide. Op 1 GB is swap
+nodig (staat in de cloud-init); Lucy draait dan, maar traag — de oplossing is een grotere
+*gratis* host, nooit een betaalde. Alternatieven met persistente containers: Fly.io / Render /
+Koyeb, maar hun gratis tiers slapen of zijn krap.
 
 ## Eerlijke valkuilen (lees dit eerst)
 

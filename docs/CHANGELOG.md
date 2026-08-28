@@ -1,5 +1,13 @@
 # Lucy Changelog
 
+## v3.1.2 (2026-08-28) — Gratis-forever invariant + deploy-portabiliteit
+
+Governance- en deploy-ronde (geen cognitie-wijziging).
+
+- **Nieuwe harde invariant [gratis-forever](invariants/gratis-forever.md)** ([ADR 0010](decisions/0010-gratis-forever.md)): Lucy draait uitsluitend op permanent-gratis infra; nooit een betaalde resource; `SERVER_COST_CENTS` blijft 0; bij een vol of wegvallende gratis host verhuizen in plaats van betalen. Verankerd in CLAUDE.md (regel 7), MAP.md en de operationele docs.
+- **Deploy-portabiliteit:** de `cpus: "4.0"`-limiet in `docker-compose.yml` verwijderd — die brak container-creatie op hosts met <4 vCPU ("range of CPUs is from 0.01 to 2.00", o.a. Oracle E2.1.Micro). Resource-limits weg voor portabiliteit; swap in de cloud-init vangt geheugenpieken.
+- **Docs bijgewerkt** naar de feitelijke gratis-deployment: Oracle Always-Free E2.1.Micro als gegarandeerd-gratis basis, A1 als gratis upgrade. Verouderde "compose-limiet 6 GB" en vaste-host-verwijzingen gecorrigeerd.
+
 ## v3.1.1 (2026-08-27) — Audit-ronde: ingestion, panics, persistentie, federatie, SSRF
 
 Vervolg-fixronde op v3.1.0. Multi-agent audit per subsysteem, elke bevinding adversarieel

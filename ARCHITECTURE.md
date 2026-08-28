@@ -82,6 +82,7 @@ From F follows:
 - **Poort:** `$PORT` op `0.0.0.0` (default 8080) — nooit hardcoded, nooit localhost.
 - **Persistentie:** named volume óf GitHub-release-backup (host-onafhankelijk herstel bij boot).
 - **Config:** zero verplicht. Alle env-vars optioneel met fail-soft defaults.
+- **Kosten:** gratis, altijd — uitsluitend permanent-gratis infra, nooit een betaalde resource (harde invariant, zie [gratis-forever](docs/invariants/gratis-forever.md) / [ADR 0010](docs/decisions/0010-gratis-forever.md)).
 
 ## Field Architecture
 

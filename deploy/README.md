@@ -1,14 +1,18 @@
 # deploy/ — Lucy geautomatiseerd opstarten
 
 Lucy is provider-agnostisch: één `Dockerfile`-container die overal draait. `cloud-init.yaml`
-automatiseert het opstarten op een verse VM. Wat een script WEL en NIET kan:
+automatiseert het opstarten op een verse VM.
+
+> **Alleen gratis infra** — harde regel, zie [gratis-forever](../invariants/gratis-forever.md). Kies always-free shapes (Oracle E2.1.Micro of A1), nooit een betaalde instance.
+
+Wat een script WEL en NIET kan:
 
 | | Kan een script? |
 |---|---|
-| Cloud-account aanmaken | ❌ Nee — mens-gated (browser + creditcard/ID-verificatie, tegen abuse) |
-| VM aanmaken | ⚠️ Ja, met OCI CLI/Terraform (vereist API-credentials, dus eerst een account) |
-| Docker + Lucy installeren en starten op de VM | ✅ Ja — dat doet `cloud-init.yaml` op de eerste boot |
-| Cloud-firewall openen (VCN Security List) | ⚠️ Handmatig (1 console-klik) of via CLI |
+| Cloud-account aanmaken | Nee — mens-gated (browser + creditcard/ID-verificatie, tegen abuse) |
+| VM aanmaken | Deels — met OCI CLI/Terraform (vereist API-credentials, dus eerst een account) |
+| Docker + Lucy installeren en starten op de VM | Ja — dat doet `cloud-init.yaml` op de eerste boot |
+| Cloud-firewall openen (VCN Security List) | Deels — handmatig (1 console-klik) of via CLI |
 
 ## Manier A — cloud-init plakken (geen SSH, geen CLI nodig)
 

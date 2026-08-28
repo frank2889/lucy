@@ -1,6 +1,6 @@
 # Lucy — Claude/agent briefing
 
-Lucy is een zelf-evoluerend samenveld-AI in Rust. Live op [lucy.world](https://lucy.world). Geen LLM — een continu veldsysteem met ~20.000 `FieldPoint`s, ignition-gedreven selectie, en snapshot-gebaseerde persistentie.
+Lucy is een zelf-evoluerend samenveld-AI in Rust. Draait gratis, headless en provider-agnostisch — geen vaste host. Geen LLM — een continu veldsysteem met duizenden `FieldPoint`s, ignition-gedreven selectie, en snapshot-gebaseerde persistentie.
 
 **Voor elke taak begint het hier.** Deze file is de kortste weg naar begrip en de plattegrond voor alle andere docs.
 
@@ -39,6 +39,9 @@ Eén variabele per fase. Causaliteit bewijsbaar. Geen speculatieve bundel-fixes.
 
 ### 6. Evidence-based, niet vermoedens
 Trigger-condities vooraf definiëren, live meten, dán pas activeren. "Lucy zit misschien vast" is geen trigger. "`score_cv < 0.05` én `d3_ratio > 0.5`" is wel een trigger.
+
+### 7. Gratis-forever (kosteloos, altijd)
+Zie [docs/invariants/gratis-forever.md](docs/invariants/gratis-forever.md). Lucy draait uitsluitend op permanent-gratis infra — nooit een betaalde resource, nooit een creditcard-belasting. Valt een gratis host weg, dan verhuizen naar een andere gratis host, niet betalen. `SERVER_COST_CENTS` blijft 0. Een wijziging die dit breekt verdient veto (net als de competitie-invariant). Zie [ADR 0010](docs/decisions/0010-gratis-forever.md).
 
 ## Documentatie-structuur
 

@@ -98,6 +98,8 @@ Alleen een JSON-API. Ze draait standalone op elke container-host of gratis PaaS.
 
 ## Draaien — cloud-only, nooit lokaal
 
+> **Gratis, altijd — harde regel.** Lucy draait uitsluitend op permanent-gratis infra (always-free VM's, gratis PaaS binnen limieten). Nooit een betaalde resource, nooit een creditcard-belasting; valt een gratis host weg, dan verhuist ze naar een andere gratis host. Zie [invariant gratis-forever](docs/invariants/gratis-forever.md).
+
 Lucy draait niet op een laptop of een machine die jij beheert. Het platform bouwt de
 `Dockerfile` remote en draait de container; jij pusht alleen naar git. Zero verplichte config.
 

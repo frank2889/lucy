@@ -28,9 +28,11 @@ Agents en GPT-reviews beginnen met deze MAP, springen dan naar één specifiek b
 - [0007 — Concept-driven goals](decisions/0007-concept-driven-goals.md) — v2.6.16, vrije wil: goals uit GNW-output
 - [0008 — Autonomous organism: epistemic awareness + immortality](decisions/0008-autonomous-organism.md) — v2.6.17, zelfbewustzijn + GitHub backup
 - [0009 — Tension-runaway root-cause](decisions/0009-tension-runaway-rootcause.md) — v3.1.0, error_var ontkoppeld van free_energy (breekt de kwadratische 1e30-explosie)
+- [0010 — Gratis-forever](decisions/0010-gratis-forever.md) — v3.1.2, kosteloos draaien wordt een harde invariant
 
 ### Invariants
 - [Competitie-invariant](invariants/competition.md) — geen volledige activatie zonder competitie
+- [Gratis-forever](invariants/gratis-forever.md) — Lucy draait uitsluitend op gratis infra, nooit betaald
 
 ### Referentie
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — systeem-overzicht (root)
