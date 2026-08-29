@@ -1,5 +1,15 @@
 # Lucy Changelog
 
+## v3.1.6 (2026-08-29) — Meetlat versterkt: 26 probes in 4 categorieen
+
+Optimalisatieplan fase 0. Aanleiding: de 5 introspectie-probes satureerden (identieke mean_score batch-op-batch bij tick 10000-15000) en konden een echt plateau niet onderscheiden van groei die buiten hun blikveld valt. Puur meten, geen gedragswijziging.
+
+- Probe-set uitgebreid van 5 naar 26 (bootstrap-only meetinstrument): "zelf" (de originele 5, ongewijzigd op id 0-4 zodat die reeks longitudinaal doorloopt), "feit" (10 kennisvragen uit haar crawl-domeinen), "begrip" (6 conceptvragen), "retrieval" (5 gegrond-in-gelezen-werk vragen).
+- Elke jsonl-rij krijgt een `category`; oude rijen zonder veld tellen als "zelf" (klopt: id 0-4).
+- `/capability` rapporteert per-categorie deelscores per batch en per-categorie trends (slope + label), naast het bestaande totaal. Zo is zichtbaar WAAR ze groeit of stilstaat.
+- Let op: het overall `mean_score` krijgt door de bredere set een nieuwe baseline; vergelijk longitudinaal via `quality.by_category.zelf`.
+- Unit-tests: array-consistentie en categorie-aggregatie (16/16 groen).
+
 ## v3.1.5 (2026-08-28) — Gated zelftuning (zelf-verbetering fase 2)
 
 Fase 2: de zelf-verbeterlus is rond. Lucy's al-actieve lambda/alpha/beta-tuning (`self_modify::tune_hyperparameters`) is nu GEMETEN en REVERSIBEL. Strikt veiliger dan voorheen — het voegt een terugdraai-wachter toe aan een gedrag dat al draaide; het kan alleen een aanpassing die schaadde ongedaan maken.

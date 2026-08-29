@@ -17,26 +17,90 @@ use crate::retrieval::RetrievalStore;
 use lucy_state::{Field, DIM};
 use std::sync::atomic::AtomicBool;
 
-/// Vaste meetvragen — géén trainingsdata, alleen probe.
-/// Deze lijst is intentioneel klein en stabiel: we willen longitudinaal vergelijken.
-pub const PROBE_QUESTIONS: [&str; 5] = [
+/// Vaste meetvragen — géén trainingsdata, alleen probe. BOOTSTRAP-ONLY meetinstrument
+/// (geen kennisbron; Lucy leert er niet van, audit_only voorkomt side-effects).
+///
+/// v3.1.6: uitgebreid van 5 naar 26, in 4 categorieën, omdat de 5 introspectie-probes
+/// satureerden (identieke scores batch-op-batch) en een plateau niet konden onderscheiden
+/// van onzichtbare groei. De ORIGINELE 5 blijven op id 0-4 met exact dezelfde verwachtingen,
+/// zodat de bestaande longitudinale reeks (categorie "zelf") gewoon doorloopt.
+pub const PROBE_QUESTIONS: [&str; 26] = [
+    // categorie "zelf" — origineel, id 0-4
     "wie ben je",
     "wat voel je nu",
     "wat doe je nu",
     "wat probeer je te begrijpen",
     "wat is recent veranderd in jezelf",
+    // categorie "feit" — kennis uit de domeinen die ze crawlt, id 5-14
+    "wat is een elektron",
+    "wat is het higgs boson",
+    "wat is dna",
+    "wat is een ster",
+    "wat is zwaartekracht",
+    "wat is een virus",
+    "wat is water",
+    "wat is de zon",
+    "wat is een taal",
+    "wat is energie",
+    // categorie "begrip" — concepten, id 15-20
+    "wat is leren",
+    "wat is geheugen",
+    "wat is een voorspelling",
+    "wat is entropie",
+    "wat is bewustzijn",
+    "wat is wetenschap",
+    // categorie "retrieval" — gegrond in wat ze gelezen heeft, id 21-25
+    "wat heb je geleerd over natuurkunde",
+    "wat heb je geleerd over het universum",
+    "wat heb je gelezen over biologie",
+    "welke bronnen gebruik je",
+    "wat weet je over de aarde",
+];
+
+/// Categorie per probe (parallel aan PROBE_QUESTIONS). Voor per-categorie deelscores
+/// in /capability, zodat zichtbaar is WAAR ze groeit of stilstaat.
+pub const PROBE_CATEGORY: [&str; 26] = [
+    "zelf", "zelf", "zelf", "zelf", "zelf",
+    "feit", "feit", "feit", "feit", "feit", "feit", "feit", "feit", "feit", "feit",
+    "begrip", "begrip", "begrip", "begrip", "begrip", "begrip",
+    "retrieval", "retrieval", "retrieval", "retrieval", "retrieval",
 ];
 
 /// Verwachte kernwoorden per probe — een BEWUST ZWAKKE maar stabiele correctheids-proxy.
-/// Substring-match (dus "leer" matcht "leren"/"geleerd"). Klein en stabiel gehouden zodat we
+/// Substring-match (dus "leer" matcht "leren"/"geleerd"). Stabiel gehouden zodat we
 /// longitudinaal kunnen vergelijken; dit meet of het antwoord relevante concepten bevat,
 /// niet algemene intelligentie. Zie ook de eerlijke beperking in `score_probe`.
-pub const PROBE_EXPECTED: [&[&str]; 5] = [
+pub const PROBE_EXPECTED: [&[&str]; 26] = [
+    // zelf (ONGEWIJZIGD t.o.v. v3.1 — reeks-continuiteit)
     &["lucy", "veld", "leer"],
     &["nieuwsgier", "tevreden", "frustr", "voel"],
     &["leer", "denk", "veld", "verwerk"],
     &["begrijp", "concept", "patroon"],
     &["veranderd", "geleerd", "nieuw", "groei"],
+    // feit
+    &["deeltje", "lading", "atoom", "negatie"],
+    &["deeltje", "massa", "veld", "cern"],
+    &["gen", "cel", "erfelijk", "molecu"],
+    &["gas", "licht", "fusie", "zon", "kern"],
+    &["kracht", "massa", "aantrek", "val"],
+    &["cel", "besmet", "ziek", "replic", "rna"],
+    &["molecu", "vloei", "zuurstof", "waterstof"],
+    &["ster", "licht", "energie", "warm"],
+    &["woord", "communic", "spreek", "teken"],
+    &["arbeid", "kracht", "warmte", "behoud", "joule"],
+    // begrip
+    &["kennis", "ervaring", "verander", "patro", "oefen"],
+    &["onthoud", "opslag", "herinner", "informatie"],
+    &["toekomst", "verwacht", "model", "schat"],
+    &["wanorde", "thermo", "informatie", "toeval"],
+    &["ervaring", "zelf", "waarneem", "denk"],
+    &["onderzoek", "experiment", "kennis", "hypothese", "bewijs"],
+    // retrieval
+    &["deeltje", "energie", "kracht", "quantum", "fysica", "natuurkunde"],
+    &["ster", "planeet", "melkweg", "heelal", "universum"],
+    &["cel", "leven", "organisme", "dna", "evolutie"],
+    &["wikipedia", "cern", "arxiv", "web", "pagina", "bron"],
+    &["planeet", "water", "leven", "zon", "rond"],
 ];
 
 /// Composietscore 0..1 voor één probe: correctheid (kernwoord-overlap) + coherentie +
@@ -121,6 +185,8 @@ pub fn format_jsonl_row(
         "think_rounds": result.think_rounds,
         // v3.1 capaciteits-score (0..1) — zie score_probe voor de samenstelling
         "score": score,
+        // v3.1.6: categorie voor deelscores; oude rijen zonder dit veld zijn "zelf" (id 0-4)
+        "category": PROBE_CATEGORY.get(question_id).copied().unwrap_or("zelf"),
         // fase-1 meet-fundament: resource-context zodat efficientie (resultaat per resource)
         // berekenbaar wordt. Alle rijen in dezelfde batch delen deze waarden.
         "tokens_processed": res.tokens_processed,
@@ -227,6 +293,8 @@ pub fn capability_report(content: &str) -> serde_json::Value {
     struct Batch {
         tick: u64, n: u32, score_sum: f64, fallback: u32, self_ret: u32,
         tokens: u64, pages: u64, points: u64, couplings: u64, vocab: u64, free_energy: f64,
+        // v3.1.6: per-categorie (som, n) — oude rijen zonder category-veld zijn "zelf" (id 0-4)
+        cats: std::collections::BTreeMap<String, (f64, u32)>,
     }
     let mut batches: Vec<Batch> = Vec::new();
     for line in content.lines() {
@@ -235,6 +303,7 @@ pub fn capability_report(content: &str) -> serde_json::Value {
         let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
         let fallback = v.get("fallback").and_then(|x| x.as_bool()).unwrap_or(false);
         let prov = v.get("provenance").and_then(|x| x.as_str()).unwrap_or("");
+        let category = v.get("category").and_then(|x| x.as_str()).unwrap_or("zelf");
         let same = batches.last().map(|b| b.tick == tick).unwrap_or(false);
         if !same {
             batches.push(Batch {
@@ -245,6 +314,7 @@ pub fn capability_report(content: &str) -> serde_json::Value {
                 couplings: v.get("n_couplings").and_then(|x| x.as_u64()).unwrap_or(0),
                 vocab: v.get("vocab_size").and_then(|x| x.as_u64()).unwrap_or(0),
                 free_energy: v.get("avg_free_energy").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                cats: std::collections::BTreeMap::new(),
             });
         }
         let b = batches.last_mut().unwrap();
@@ -252,6 +322,9 @@ pub fn capability_report(content: &str) -> serde_json::Value {
         b.score_sum += score;
         if fallback { b.fallback += 1; }
         if prov == "retrieval_self" { b.self_ret += 1; }
+        let e = b.cats.entry(category.to_string()).or_insert((0.0, 0));
+        e.0 += score;
+        e.1 += 1;
     }
 
     let mut series: Vec<serde_json::Value> = Vec::with_capacity(batches.len());
@@ -279,9 +352,13 @@ pub fn capability_report(content: &str) -> serde_json::Value {
                 eff_ticks_series.push(e);
             }
         }
+        let by_category: serde_json::Map<String, serde_json::Value> = b.cats.iter()
+            .map(|(c, (sum, n))| (c.clone(), serde_json::json!(sum / (*n).max(1) as f64)))
+            .collect();
         series.push(serde_json::json!({
             "tick": b.tick,
             "mean_score": mean_score,
+            "by_category": by_category,
             "fallback_rate": b.fallback as f64 / n,
             "retrieval_self_rate": b.self_ret as f64 / n,
             "n": b.n,
@@ -298,6 +375,24 @@ pub fn capability_report(content: &str) -> serde_json::Value {
 
     let score_ys: Vec<f64> = batches.iter().map(|b| b.score_sum / b.n.max(1) as f64).collect();
     let score_slope = slope(&score_ys);
+
+    // v3.1.6: trend per categorie (alleen over batches waarin de categorie voorkomt).
+    // "zelf" loopt longitudinaal door over de meter-upgrade heen; nieuwe categorieen
+    // starten hun eigen reeks. Zo is plateau-vs-groei per dimensie te onderscheiden.
+    let mut cat_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for b in &batches { for c in b.cats.keys() { cat_names.insert(c.clone()); } }
+    let category_trends: serde_json::Map<String, serde_json::Value> = cat_names.iter().map(|c| {
+        let ys: Vec<f64> = batches.iter()
+            .filter_map(|b| b.cats.get(c).map(|(sum, n)| sum / (*n).max(1) as f64))
+            .collect();
+        let s = slope(&ys);
+        (c.clone(), serde_json::json!({
+            "batches": ys.len(),
+            "latest_mean": ys.last().copied(),
+            "slope_per_batch": s,
+            "trend": trend_label(s),
+        }))
+    }).collect();
     let eff_slope = slope(&eff_tokens_series);
     let latest = series.last().cloned().unwrap_or(serde_json::Value::Null);
     let tail: Vec<serde_json::Value> = series.iter().rev().take(240).cloned().collect::<Vec<_>>()
@@ -308,6 +403,7 @@ pub fn capability_report(content: &str) -> serde_json::Value {
         "quality": {
             "score_slope_per_batch": score_slope,
             "trend": trend_label(score_slope),
+            "by_category": category_trends,
         },
         "efficiency": {
             "note": "capability-score per verbruikte resource; slope>0 = meer resultaat uit minder over tijd",
@@ -345,5 +441,37 @@ mod tests {
     fn capability_report_leeg() {
         let rep = capability_report("");
         assert_eq!(rep["batches_total"], 0);
+    }
+
+    #[test]
+    fn probe_arrays_consistent() {
+        assert_eq!(PROBE_QUESTIONS.len(), PROBE_EXPECTED.len());
+        assert_eq!(PROBE_QUESTIONS.len(), PROBE_CATEGORY.len());
+        // origineel 5 ongewijzigd op id 0-4 (reeks-continuiteit)
+        assert_eq!(PROBE_QUESTIONS[0], "wie ben je");
+        assert_eq!(PROBE_CATEGORY[0], "zelf");
+        assert_eq!(PROBE_EXPECTED[0], &["lucy", "veld", "leer"]);
+        // elke probe heeft verwachtingen en een categorie
+        for i in 0..PROBE_QUESTIONS.len() {
+            assert!(!PROBE_EXPECTED[i].is_empty(), "probe {} zonder expected", i);
+            assert!(["zelf", "feit", "begrip", "retrieval"].contains(&PROBE_CATEGORY[i]));
+        }
+    }
+
+    #[test]
+    fn capability_report_per_categorie() {
+        // Batch met 2 categorieen; oude rij ZONDER category-veld telt als "zelf".
+        let jsonl = concat!(
+            r#"{"tick":5000,"score":0.4,"fallback":false,"provenance":"field_generated","category":"feit","tokens_processed":10000}"#, "\n",
+            r#"{"tick":5000,"score":0.8,"fallback":false,"provenance":"field_generated","category":"feit","tokens_processed":10000}"#, "\n",
+            r#"{"tick":5000,"score":0.5,"fallback":false,"provenance":"field_generated","tokens_processed":10000}"#, "\n",
+        );
+        let rep = capability_report(jsonl);
+        assert_eq!(rep["batches_total"], 1);
+        let feit = rep["series"][0]["by_category"]["feit"].as_f64().unwrap();
+        assert!((feit - 0.6).abs() < 1e-9, "feit-mean={}", feit);
+        let zelf = rep["series"][0]["by_category"]["zelf"].as_f64().unwrap();
+        assert!((zelf - 0.5).abs() < 1e-9, "zelf-mean={}", zelf);
+        assert_eq!(rep["quality"]["by_category"]["feit"]["batches"], 1);
     }
 }
